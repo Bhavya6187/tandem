@@ -176,10 +176,13 @@ class StateStore:
             )
 
     def archive_session(self, tandem_id: str) -> None:
-        with self._conn:
-            self._conn.execute(
-                "UPDATE sessions SET archived = 1 WHERE tandem_id = ?", (tandem_id,)
-            )
+        """No-op: archiving is vestigial.
+
+        Sessions are no longer hidden from a cwd -- `archived` is gone from the
+        schema and `latest_session_for_cwd` does not filter on it. `start`'s only
+        caller gets the same observable result by creating a new session, which
+        wins the `last_used_at DESC` ordering. Removed with `start`.
+        """
 
     # -- sync cursors --------------------------------------------------------
 
