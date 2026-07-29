@@ -158,6 +158,41 @@ def status() -> None:
             click.echo(f"  quarantine: {qdir} (has entries)")
 
 
+@main.command()
+@click.argument("tandem_id", required=False)
+def resume(tandem_id: str | None) -> None:
+    """Resume a paired session (most recent for this directory by default).
+
+    The id is printed when you leave a session, and shown by `tandem status`.
+    """
+    cwd = _cwd()
+    _check_versions(warn_only=True)
+    with StateStore() as store:
+        if tandem_id is None:
+            session = store.latest_session_for_cwd(cwd)
+            if session is None:
+                click.echo(
+                    "No tandem session for this directory. Run `tandem` to start one.",
+                    err=True,
+                )
+                sys.exit(1)
+        else:
+            session = store.get_session(tandem_id)
+            if session is None:
+                click.secho(f"error: no tandem session {tandem_id!r}.", fg="red", err=True)
+                sys.exit(1)
+            if session.cwd != cwd:
+                click.secho(
+                    f"error: session {tandem_id} belongs to {session.cwd}; "
+                    "run `tandem resume` from there.",
+                    fg="red",
+                    err=True,
+                )
+                sys.exit(1)
+        store.touch_used(session.tandem_id)
+    sys.exit(_enter_session(session))
+
+
 def _default_sink_factory(store, session, source):
     """Sync engine by default; TANDEM_LOG_EVENTS=1 switches to the debug
     event logger (no shadow writes)."""

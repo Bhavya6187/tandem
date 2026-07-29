@@ -79,3 +79,61 @@ def test_one_shot_without_session_hints_tandem(homes, ok_versions):
     assert r.exit_code == 1
     # click >= 8.2 (repo has 8.4.2): err=True output lands in r.stderr
     assert "Run `tandem` to start one" in r.stderr
+
+
+def _mk_session(cwd, active="claude", n=0):
+    with StateStore() as store:
+        return store.create_session(str(cwd), active, f"c-{n}", f"x-{n}")
+
+
+def test_resume_picks_most_recently_used(homes, ok_versions, entered):
+    s1 = _mk_session(homes, n=1)
+    _mk_session(homes, n=2)
+    with StateStore() as store:
+        store.touch_used(s1.tandem_id)
+    r = click.testing.CliRunner().invoke(cli.main, ["resume"])
+    assert r.exit_code == 0
+    assert entered[0].tandem_id == s1.tandem_id
+
+
+def test_resume_by_id(homes, ok_versions, entered):
+    s1 = _mk_session(homes, n=1)
+    _mk_session(homes, n=2)
+    r = click.testing.CliRunner().invoke(cli.main, ["resume", s1.tandem_id])
+    assert r.exit_code == 0
+    assert entered[0].tandem_id == s1.tandem_id
+    with StateStore() as store:  # resume bumps last_used_at
+        assert (
+            store.latest_session_for_cwd(str(homes)).tandem_id == s1.tandem_id
+        )
+
+
+def test_resume_unknown_id_errors(homes, ok_versions, entered):
+    r = click.testing.CliRunner().invoke(cli.main, ["resume", "nope00000000"])
+    assert r.exit_code == 1
+    assert entered == []
+
+
+def test_resume_id_from_other_directory_errors(homes, ok_versions, entered, tmp_path):
+    other_dir = tmp_path / "elsewhere"
+    other_dir.mkdir()
+    s = _mk_session(other_dir)
+    r = click.testing.CliRunner().invoke(cli.main, ["resume", s.tandem_id])
+    assert r.exit_code == 1
+    assert str(other_dir) in r.stderr  # tells the user where it lives
+    assert entered == []
+
+
+def test_resume_with_no_sessions_hints_tandem(homes, ok_versions, entered):
+    r = click.testing.CliRunner().invoke(cli.main, ["resume"])
+    assert r.exit_code == 1
+    assert "Run `tandem` to start one" in r.stderr
+
+
+def test_resume_warns_but_proceeds_without_binaries(homes, entered, monkeypatch):
+    s = _mk_session(homes)
+    monkeypatch.setattr(cli, "get_adapter", lambda hid: _NoBin())
+    r = click.testing.CliRunner().invoke(cli.main, ["resume"])
+    assert r.exit_code == 0  # warn-only: resume is not blocked like pairing
+    assert "warning:" in r.stderr
+    assert entered[0].tandem_id == s.tandem_id
