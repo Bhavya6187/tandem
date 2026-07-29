@@ -236,7 +236,7 @@ def switch() -> None:
                 fg="yellow",
                 err=True,
             )
-        click.echo("Run `tandem` to continue in the new harness.")
+        click.echo("Run `tandem resume` to continue in the new harness.")
 
 
 @main.command(name="run")

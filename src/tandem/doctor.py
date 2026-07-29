@@ -163,7 +163,7 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
             report.ok(f"{adapter.display_name}: {v}")
 
     if session is None:
-        report.fail("no tandem session for this directory (run `tandem start`)")
+        report.fail("no tandem session for this directory (run `tandem` to start one)")
         return report
 
     report.ok(
