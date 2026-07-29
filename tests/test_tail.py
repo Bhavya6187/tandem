@@ -119,7 +119,7 @@ class TestTailLoop:
 
         # restart: new store + loop resume from the persisted cursor
         with StateStore(db_path=db) as store:
-            session = store.session_for_cwd(str(tmp_path))
+            session = store.latest_session_for_cwd(str(tmp_path))
             write_line(transcript, claude_user("second prompt"))
             sink2 = CollectSink()
             loop2 = TailLoop(store, session, "claude", transcript, sink2)

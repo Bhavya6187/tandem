@@ -19,7 +19,7 @@ def _cwd() -> str:
 
 
 def _require_session(store: StateStore) -> PairedSession:
-    session = store.session_for_cwd(_cwd())
+    session = store.latest_session_for_cwd(_cwd())
     if session is None:
         click.echo("No tandem session for this directory. Run `tandem start` first.", err=True)
         sys.exit(1)
@@ -75,7 +75,7 @@ def start(active: str | None) -> None:
     cwd = _cwd()
     _check_versions()
     with StateStore() as store:
-        existing = store.session_for_cwd(cwd)
+        existing = store.latest_session_for_cwd(cwd)
         if existing is not None:
             click.echo(
                 f"A tandem session already exists here ({existing.tandem_id}, "
@@ -265,7 +265,7 @@ def doctor(live: bool) -> None:
     from .doctor import run_doctor
 
     with StateStore() as store:
-        session = store.session_for_cwd(_cwd())
+        session = store.latest_session_for_cwd(_cwd())
         report = run_doctor(store, session, live=live)
     icons = {"ok": ("✓", "green"), "warn": ("!", "yellow"), "fail": ("✗", "red")}
     for check in report.checks:
