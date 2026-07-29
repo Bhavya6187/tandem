@@ -166,8 +166,16 @@ def status() -> None:
 
 
 def _interactive() -> None:
-    click.echo("Interactive passthrough lands in M2.", err=True)
-    sys.exit(1)
+    from .runner import EventLogger, InteractiveRunner
+
+    with StateStore() as store:
+        session = _require_session(store)
+    _check_versions(warn_only=True)
+    runner = InteractiveRunner(
+        session,
+        sink_factory=lambda source: EventLogger(session.tandem_id, source),
+    )
+    sys.exit(runner.run())
 
 
 if __name__ == "__main__":

@@ -16,9 +16,33 @@ from pathlib import Path
 from typing import Any
 
 from .. import compat, paths
-from ..events import NormalizedEvent, SessionContext
+from ..events import (
+    AssistantMessage,
+    NormalizedEvent,
+    SessionContext,
+    SystemEvent,
+    Thinking,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
 from ..util import append_jsonl_fsync, git_branch, iso_now_ms
 from .base import HarnessAdapter
+
+
+def _stringify_block_content(content: Any) -> str:
+    """tool_result content is either a string or a list of content blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "text":
+                parts.append(c.get("text", ""))
+            elif isinstance(c, dict):
+                parts.append(f"<{c.get('type', 'block')}>")
+        return "\n".join(parts)
+    return "" if content is None else str(content)
 
 
 class ClaudeCodeAdapter(HarnessAdapter):
@@ -102,10 +126,100 @@ class ClaudeCodeAdapter(HarnessAdapter):
         }
         return ["--settings", json.dumps(settings)]
 
-    # -- parse / render (M2/M3) ----------------------------------------------
+    # -- parsing -------------------------------------------------------------
 
     def parse_entry(self, raw: dict[str, Any], ctx: SessionContext) -> list[NormalizedEvent]:
-        raise NotImplementedError  # lands with the sync engine milestone
+        """One transcript line -> normalized events. Never raises on shape
+        surprises; anything unrecognized degrades to a SystemEvent."""
+        ts = raw.get("timestamp")
+        etype = raw.get("type")
+
+        def sysev(subtype: str, text: str = "") -> SystemEvent:
+            return SystemEvent(
+                source="claude", timestamp=ts, turn_index=ctx.turn_index,
+                subtype=subtype, text=text,
+            )
+
+        if raw.get("isSidechain"):
+            return [sysev("sidechain")]
+
+        if etype == "user":
+            if raw.get("isMeta"):
+                return [sysev("meta_user")]
+            content = (raw.get("message") or {}).get("content")
+            if isinstance(content, str):
+                ctx.turn_index += 1
+                return [
+                    UserMessage(
+                        source="user", timestamp=ts,
+                        turn_index=ctx.turn_index, text=content,
+                    )
+                ]
+            events: list[NormalizedEvent] = []
+            structured = raw.get("toolUseResult")
+            for block in content or []:
+                btype = block.get("type")
+                if btype == "tool_result":
+                    events.append(
+                        ToolResult(
+                            source="claude", timestamp=ts,
+                            turn_index=ctx.turn_index,
+                            call_id=block.get("tool_use_id"),
+                            output=_stringify_block_content(block.get("content")),
+                            is_error=bool(block.get("is_error")),
+                            structured=structured if isinstance(structured, dict) else None,
+                        )
+                    )
+                elif btype == "text":
+                    ctx.turn_index += 1
+                    events.append(
+                        UserMessage(
+                            source="user", timestamp=ts,
+                            turn_index=ctx.turn_index,
+                            text=block.get("text", ""),
+                        )
+                    )
+                else:
+                    events.append(sysev(f"user_block:{btype}"))
+            return events or [sysev("user_empty")]
+
+        if etype == "assistant":
+            msg = raw.get("message") or {}
+            events = []
+            for block in msg.get("content") or []:
+                btype = block.get("type")
+                if btype == "text":
+                    events.append(
+                        AssistantMessage(
+                            source="claude", timestamp=ts,
+                            turn_index=ctx.turn_index,
+                            text=block.get("text", ""),
+                            model=msg.get("model"),
+                        )
+                    )
+                elif btype == "tool_use":
+                    events.append(
+                        ToolCall(
+                            source="claude", timestamp=ts,
+                            turn_index=ctx.turn_index,
+                            call_id=block.get("id", ""),
+                            tool=block.get("name", ""),
+                            arguments=block.get("input") or {},
+                        )
+                    )
+                elif btype in ("thinking", "redacted_thinking"):
+                    events.append(
+                        Thinking(source="claude", timestamp=ts, turn_index=ctx.turn_index)
+                    )
+                else:
+                    events.append(sysev(f"assistant_block:{btype}"))
+            return events or [sysev("assistant_empty")]
+
+        if etype == "system" and raw.get("subtype") == "compact_boundary":
+            return [sysev("compaction", "conversation was compacted")]
+
+        # attachment, queue-operation, last-prompt, summary, system, unknown
+        return [sysev(f"claude:{etype}")]
 
     def render_events(
         self, events: list[NormalizedEvent], ctx: SessionContext

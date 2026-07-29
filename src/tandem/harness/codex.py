@@ -14,7 +14,16 @@ from pathlib import Path
 from typing import Any
 
 from .. import compat, paths
-from ..events import NormalizedEvent, SessionContext
+from ..events import (
+    AssistantMessage,
+    NormalizedEvent,
+    SessionContext,
+    SystemEvent,
+    Thinking,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
 from ..util import append_jsonl_fsync, iso_now_ms, uuid7
 from .base import HarnessAdapter
 
@@ -121,10 +130,101 @@ class CodexAdapter(HarnessAdapter):
         # lands in $0 and is ignored.
         return ["-c", f'notify=["/bin/sh","-c","touch \'{sentinel}\'"]']
 
-    # -- parse / render (M2/M3) ----------------------------------------------
+    # -- parsing -------------------------------------------------------------
 
     def parse_entry(self, raw: dict[str, Any], ctx: SessionContext) -> list[NormalizedEvent]:
-        raise NotImplementedError
+        """One rollout line -> normalized events.
+
+        Sources of truth per event class (to avoid the duplication built into
+        the rollout format):
+        - user prompts:      event_msg/user_message (response_item role=user
+                             also carries injected env context, so it's skipped)
+        - assistant text:    response_item/message role=assistant
+        - tool activity:     response_item function_call / custom_tool_call and
+                             their *_output lines; event_msg/patch_apply_end
+                             only enriches the pending call with structured
+                             change data.
+        """
+        ts = raw.get("timestamp")
+        etype = raw.get("type")
+        payload = raw.get("payload") or {}
+        ptype = payload.get("type")
+
+        def sysev(subtype: str, text: str = "") -> SystemEvent:
+            return SystemEvent(
+                source="codex", timestamp=ts, turn_index=ctx.turn_index,
+                subtype=subtype, text=text,
+            )
+
+        if etype == "response_item":
+            if ptype == "message":
+                role = payload.get("role")
+                if role != "assistant":
+                    return [sysev(f"context_message:{role}")]
+                text = "\n".join(
+                    b.get("text", "")
+                    for b in payload.get("content") or []
+                    if isinstance(b, dict) and b.get("type") == "output_text"
+                )
+                phase = "final" if payload.get("phase") == "final_answer" else "commentary"
+                return [
+                    AssistantMessage(
+                        source="codex", timestamp=ts, turn_index=ctx.turn_index,
+                        text=text, phase=phase,
+                    )
+                ]
+            if ptype == "reasoning":
+                return [Thinking(source="codex", timestamp=ts, turn_index=ctx.turn_index)]
+            if ptype in ("function_call", "custom_tool_call"):
+                return [
+                    ToolCall(
+                        source="codex", timestamp=ts, turn_index=ctx.turn_index,
+                        call_id=payload.get("call_id", ""),
+                        tool=payload.get("name", ""),
+                        arguments=payload.get("arguments", payload.get("input", "")),
+                    )
+                ]
+            if ptype in ("function_call_output", "custom_tool_call_output"):
+                call_id = payload.get("call_id")
+                pending = ctx.pending_calls.get(call_id or "", {})
+                structured = pending.pop("_structured", None) if pending else None
+                output = payload.get("output", "")
+                if not isinstance(output, str):
+                    output = str(output)
+                return [
+                    ToolResult(
+                        source="codex", timestamp=ts, turn_index=ctx.turn_index,
+                        call_id=call_id, output=output, structured=structured,
+                    )
+                ]
+            return [sysev(f"response_item:{ptype}")]
+
+        if etype == "event_msg":
+            if ptype == "task_started":
+                ctx.turn_index += 1
+                return [sysev("turn_start")]
+            if ptype == "user_message":
+                return [
+                    UserMessage(
+                        source="user", timestamp=ts, turn_index=ctx.turn_index,
+                        text=payload.get("message", ""),
+                    )
+                ]
+            if ptype == "patch_apply_end":
+                call_id = payload.get("call_id")
+                if call_id and call_id in ctx.pending_calls:
+                    ctx.pending_calls[call_id]["_structured"] = {
+                        "success": payload.get("success"),
+                        "changes": payload.get("changes"),
+                    }
+                return [sysev("patch_apply_end")]
+            if ptype == "task_complete":
+                return [sysev("turn_end", payload.get("last_agent_message") or "")]
+            # agent_message duplicates response_item/message; token_count etc.
+            return [sysev(f"event_msg:{ptype}")]
+
+        # session_meta, turn_context, world_state, unknown
+        return [sysev(f"codex:{etype}")]
 
     def render_events(
         self, events: list[NormalizedEvent], ctx: SessionContext
