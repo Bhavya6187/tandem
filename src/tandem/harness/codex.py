@@ -126,6 +126,17 @@ class CodexAdapter(HarnessAdapter):
         return [self.binary, "exec", "--skip-git-repo-check", "resume", session_id, prompt]
 
     def hook_argv_extra(self, sentinel: Path) -> list[str]:
+        # A -c notify=... override would silently replace a notify handler
+        # the user already configured (observed in the wild: Codex Computer
+        # Use registers one). In that case rely on fs-watching alone.
+        try:
+            import tomllib
+
+            with open(paths.codex_home() / "config.toml", "rb") as f:
+                if tomllib.load(f).get("notify"):
+                    return []
+        except (OSError, ValueError):
+            pass
         # notify appends a JSON payload argument; route through sh -c so it
         # lands in $0 and is ignored.
         return ["-c", f'notify=["/bin/sh","-c","touch \'{sentinel}\'"]']

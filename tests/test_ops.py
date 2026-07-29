@@ -26,7 +26,7 @@ class TestSwitch:
         write_line(env.claude_shadow, claude_user("last words before switch"))
         write_line(env.claude_shadow, claude_assistant([{"type": "text", "text": "ok!"}]))
 
-        new_active, problems = ops.switch_session(env.store, env.session)
+        new_active, problems, _mem = ops.switch_session(env.store, env.session)
         assert new_active == "codex"
         assert problems == []
         session = env.refresh()
@@ -67,7 +67,7 @@ class TestSwitch:
         ops.switch_session(env.store, env.session)
         session = env.refresh()
         assert session.active == "codex"
-        new_active, problems = ops.switch_session(env.store, session)
+        new_active, problems, _mem = ops.switch_session(env.store, session)
         assert new_active == "claude"
         assert problems == []
         assert env.refresh().active == "claude"

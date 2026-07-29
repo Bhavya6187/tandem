@@ -1,14 +1,17 @@
-"""Transcript validation ("dry resume"): structural checks that a session
-file is something its CLI can load, without spending a model call.
+"""tandem doctor: is this pairing healthy, and would both sessions resume?
 
-`tandem doctor` (M5) layers version checks, pairing checks and an optional
---live mode (real one-word resume, costs one model call per harness) on top
-of validate_transcript.
+validate_transcript() is the structural "dry resume" — it checks that a
+session file is something its CLI can load without spending a model call.
+run_doctor() layers version checks, pairing checks, sync-state checks and an
+optional live mode (a real one-word resume per harness — costs two model
+calls) on top.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 
 _CLAUDE_ENTRY_TYPES = {
@@ -110,3 +113,150 @@ def _validate_codex(entries: list[tuple[int, dict]], session_id: str | None) -> 
     if not any(e.get("type") == "response_item" for _, e in entries):
         problems.append("no response_item entries (model context would be empty)")
     return problems
+
+
+# -- full doctor -------------------------------------------------------------
+
+
+@dataclass
+class Check:
+    status: str  # 'ok' | 'warn' | 'fail'
+    message: str
+
+
+@dataclass
+class DoctorReport:
+    checks: list[Check] = field(default_factory=list)
+
+    def ok(self, msg: str) -> None:
+        self.checks.append(Check("ok", msg))
+
+    def warn(self, msg: str) -> None:
+        self.checks.append(Check("warn", msg))
+
+    def fail(self, msg: str) -> None:
+        self.checks.append(Check("fail", msg))
+
+    @property
+    def failed(self) -> bool:
+        return any(c.status == "fail" for c in self.checks)
+
+
+def run_doctor(store, session, live: bool = False) -> DoctorReport:
+    from . import compat, ops, paths
+    from .harness import get_adapter
+
+    report = DoctorReport()
+
+    for hid in ("claude", "codex"):
+        adapter = get_adapter(hid)
+        v = adapter.detect_version()
+        if v is None:
+            report.fail(f"{adapter.display_name}: not found on PATH")
+        elif not adapter.version_supported(v):
+            report.warn(
+                f"{adapter.display_name}: version {v!r} outside supported range "
+                f"(tested against {compat.COMPAT[hid].tested}); session formats "
+                f"may have drifted — treat sync results with suspicion"
+            )
+        else:
+            report.ok(f"{adapter.display_name}: {v}")
+
+    if session is None:
+        report.fail("no tandem session for this directory (run `tandem start`)")
+        return report
+
+    report.ok(
+        f"paired session {session.tandem_id} (active: "
+        f"{get_adapter(session.active).display_name})"
+    )
+
+    transcripts: dict[str, Path | None] = {}
+    for hid in ("claude", "codex"):
+        adapter = get_adapter(hid)
+        sid = getattr(session, f"{hid}_session_id")
+        if not sid:
+            report.warn(f"{hid}: session id pending (harness has not run yet)")
+            transcripts[hid] = None
+            continue
+        path = adapter.transcript_path(session.cwd, sid)
+        transcripts[hid] = path
+        if path is None:
+            if hid == session.active:
+                report.warn(f"{hid}: transcript not created yet (first run pending)")
+            else:
+                report.fail(f"{hid}: shadow transcript missing for session {sid}")
+            continue
+        problems = validate_transcript(hid, path, sid)
+        if problems:
+            for p in problems[:5]:
+                report.fail(f"{hid}: {p}")
+            if len(problems) > 5:
+                report.fail(f"{hid}: ... {len(problems) - 5} more problems")
+        else:
+            report.ok(f"{hid}: transcript resumable by structure ({path.name})")
+
+    for source in ("claude", "codex"):
+        cursor = store.get_cursor(session.tandem_id, source)
+        if cursor.pending.get("intent"):
+            report.warn(
+                f"sync from {source}: unresolved write intent (crash during "
+                f"append); it will be resolved automatically on next sync"
+            )
+        if cursor.failed_turns:
+            report.warn(
+                f"sync from {source}: {cursor.failed_turns} turn(s) fell back "
+                f"to placeholders"
+            )
+        behind = ops.unsynced_lines(session, store, source)
+        if behind and source == session.active:
+            report.warn(
+                f"sync from {source}: {behind} line(s) awaiting translation "
+                f"(run `tandem sync`)"
+            )
+
+    qdir = paths.quarantine_dir(session.tandem_id)
+    qfiles = sorted(qdir.iterdir()) if qdir.is_dir() else []
+    if qfiles:
+        report.warn(
+            f"{len(qfiles)} quarantined raw entr(y/ies) under {qdir}"
+        )
+
+    if live:
+        _live_resume_checks(report, session, transcripts)
+    return report
+
+
+def _live_resume_checks(report: DoctorReport, session, transcripts) -> None:
+    """Real resumes: one tiny model call per harness, run in the session cwd."""
+    from .harness import get_adapter
+
+    prompt = "tandem doctor live check - reply with exactly: ok"
+    if session.claude_session_id and transcripts.get("claude"):
+        argv = get_adapter("claude").oneoff_argv(session.claude_session_id, prompt)
+        _live_one(report, "claude", argv, session.cwd)
+    else:
+        report.warn("claude: skipping live resume (no transcript yet)")
+    if session.codex_session_id and transcripts.get("codex"):
+        argv = get_adapter("codex").oneoff_argv(session.codex_session_id, prompt)
+        _live_one(report, "codex", argv, session.cwd)
+    else:
+        report.warn("codex: skipping live resume (no transcript yet)")
+
+
+def _live_one(report: DoctorReport, hid: str, argv: list[str], cwd: str) -> None:
+    try:
+        out = subprocess.run(
+            argv, cwd=cwd, capture_output=True, text=True, timeout=180
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        report.fail(f"{hid}: live resume errored: {exc}")
+        return
+    if out.returncode == 0:
+        report.ok(f"{hid}: live resume succeeded")
+    else:
+        tail = (out.stderr or out.stdout or "").strip().splitlines()
+        report.fail(
+            f"{hid}: live resume exited {out.returncode}"
+            + (f" - {tail[-1][:160]}" if tail else "")
+        )

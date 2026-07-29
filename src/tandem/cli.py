@@ -124,6 +124,14 @@ def start(active: str | None) -> None:
         cursor.pending.update(cursor_updates)
         store.save_cursor(cursor)
 
+        from .memory_sync import sync_memory_files
+
+        mem = sync_memory_files(cwd)
+        for a in mem.actions:
+            click.echo(f"  memory: {a}")
+        for w in mem.warnings:
+            click.secho(f"  memory: {w}", fg="yellow", err=True)
+
         click.echo(f"Paired session {session.tandem_id} created in {cwd}")
         click.echo(f"  active:  {get_adapter(active).display_name}")
         click.echo(f"  shadow:  {shadow_adapter.display_name} -> {shadow_path}")
@@ -192,7 +200,7 @@ def switch() -> None:
         session = _require_session(store)
         old = session.active
         try:
-            new_active, problems = ops.switch_session(store, session)
+            new_active, problems, mem = ops.switch_session(store, session)
         except Exception as exc:
             click.secho(f"switch failed: {exc}", fg="red", err=True)
             sys.exit(1)
@@ -200,6 +208,10 @@ def switch() -> None:
             f"active harness: {get_adapter(old).display_name} -> "
             f"{get_adapter(new_active).display_name}"
         )
+        for a in mem.actions:
+            click.echo(f"  memory: {a}")
+        for w in mem.warnings:
+            click.secho(f"  memory: {w}", fg="yellow", err=True)
         for p in problems:
             click.secho(f"  warning: {p}", fg="yellow", err=True)
         if problems:
@@ -239,6 +251,47 @@ def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
             )
         code = ops.run_oneoff(store, session, target, text)
     sys.exit(code)
+
+
+@main.command()
+@click.option(
+    "--live",
+    is_flag=True,
+    help="Also perform a real resume on both sessions (costs one small model "
+    "call per harness).",
+)
+def doctor(live: bool) -> None:
+    """Validate that both session files are resumable; report drift."""
+    from .doctor import run_doctor
+
+    with StateStore() as store:
+        session = store.session_for_cwd(_cwd())
+        report = run_doctor(store, session, live=live)
+    icons = {"ok": ("✓", "green"), "warn": ("!", "yellow"), "fail": ("✗", "red")}
+    for check in report.checks:
+        icon, color = icons[check.status]
+        click.secho(f" {icon} {check.message}", fg=color if check.status != "ok" else None)
+    if report.failed:
+        sys.exit(1)
+    click.echo("all checks passed" if not any(
+        c.status == "warn" for c in report.checks
+    ) else "passed with warnings")
+
+
+@main.command(name="sync-mcp")
+@click.confirmation_option(
+    prompt="Copy MCP server definitions between ~/.claude.json and "
+    "~/.codex/config.toml (additive, never overwrites existing entries)?"
+)
+def sync_mcp() -> None:
+    """Copy MCP server configs between the two harnesses (opt-in)."""
+    from .memory_sync import copy_mcp
+
+    report = copy_mcp()
+    for a in report.actions:
+        click.echo(f"  {a}")
+    for w in report.warnings:
+        click.secho(f"  warning: {w}", fg="yellow", err=True)
 
 
 @main.command()

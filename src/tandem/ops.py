@@ -82,10 +82,10 @@ def unsynced_lines(session: PairedSession, store: StateStore, source: str) -> in
     return data[cursor.byte_offset :].count(b"\n")
 
 
-def switch_session(store: StateStore, session: PairedSession) -> tuple[str, list[str]]:
-    """Flip active/shadow. Returns (new_active, problems-with-new-active-file).
-    Instant: catch-up drain of the old source + cursor fast-forward, no bulk
-    re-conversion."""
+def switch_session(store: StateStore, session: PairedSession):
+    """Flip active/shadow. Returns (new_active, problems-with-new-active-file,
+    memory-sync report). Instant: catch-up drain of the old source + cursor
+    fast-forward, no bulk re-conversion."""
     from .doctor import validate_transcript
 
     old_active, new_active = session.active, session.shadow
@@ -100,6 +100,10 @@ def switch_session(store: StateStore, session: PairedSession) -> tuple[str, list
     fast_forward(store, session, new_active)
     store.set_active(session.tandem_id, new_active)
 
+    from .memory_sync import sync_memory_files
+
+    memory_report = sync_memory_files(session.cwd)
+
     problems: list[str] = []
     transcript = source_transcript(session, new_active)
     if transcript is None:
@@ -111,7 +115,7 @@ def switch_session(store: StateStore, session: PairedSession) -> tuple[str, list
     else:
         problems = validate_transcript(new_active, transcript,
                                        getattr(session, f"{new_active}_session_id"))
-    return new_active, problems
+    return new_active, problems, memory_report
 
 
 def _create_codex_shadow_late(store: StateStore, session: PairedSession) -> None:
