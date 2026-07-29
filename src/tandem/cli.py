@@ -329,10 +329,9 @@ def _interactive(active: str) -> None:
 
 
 def _enter_session(session: PairedSession) -> int:
-    from .runner import InteractiveRunner
+    from .shell import run_shell
 
-    runner = InteractiveRunner(session, sink_factory=_default_sink_factory)
-    return runner.run()
+    return run_shell(session.tandem_id, _default_sink_factory)
 
 
 if __name__ == "__main__":
