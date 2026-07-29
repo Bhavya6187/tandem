@@ -1,8 +1,10 @@
 # Native tool-call translation — design
 
 2026-07-29. Replaces the summarize-to-prose policy for tool activity in the
-sync engine. Approved direction: native in **both** directions, no
-attribution tags on tool activity, no output clipping (both revisitable).
+sync engine. Approved direction: native in **both** directions, with a
+semantic mapping layer that re-expresses common tools in the shadow's own
+vocabulary; no attribution tags on tool activity, no output clipping (both
+revisitable).
 
 ## Why
 
@@ -41,13 +43,18 @@ the work.
 keep their current handling (text tagged with attribution, thinking dropped,
 compaction noted, system skipped).
 
-- **ToolCall**: emit natively (no longer stash-only). Also record
-  `ctx.pending_calls[call_id] = {"tool": name}` — needed for orphan
-  detection, `is_error` derivation, and the flush rule below.
-- **ToolResult**: if its call is pending, pop it and emit natively. If the
-  call was never seen (orphan — e.g. cursor started mid-turn), keep the
-  existing prose fallback (`summarize_orphan_result`): a bare `tool_result`
-  with no preceding `tool_use` would itself break Claude resume.
+- **ToolCall**: stash in `ctx.pending_calls[call_id]` (unchanged from
+  today — full serialized call).
+- **ToolResult**: pop the pending call and emit the mapped **call + result
+  as an adjacent native pair** via `toolmap.py`. Pair-at-result emission
+  keeps the converter's existing flow, and it means the mapper sees the
+  result when rendering the call (needed for Write's `create` vs `update`,
+  and lets the Edit→`apply_patch` patch use the result's `structuredPatch`
+  context when present). Both replay APIs accept adjacent call/output
+  pairs; claude writes them adjacently itself. If the call was never seen
+  (orphan — e.g. cursor started mid-turn), keep the existing prose
+  fallback (`summarize_orphan_result`): a bare `tool_result` with no
+  preceding `tool_use` would itself break Claude resume.
 - **Attribution**: tool calls and results carry no `[claude]`/`[codex]`
   tag. Text messages keep their tags unchanged.
 - **No clipping**: outputs are carried verbatim. Revisit with a cap knob if
@@ -55,27 +62,67 @@ compaction noted, system skipped).
 
 ### Pairing invariant (dangle flush)
 
-Both replay APIs reject a call without a result. New invariant: **whenever
-tandem drains a source** (role switch, one-off routing, doctor repair), every
-entry left in `ctx.pending_calls` is closed by appending a native result
-with output `(tool result not recorded)` (same wording as vibeshub) to the
-shadow, then `pending_calls` is cleared. Similarly, when a ToolResult entry
-fails translation, its quarantine placeholder is accompanied by a native
-placeholder output for that `call_id`, so the shadow never holds a dangling
-call across a translation failure.
+Both replay APIs reject a call without a result. With pair-at-result
+emission a call is never in the shadow without its result under normal
+flow; the invariant covers the interrupted cases: **whenever tandem drains
+a source** (role switch, one-off routing, doctor repair), every entry left
+in `ctx.pending_calls` is emitted as its mapped call plus a placeholder
+result with output `(tool result not recorded)` (same wording as
+vibeshub), then `pending_calls` is cleared. Likewise, when a ToolResult
+entry fails translation, the pair is emitted as the mapped call plus that
+placeholder output alongside the quarantine placeholder, so the shadow
+never holds a dangling call.
 
-## Tool-name mapping
+## Tool mapping layer (`toolmap.py`)
 
-Verbatim pass-through is the default in both directions (spike-verified on
-both sides); only the shell tools get an argument-shape mapping.
+Two tiers, decided per call by a new policy module `toolmap.py` (the
+adapters stay dumb — they render whatever name/arguments the policy hands
+them):
 
-| direction | source | target |
-| --- | --- | --- |
-| claude→codex | `Bash {command}` | `function_call exec_command {"cmd": …}` |
-| claude→codex | any other tool | `function_call`, name verbatim, `arguments` = JSON-stringified input |
-| codex→claude | `exec_command {cmd}` | `tool_use Bash {"command": …}` |
-| codex→claude | `custom_tool_call` (`apply_patch`) | `tool_use`, name verbatim, `input {"input": <patch text>}` |
-| codex→claude | any other `function_call` | `tool_use`, name/args verbatim |
+- **Tier 1 — semantic map**: re-express the call in the shadow's own tool
+  vocabulary, so the history reads as work the shadow did with its own
+  tools rather than a foreign dialect.
+- **Tier 2 — verbatim pass-through**: name and arguments carried unchanged
+  (spike-verified safe on both sides). This is the fallback whenever a
+  Tier-1 rule doesn't apply cleanly.
+
+**Honesty rule**: a Tier-1 mapping is only allowed when the target-native
+rendering is a truthful description of what actually happened — arguments
+derivable from the source call's own arguments, result content carried
+verbatim. When a call instance doesn't fit (odd arguments, multi-file
+patch, ranged read we can't express honestly), that instance falls back to
+Tier 2. Mapping never fails an entry.
+
+### Tier 1: claude→codex
+
+| Claude call | Codex rendering |
+| --- | --- |
+| `Bash {command}` | `function_call exec_command {"cmd": …}`; output verbatim (no fake codex exit-code header) |
+| `Read {file_path}` (no offset/limit) | `function_call exec_command {"cmd": "cat -n '<path>'"}` — Claude's Read output is already `cat -n`-shaped, so output rides verbatim |
+| `Read` with offset/limit | equivalent `sed -n '<start>,<end>p'` pipe form; exact template an implementation choice — if it can't be expressed honestly, Tier 2 |
+| `Write {file_path, content}` (result type `create`) | `custom_tool_call apply_patch`: `*** Begin Patch / *** Add File: <path> / +<content> / *** End Patch`; overwrites (result type `update`) → Tier 2 |
+| `Edit {file_path, old_string, new_string}` | `custom_tool_call apply_patch`: `*** Update File: <path>` with `-`old / `+`new lines (V4A matches on context, so the strings map directly) |
+| `Grep {pattern, …}` / `Glob {pattern}` | `function_call exec_command` with the equivalent `rg -n …` / `rg --files -g …` command |
+| `TodoWrite {todos}` | `function_call update_plan {plan: [{step, status}]}` — the status vocabularies (`pending/in_progress/completed`) already coincide |
+
+### Tier 1: codex→claude
+
+| Codex call | Claude rendering |
+| --- | --- |
+| `exec_command {cmd}` | `tool_use Bash {"command": …}`; exit-code header stripped into `toolUseResult {stdout, exitCode}`, `is_error` when non-zero |
+| `apply_patch`, single `Add File` | `tool_use Write {file_path, content}`; `toolUseResult {type: "create", filePath, content}` |
+| `apply_patch`, single `Update File` | `tool_use Edit {file_path, old_string, new_string}` — old = context+deleted lines, new = context+added lines, reconstructed from the hunk; `patch_apply_end` enrichment (success/changes), when seen, feeds `toolUseResult` |
+| `apply_patch`, anything else (multi-file, `Delete File`, malformed) | Tier 2: `tool_use apply_patch {"input": <patch text>}` |
+| `update_plan {plan}` | `tool_use TodoWrite {todos: [{content, status}]}`; result content verbatim |
+
+### Tier 2 residue (measured, fine to leave verbatim)
+
+Claude side: `Agent`/`Task`, `TaskCreate`/`TaskUpdate`, `AskUserQuestion`,
+`SendMessage`, `Skill`, `ToolSearch`, `WebFetch`… Codex side: `js`,
+`write_stdin`, `spawn_agent`/`wait_agent`/`close_agent`, `view_image`….
+On the traces on this machine, Tier 1 covers ~87% of Claude-side call
+volume (Bash+Edit+Write+Read of 152 calls in the M1–M5 session) and ~97%
+of codex-side (exec_command+apply_patch+update_plan of ~930 calls).
 
 ## Codex rendering (`harness/codex.py`)
 
@@ -95,10 +142,12 @@ both sides); only the shell tools get an argument-shape mapping.
 ## Claude rendering (`harness/claude_code.py`)
 
 - ToolCall → `assistant` entry, one `tool_use` block, `stop_reason:
-  "tool_use"`. ToolResult → `user` entry with a `tool_result` block
-  (`is_error` when a codex exit-code header parses non-zero) plus a
-  `toolUseResult` sibling `{stdout, exitCode?}` — reuse the existing
-  `_codex_exec_output` header parser.
+  "tool_use"`. ToolResult → `user` entry with a `tool_result` block plus a
+  `toolUseResult` sibling. Both `is_error` and the `toolUseResult` shape
+  come from the mapper: `{stdout, exitCode?}` for exec_command (via the
+  existing `_codex_exec_output` header parser, `is_error` on non-zero),
+  `{type: "create", filePath, content}`-style for the patch mappings,
+  `{stdout}` for Tier-2 pass-through.
 - **`message.id` runs**: consecutive rendered `assistant` entries share one
   `message.id` (new `ctx.claude_run_msg_id`, reset whenever a non-assistant
   entry is rendered). Real transcripts share one id across all blocks of an
@@ -108,11 +157,10 @@ both sides); only the shell tools get an argument-shape mapping.
 
 ## `SessionContext` changes
 
-- `pending_calls` values shrink to `{"tool": name}`. The
-  `patch_apply_end`/`_structured` enrichment is dropped — outputs now ride
-  verbatim, so nothing downstream consumes it. Cursor migration: values are
-  read via `.get("tool")`, so full ToolCall dumps persisted by older cursors
-  load fine.
+- `pending_calls` keeps its current shape (serialized ToolCall per
+  `call_id`), including the `patch_apply_end`/`_structured` enrichment —
+  the `apply_patch → Edit/Write` mapping consumes it for `toolUseResult`.
+  No cursor migration needed.
 - New field `claude_run_msg_id: str | None`.
 
 ## `summarize.py` shrinks
@@ -129,8 +177,11 @@ turn, sync continues) with the dangle-closing addition above.
 
 ## Testing
 
-- Unit: argument-shape mapping both ways; verbatim pass-through incl.
-  `call_id` preservation; `custom_tool_call` → `{"input": …}`.
+- Unit: Tier-1 mappings both ways (Bash↔exec_command; Edit/Write↔
+  apply_patch incl. old/new-string ↔ hunk reconstruction round-trips;
+  Read→cat -n; TodoWrite↔update_plan status vocab); honesty-rule fallbacks
+  (overwrite Write, multi-file patch → Tier 2); verbatim pass-through incl.
+  `call_id` preservation.
 - Pairing: drain flush closes pending calls with placeholder outputs;
   orphan result renders as prose; result-translation failure closes its
   call.
@@ -143,6 +194,7 @@ turn, sync continues) with the dangle-closing addition above.
 
 ## Out of scope (deliberate)
 
-Attribution notes for tool activity; output-clipping knobs; semantic
-mapping of `apply_patch` onto Claude's `Edit`/`Write`; `event_msg` fidelity
-for how foreign items display in the codex TUI transcript view.
+Attribution notes for tool activity; output-clipping knobs; Tier-1
+mappings beyond the table above (e.g. `js`, `write_stdin`, subagent
+tools); `event_msg` fidelity for how foreign items display in the codex
+TUI transcript view.
