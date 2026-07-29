@@ -175,15 +175,6 @@ class StateStore:
                 (_now(), tandem_id),
             )
 
-    def archive_session(self, tandem_id: str) -> None:
-        """No-op: archiving is vestigial.
-
-        Sessions are no longer hidden from a cwd -- `archived` is gone from the
-        schema and `latest_session_for_cwd` does not filter on it. `start`'s only
-        caller gets the same observable result by creating a new session, which
-        wins the `last_used_at DESC` ordering. Removed with `start`.
-        """
-
     # -- sync cursors --------------------------------------------------------
 
     def get_cursor(self, tandem_id: str, source: str) -> SyncCursor:

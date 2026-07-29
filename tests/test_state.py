@@ -29,16 +29,6 @@ def test_set_active(tmp_path):
         assert store.latest_session_for_cwd("/proj").codex_session_id == "new-x"
 
 
-def test_archive_session_is_a_harmless_noop(tmp_path):
-    # Archiving is vestigial: the `archived` column is gone from the schema and
-    # no query filters on it. It must not crash on a fresh DB (Task 2 removes it
-    # along with `start`).
-    with make_store(tmp_path) as store:
-        s = store.create_session("/proj", "claude", "c-id", "x-id")
-        store.archive_session(s.tandem_id)
-        assert store.latest_session_for_cwd("/proj").tandem_id == s.tandem_id
-
-
 def test_cursor_roundtrip_and_upsert(tmp_path):
     with make_store(tmp_path) as store:
         s = store.create_session("/proj", "claude", "c-id", "x-id")

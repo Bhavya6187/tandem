@@ -21,8 +21,12 @@ def _cwd() -> str:
 def _require_session(store: StateStore) -> PairedSession:
     session = store.latest_session_for_cwd(_cwd())
     if session is None:
-        click.echo("No tandem session for this directory. Run `tandem start` first.", err=True)
+        click.echo(
+            "No tandem session for this directory. Run `tandem` to start one.",
+            err=True,
+        )
         sys.exit(1)
+    store.touch_used(session.tandem_id)
     return session
 
 
@@ -53,93 +57,69 @@ def _check_versions(warn_only: bool = False) -> dict[str, str | None]:
 
 @click.group(invoke_without_command=True)
 @click.version_option(package_name="tandem")
-@click.pass_context
-def main(ctx: click.Context) -> None:
-    """Work in Claude Code or Codex and switch at any time.
-
-    Run with no arguments to enter the active harness interactively.
-    """
-    if ctx.invoked_subcommand is None:
-        _interactive()
-
-
-@main.command()
 @click.option(
     "--active",
     type=click.Choice(["claude", "codex"]),
-    default=None,
-    help="Initially active harness (prompted if omitted).",
+    default="claude",
+    show_default=True,
+    help="Initially active harness for the fresh session.",
 )
-def start(active: str | None) -> None:
-    """Initialize a paired session for the current directory."""
-    cwd = _cwd()
-    _check_versions()
-    with StateStore() as store:
-        existing = store.latest_session_for_cwd(cwd)
-        if existing is not None:
-            click.echo(
-                f"A tandem session already exists here ({existing.tandem_id}, "
-                f"active: {existing.active})."
-            )
-            if not click.confirm("Archive it and start a new one?", default=False):
-                sys.exit(1)
-            store.archive_session(existing.tandem_id)
+@click.pass_context
+def main(ctx: click.Context, active: str) -> None:
+    """Run Claude Code and Codex as one paired session.
 
-        if active is None:
-            active = click.prompt(
-                "Initially active harness",
-                type=click.Choice(["claude", "codex"]),
-                default="claude",
-            )
-        shadow = other(active)
+    With no subcommand, pairs a fresh session and enters the active
+    harness; `tandem resume` continues an earlier one.
+    """
+    if ctx.invoked_subcommand is None:
+        _interactive(active)
 
-        claude_sid = get_adapter("claude").mint_session_id()
-        codex_sid = None if active == "codex" else get_adapter("codex").mint_session_id()
 
-        session = store.create_session(cwd, active, claude_sid, codex_sid)
+def _pair_session(store: StateStore, cwd: str, active: str) -> PairedSession:
+    """Create a fresh paired session: state row, seeded shadow transcript,
+    write-ahead cursor, memory sync. Echoes what it did."""
+    shadow = other(active)
+    claude_sid = get_adapter("claude").mint_session_id()
+    codex_sid = None if active == "codex" else get_adapter("codex").mint_session_id()
+    session = store.create_session(cwd, active, claude_sid, codex_sid)
 
-        ctx = SessionContext(
-            tandem_id=session.tandem_id,
-            cwd=cwd,
-            direction="claude->codex" if active == "claude" else "codex->claude",
-            claude_session_id=claude_sid,
-            codex_session_id=codex_sid,
-        )
-        note = SEED_NOTE.format(
-            tandem_id=session.tandem_id,
-            other=get_adapter(active).display_name,
-        )
-        # The shadow transcript is created now so it is resume-ready from the
-        # first turn. The active side's file is created by the harness itself
-        # at first launch (claude is pinned via --session-id; codex mints its
-        # own id which tandem captures on first run).
-        shadow_adapter = get_adapter(shadow)
-        if shadow == "claude":
-            shadow_path = shadow_adapter.create_shadow_transcript(cwd, claude_sid, ctx, note)
-            cursor_updates = {"claude_leaf_uuid": ctx.claude_leaf_uuid}
-        else:
-            shadow_path = shadow_adapter.create_shadow_transcript(cwd, codex_sid, ctx, note)
-            cursor_updates = {}
-        cursor = store.get_cursor(session.tandem_id, active)
-        cursor.pending.update(cursor_updates)
-        store.save_cursor(cursor)
+    ctx = SessionContext(
+        tandem_id=session.tandem_id,
+        cwd=cwd,
+        direction="claude->codex" if active == "claude" else "codex->claude",
+        claude_session_id=claude_sid,
+        codex_session_id=codex_sid,
+    )
+    note = SEED_NOTE.format(
+        tandem_id=session.tandem_id,
+        other=get_adapter(active).display_name,
+    )
+    # The shadow transcript is created now so it is resume-ready from the
+    # first turn. The active side's file is created by the harness itself
+    # at first launch (claude is pinned via --session-id; codex mints its
+    # own id which tandem captures on first run).
+    shadow_adapter = get_adapter(shadow)
+    if shadow == "claude":
+        shadow_adapter.create_shadow_transcript(cwd, claude_sid, ctx, note)
+        cursor_updates = {"claude_leaf_uuid": ctx.claude_leaf_uuid}
+    else:
+        shadow_adapter.create_shadow_transcript(cwd, codex_sid, ctx, note)
+        cursor_updates = {}
+    cursor = store.get_cursor(session.tandem_id, active)
+    cursor.pending.update(cursor_updates)
+    store.save_cursor(cursor)
 
-        from .memory_sync import sync_memory_files
+    from .memory_sync import sync_memory_files
 
-        mem = sync_memory_files(cwd)
-        for a in mem.actions:
-            click.echo(f"  memory: {a}")
-        for w in mem.warnings:
-            click.secho(f"  memory: {w}", fg="yellow", err=True)
-
-        click.echo(f"Paired session {session.tandem_id} created in {cwd}")
-        click.echo(f"  active:  {get_adapter(active).display_name}")
-        click.echo(f"  shadow:  {shadow_adapter.display_name} -> {shadow_path}")
-        if active == "codex":
-            click.echo(
-                "  note: codex session id will be captured on first `tandem` run"
-            )
-        click.echo("Run `tandem` to begin.")
+    mem = sync_memory_files(cwd)
+    click.echo(f"paired {session.tandem_id} ({active} active, {shadow} shadow)")
+    for a in mem.actions:
+        click.echo(f"  memory: {a}")
+    for w in mem.warnings:
+        click.secho(f"  memory: {w}", fg="yellow", err=True)
+    if active == "codex":
+        click.echo("  note: codex session id will be captured on first run")
+    return session
 
 
 @main.command()
@@ -305,14 +285,19 @@ def sync() -> None:
         click.echo(f"synced {n} new transcript lines from {session.active}.")
 
 
-def _interactive() -> None:
+def _interactive(active: str) -> None:
+    cwd = _cwd()
+    _check_versions()  # hard: pairing needs both binaries on PATH
+    with StateStore() as store:
+        session = _pair_session(store, cwd, active)
+    sys.exit(_enter_session(session))
+
+
+def _enter_session(session: PairedSession) -> int:
     from .runner import InteractiveRunner
 
-    with StateStore() as store:
-        session = _require_session(store)
-    _check_versions(warn_only=True)
     runner = InteractiveRunner(session, sink_factory=_default_sink_factory)
-    sys.exit(runner.run())
+    return runner.run()
 
 
 if __name__ == "__main__":
