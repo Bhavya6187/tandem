@@ -122,6 +122,49 @@ def test_unbalanced_quote_does_not_kill_the_prompt(sess, capsys):
     assert f"tandem resume {sess.tandem_id}" in out  # survived to a clean exit
 
 
+def test_launch_options_neither_pair_nor_nest(sess, capsys, monkeypatch):
+    """`--active codex` at the prompt must not re-enter the group's
+    invoke_without_command path (pairing a fresh session and nesting a
+    second shell inside this one)."""
+    from tandem import cli
+
+    monkeypatch.setattr(cli, "_cwd", lambda: sess.cwd)
+    monkeypatch.setattr(cli, "_check_versions", lambda warn_only=False: {})
+    nested = []
+    monkeypatch.setattr(cli, "_enter_session", lambda s: (nested.append(s), 0)[1])
+    log = []
+    shell.run_shell(
+        sess.tandem_id, None,
+        input_fn=scripted("--active codex", "--active=codex", "--"),
+        run_harness=fake_runner(log),
+    )
+    out = capsys.readouterr().out
+    assert nested == []  # no shell nested inside the shell
+    assert "paired" not in out  # no orphan session
+    assert log == ["claude"]  # only the initial entry
+    assert "commands:" in out  # the user gets the command list instead
+    with StateStore() as store:
+        assert store.latest_session_for_cwd(sess.cwd).tandem_id == sess.tandem_id
+
+
+def test_non_click_exception_keeps_the_prompt_alive(sess, capsys, monkeypatch):
+    from tandem import cli
+
+    def boom(store):
+        raise OSError("transcript directory vanished")
+
+    monkeypatch.setattr(cli, "_require_session", boom)
+    log = []
+    shell.run_shell(
+        sess.tandem_id, None, input_fn=scripted("status", ""),
+        run_harness=fake_runner(log),
+    )
+    cap = capsys.readouterr()
+    assert "command failed: transcript directory vanished" in cap.err
+    assert log == ["claude", "claude"]  # loop survived, Enter still re-enters
+    assert f"to continue this session: tandem resume {sess.tandem_id}" in cap.out
+
+
 def test_status_dispatches_through_cli(sess, capsys, monkeypatch):
     from tandem import cli
 

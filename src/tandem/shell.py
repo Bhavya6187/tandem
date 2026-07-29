@@ -56,6 +56,17 @@ def run_shell(tandem_id: str, sink_factory, input_fn=None, run_harness=None) -> 
         except ValueError as exc:  # e.g. an unbalanced quote
             click.secho(f"could not parse: {exc}", fg="yellow")
             continue
+        if argv[0].startswith("-") and argv[0] not in ("--help", "--version"):
+            # Options with no subcommand would hit the group's
+            # invoke_without_command path: a fresh pairing plus a shell
+            # nested inside this one. Launching is an OS-shell concern.
+            click.secho(
+                f"{argv[0]} is a `tandem` launch option, not a prompt command"
+                " — `exit` first, then re-run tandem.",
+                fg="yellow",
+            )
+            click.echo(HELP)
+            continue
         if argv[0] == "resume":
             click.secho(
                 "resume takes no id at this prompt — `exit` first, then"
@@ -114,3 +125,6 @@ def _dispatch(argv: list[str]) -> None:
         click.echo()
     except SystemExit:
         pass  # one-shot commands sys.exit(); the prompt continues
+    except Exception as exc:
+        # A failing command must never take the live session down with it.
+        click.secho(f"command failed: {exc}", fg="red", err=True)
