@@ -1,12 +1,20 @@
 [project]
 name = "tandem"
 version = "0.1.0"
-description = "A Python package."
+description = "Meta-harness that runs Claude Code and Codex CLI with live trace sync."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "pydantic>=2.7",
+    "watchdog>=4.0",
+    "pexpect>=4.9",
+]
+
+[project.scripts]
+tandem = "tandem.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
