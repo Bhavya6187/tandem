@@ -1,108 +1,21 @@
 """Sync engine integration: fake active harness writes JSONL, engine appends
 to a real shadow file with quarantine, placeholders and crash recovery."""
 
-import json
-from pathlib import Path
-
 from tandem import paths
-from tandem.events import SessionContext
-from tandem.runner import TailLoop
-from tandem.state import StateStore
-from tandem.sync import SyncEngine
 from tandem.util import read_jsonl
 
-
-def write_line(path, obj=None, text=None):
-    with open(path, "a") as f:
-        f.write((text if text is not None else json.dumps(obj)) + "\n")
-
-
-def claude_user(text):
-    return {
-        "type": "user",
-        "uuid": f"u-{abs(hash(text)) % 10**8}",
-        "timestamp": "2026-07-29T00:00:00.000Z",
-        "message": {"role": "user", "content": text},
-    }
-
-
-def claude_assistant(blocks):
-    return {
-        "type": "assistant",
-        "uuid": "a-1",
-        "timestamp": "2026-07-29T00:00:01.000Z",
-        "message": {"role": "assistant", "model": "claude-fable-5", "content": blocks},
-    }
-
-
-def claude_tool_result(call_id, output, structured=None):
-    return {
-        "type": "user",
-        "uuid": "tr-1",
-        "timestamp": "2026-07-29T00:00:02.000Z",
-        "message": {
-            "role": "user",
-            "content": [
-                {"type": "tool_result", "tool_use_id": call_id, "content": output}
-            ],
-        },
-        "toolUseResult": structured or {"stdout": output, "stderr": ""},
-    }
-
-
-class Env:
-    """Paired session with claude as the fake active source and a seeded
-    codex shadow rollout, all under tmp homes."""
-
-    def __init__(self, tmp_path, monkeypatch, active="claude"):
-        monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
-        monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
-        self.cwd = str(tmp_path / "proj")
-        Path(self.cwd).mkdir()
-        self.store = StateStore(db_path=tmp_path / ".tandem" / "state.db")
-        from tandem.harness import get_adapter
-
-        claude_sid = "11111111-1111-4111-8111-111111111111"
-        codex_sid = "019faca1-0000-7000-8000-000000000001"
-        self.session = self.store.create_session(self.cwd, active, claude_sid, codex_sid)
-        ctx = SessionContext(
-            tandem_id=self.session.tandem_id,
-            cwd=self.cwd,
-            direction="claude->codex",
-            claude_session_id=claude_sid,
-            codex_session_id=codex_sid,
-        )
-        # seed both files the way `tandem start` does
-        self.codex_shadow = get_adapter("codex").create_shadow_transcript(
-            self.cwd, codex_sid, ctx, "[tandem] seed"
-        )
-        self.claude_shadow = get_adapter("claude").create_shadow_transcript(
-            self.cwd, claude_sid, ctx, "[tandem] seed"
-        )
-        cur = self.store.get_cursor(self.session.tandem_id, "codex")
-        cur.pending["claude_leaf_uuid"] = ctx.claude_leaf_uuid
-        self.store.save_cursor(cur)
-        # the fake active transcript we tail (stands in for the real one)
-        self.source_file = tmp_path / "active.jsonl"
-        self.source_file.touch()
-
-    def loop(self, source="claude"):
-        engine = SyncEngine(self.store, self.session, source)
-        return TailLoop(self.store, self.session, source, self.source_file, engine), engine
-
-
-def shadow_texts(rollout_path):
-    return [
-        e["payload"]["content"][0]["text"]
-        for e in read_jsonl(rollout_path)
-        if e.get("type") == "response_item" and e["payload"].get("type") == "message"
-    ]
+from conftest import (
+    claude_assistant,
+    claude_tool_result,
+    claude_user,
+    shadow_texts,
+    write_line,
+)
 
 
 class TestSyncClaudeToCodex:
-    def test_full_turn_synced(self, tmp_path, monkeypatch):
-        env = Env(tmp_path, monkeypatch)
+    def test_full_turn_synced(self, env_factory):
+        env = env_factory()
         loop, _ = env.loop()
 
         write_line(env.source_file, claude_user("please fix the bug"))
@@ -123,8 +36,8 @@ class TestSyncClaudeToCodex:
         assert any("ran `pytest -q`" in t and "3 failed" in t for t in texts)
         assert texts[-1] == "[via claude-code] Fixed."
 
-    def test_corrupt_line_quarantined_with_placeholder(self, tmp_path, monkeypatch):
-        env = Env(tmp_path, monkeypatch)
+    def test_corrupt_line_quarantined_with_placeholder(self, env_factory):
+        env = env_factory()
         loop, _ = env.loop()
 
         write_line(env.source_file, claude_user("turn one"))
@@ -149,8 +62,8 @@ class TestSyncClaudeToCodex:
         cursor = env.store.get_cursor(env.session.tandem_id, "claude")
         assert cursor.failed_turns == 1
 
-    def test_restart_resumes_without_duplicates(self, tmp_path, monkeypatch):
-        env = Env(tmp_path, monkeypatch)
+    def test_restart_resumes_without_duplicates(self, env_factory):
+        env = env_factory()
         loop, _ = env.loop()
         write_line(env.source_file, claude_user("first"))
         loop.drain()
@@ -164,10 +77,10 @@ class TestSyncClaudeToCodex:
         assert texts.count("[via claude-code] first") == 1
         assert texts.count("[via claude-code] second") == 1
 
-    def test_crash_after_append_before_cursor_save(self, tmp_path, monkeypatch):
+    def test_crash_after_append_before_cursor_save(self, env_factory):
         """Intent recorded + shadow appended, then crash: restart must not
         double-append."""
-        env = Env(tmp_path, monkeypatch)
+        env = env_factory()
         loop, engine = env.loop()
         write_line(env.source_file, claude_user("only once"))
         loop.drain()
@@ -204,8 +117,8 @@ class TestSyncCodexToClaude:
                          "content": [{"type": "output_text", "text": "All done."}]}},
         ]
 
-    def test_chain_appends_to_claude_shadow(self, tmp_path, monkeypatch):
-        env = Env(tmp_path, monkeypatch, active="codex")
+    def test_chain_appends_to_claude_shadow(self, env_factory):
+        env = env_factory(active="codex")
         for obj in self.codex_lines():
             write_line(env.source_file, obj)
         loop, _ = env.loop(source="codex")
@@ -220,10 +133,10 @@ class TestSyncCodexToClaude:
         assert entries[1]["parentUuid"] == entries[0]["uuid"]
         assert entries[2]["parentUuid"] == entries[1]["uuid"]
 
-    def test_leaf_rederived_from_file(self, tmp_path, monkeypatch):
+    def test_leaf_rederived_from_file(self, env_factory):
         """If claude itself appended entries (it was active earlier), new
         synced entries chain onto claude's real leaf, not a stale one."""
-        env = Env(tmp_path, monkeypatch, active="codex")
+        env = env_factory(active="codex")
         # claude appended its own entry after the seed
         write_line(
             env.claude_shadow,

@@ -7,6 +7,7 @@ require `tandem doctor` before enabling sync (see cli.py).
 
 from __future__ import annotations
 
+import functools
 import re
 import shutil
 import subprocess
@@ -36,8 +37,10 @@ def parse_version(text: str) -> tuple[int, ...] | None:
     return tuple(int(x) for x in m.group(1).split("."))
 
 
+@functools.lru_cache(maxsize=8)
 def detect_cli_version(binary: str) -> str | None:
-    """Return the raw version string of an installed CLI, or None if absent."""
+    """Return the raw version string of an installed CLI, or None if absent.
+    Cached for the process lifetime (renderers stamp it on every entry)."""
     if shutil.which(binary) is None:
         return None
     try:

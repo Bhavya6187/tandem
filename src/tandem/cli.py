@@ -152,14 +152,19 @@ def status() -> None:
             click.echo(f"    version: {versions.get(hid) or 'not installed'}")
             click.echo(f"    session: {sid or '(pending first run)'}")
             click.echo(f"    file:    {path or '(not created yet)'}")
+        from . import ops
+
         for source in ("claude", "codex"):
             cursor = store.get_cursor(session.tandem_id, source)
-            if cursor.updated_at or cursor.failed_turns:
-                click.echo(
+            behind = ops.unsynced_lines(session, store, source)
+            if cursor.updated_at or cursor.failed_turns or behind:
+                line = (
                     f"  sync from {source}: line {cursor.line_index}, "
-                    f"turn {cursor.turn_index}, failed turns: {cursor.failed_turns} "
-                    f"(updated {cursor.updated_at})"
+                    f"turn {cursor.turn_index}, failed turns: {cursor.failed_turns}"
                 )
+                if behind and source == session.active:
+                    line += f", {behind} lines awaiting translation"
+                click.echo(line)
         qdir = paths.quarantine_dir(session.tandem_id)
         if qdir.is_dir() and any(qdir.iterdir()):
             click.echo(f"  quarantine: {qdir} (has entries)")
@@ -176,6 +181,75 @@ def _default_sink_factory(store, session, source):
     if os.environ.get("TANDEM_LOG_EVENTS"):
         return EventLogger(session.tandem_id, source)
     return SyncEngine(store, session, source)
+
+
+@main.command()
+def switch() -> None:
+    """Make the shadow harness active (instant; no re-conversion)."""
+    from . import ops
+
+    with StateStore() as store:
+        session = _require_session(store)
+        old = session.active
+        try:
+            new_active, problems = ops.switch_session(store, session)
+        except Exception as exc:
+            click.secho(f"switch failed: {exc}", fg="red", err=True)
+            sys.exit(1)
+        click.echo(
+            f"active harness: {get_adapter(old).display_name} -> "
+            f"{get_adapter(new_active).display_name}"
+        )
+        for p in problems:
+            click.secho(f"  warning: {p}", fg="yellow", err=True)
+        if problems:
+            click.secho(
+                "  the newly active session may not resume cleanly; "
+                "run `tandem doctor` for details.",
+                fg="yellow",
+                err=True,
+            )
+        click.echo("Run `tandem` to continue in the new harness.")
+
+
+@main.command(name="run")
+@click.option(
+    "--on",
+    "target",
+    type=click.Choice(["claude", "codex"]),
+    required=True,
+    help="Harness to route this one prompt to.",
+)
+@click.argument("prompt", nargs=-1, required=True)
+def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
+    """Run one prompt on the other harness, then return control.
+
+    The resulting turn lands in both session files with attribution."""
+    from . import ops
+
+    text = " ".join(prompt)
+    with StateStore() as store:
+        session = _require_session(store)
+        if target == session.active:
+            click.secho(
+                f"note: {target} is already the active harness; running the "
+                "turn there anyway.",
+                fg="yellow",
+                err=True,
+            )
+        code = ops.run_oneoff(store, session, target, text)
+    sys.exit(code)
+
+
+@main.command()
+def sync() -> None:
+    """Catch up shadow translation manually (pure local file I/O)."""
+    from . import ops
+
+    with StateStore() as store:
+        session = _require_session(store)
+        n = ops.drain_source(store, session, session.active)
+        click.echo(f"synced {n} new transcript lines from {session.active}.")
 
 
 def _interactive() -> None:
