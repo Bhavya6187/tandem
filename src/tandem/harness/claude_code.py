@@ -221,10 +221,66 @@ class ClaudeCodeAdapter(HarnessAdapter):
         # attachment, queue-operation, last-prompt, summary, system, unknown
         return [sysev(f"claude:{etype}")]
 
+    # -- rendering (shadow append) -------------------------------------------
+
     def render_events(
         self, events: list[NormalizedEvent], ctx: SessionContext
     ) -> list[dict[str, Any]]:
-        raise NotImplementedError
+        """Normalized events -> native transcript entries, chained onto the
+        current leaf. Only message-bearing events reach here (converter
+        policy folds tool activity into AssistantMessages)."""
+        out: list[dict[str, Any]] = []
+        for ev in events:
+            if ev.kind == "user_message":
+                entry = self._base_entry(ctx, "user")
+                entry["message"] = {"role": "user", "content": ev.text}
+            elif ev.kind == "assistant_message":
+                entry = self._base_entry(ctx, "assistant")
+                entry["message"] = {
+                    "role": "assistant",
+                    "model": "<synced>",
+                    "id": f"msg_tandem_{entry['uuid'][:8]}",
+                    "type": "message",
+                    "content": [{"type": "text", "text": ev.text}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                }
+            else:
+                continue
+            if ev.timestamp:
+                entry["timestamp"] = ev.timestamp
+            ctx.claude_leaf_uuid = entry["uuid"]
+            out.append(entry)
+        return out
 
     def render_placeholder(self, text: str, ctx: SessionContext) -> list[dict[str, Any]]:
-        raise NotImplementedError
+        entry = self._base_entry(ctx, "user")
+        entry["message"] = {"role": "user", "content": text}
+        ctx.claude_leaf_uuid = entry["uuid"]
+        return [entry]
+
+    def derive_leaf_uuid(self, transcript: Path) -> str | None:
+        """Last chainable uuid in an existing transcript (the harness itself
+        may have appended since tandem last wrote)."""
+        try:
+            with open(transcript, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 262144))
+                tail = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            return None
+        leaf = None
+        for line in tail.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and obj.get("uuid") and obj.get("type") in (
+                "user", "assistant", "attachment", "system",
+            ):
+                leaf = obj["uuid"]
+        return leaf

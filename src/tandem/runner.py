@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from . import paths
-from .events import NormalizedEvent, SessionContext
+from .events import SessionContext
 from .harness import get_adapter
 from .ptyrun import run_in_pty
 from .state import PairedSession, StateStore, SyncCursor
@@ -25,20 +25,25 @@ from .util import json_line
 
 
 class EventSink(Protocol):
-    def handle(self, line: TailedLine, events: list[NormalizedEvent], ctx: SessionContext) -> None: ...
+    """Sinks own translation of raw lines (parsing mutates the translation
+    context, so it must happen exactly once, inside the sink)."""
+
+    def handle(self, line: TailedLine, ctx: SessionContext, cursor: "SyncCursor") -> None: ...
 
     def close(self) -> None: ...
 
 
 class EventLogger:
-    """M2 sink: append normalized events to ~/.tandem/logs/ as JSONL."""
+    """Debug sink: parse and append normalized events to ~/.tandem/logs/."""
 
     def __init__(self, tandem_id: str, source: str):
+        self.adapter = get_adapter(source)
         self.path = paths.log_dir() / f"{tandem_id}-{source}.events.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = open(self.path, "ab")
 
-    def handle(self, line: TailedLine, events: list[NormalizedEvent], ctx: SessionContext) -> None:
+    def handle(self, line: TailedLine, ctx: SessionContext, cursor: "SyncCursor") -> None:
+        events = [] if line.raw is None else self.adapter.parse_entry(line.raw, ctx)
         for ev in events:
             record = ev.model_dump(exclude_none=True)
             record["raw_line_index"] = line.line_index
@@ -68,10 +73,14 @@ def ctx_from_cursor(session: PairedSession, source: str, cursor: SyncCursor) -> 
 
 def ctx_to_cursor(ctx: SessionContext, cursor: SyncCursor) -> None:
     cursor.turn_index = ctx.turn_index
-    cursor.pending = {
-        "pending_calls": ctx.pending_calls,
-        "claude_leaf_uuid": ctx.claude_leaf_uuid,
-    }
+    # update, not replace: the sync engine keeps its own keys (intent,
+    # last_placeholder_turn) in the same dict
+    cursor.pending.update(
+        {
+            "pending_calls": ctx.pending_calls,
+            "claude_leaf_uuid": ctx.claude_leaf_uuid,
+        }
+    )
 
 
 class TailLoop:
@@ -89,7 +98,6 @@ class TailLoop:
         self.store = store
         self.session = session
         self.source = source
-        self.adapter = get_adapter(source)
         self.sink = sink
         self.cursor = store.get_cursor(session.tandem_id, source)
         self.ctx = ctx_from_cursor(session, source, self.cursor)
@@ -107,11 +115,7 @@ class TailLoop:
             self.errors.append(str(exc))
             return 0
         for line in lines:
-            if line.raw is None:
-                events: list[NormalizedEvent] = []
-            else:
-                events = self.adapter.parse_entry(line.raw, self.ctx)
-            self.sink.handle(line, events, self.ctx)
+            self.sink.handle(line, self.ctx, self.cursor)
             self.cursor.byte_offset = line.end_offset
             self.cursor.line_index = line.line_index + 1
             ctx_to_cursor(self.ctx, self.cursor)
@@ -146,11 +150,14 @@ def await_codex_rollout(cwd: str, after: float, timeout: float | None = None) ->
         time.sleep(0.3)
 
 
+SinkFactory = Callable[[StateStore, PairedSession, str], EventSink]
+
+
 class InteractiveRunner:
     """Runs the active harness in PTY passthrough with the tail loop on a
     background thread."""
 
-    def __init__(self, session: PairedSession, sink_factory: Callable[[str], EventSink]):
+    def __init__(self, session: PairedSession, sink_factory: SinkFactory):
         self.session = session
         self.sink_factory = sink_factory
 
@@ -175,11 +182,11 @@ class InteractiveRunner:
 
         stop = threading.Event()
         spawn_time = time.time()
-        sink = self.sink_factory(active)
         errors: list[str] = []
 
         def tail_thread() -> None:
-            # Own store/connection: sqlite handles are thread-bound.
+            # Own store/connection: sqlite handles are thread-bound, and the
+            # sink (sync engine) is built here so it shares this store.
             with StateStore() as store:
                 current = store.get_session(session.tandem_id) or session
                 path = transcript
@@ -196,6 +203,11 @@ class InteractiveRunner:
                             break
                     if path is None:
                         return
+                try:
+                    sink = self.sink_factory(store, current, active)
+                except Exception as exc:
+                    errors.append(f"sync disabled: {exc}")
+                    return
                 watcher = TranscriptWatcher()
                 watcher.watch(path)
                 watcher.watch(sentinel)
@@ -210,6 +222,7 @@ class InteractiveRunner:
                     errors.extend(loop.errors)
                 finally:
                     watcher.stop()
+                    sink.close()
 
         thread = threading.Thread(target=tail_thread, name="tandem-tail", daemon=True)
         thread.start()
@@ -218,7 +231,6 @@ class InteractiveRunner:
         finally:
             stop.set()
             thread.join(timeout=10)
-            sink.close()
             sentinel.unlink(missing_ok=True)
         for err in errors:
             print(f"tandem: sync error: {err}")

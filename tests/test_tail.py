@@ -56,13 +56,19 @@ class TestJsonlTailer:
 
 
 class CollectSink:
-    def __init__(self):
+    """Parses like the real sinks do (sinks own translation)."""
+
+    def __init__(self, source="claude"):
+        from tandem.harness import get_adapter
+
+        self.adapter = get_adapter(source)
         self.events = []
         self.lines = []
 
-    def handle(self, line, events, ctx):
+    def handle(self, line, ctx, cursor):
         self.lines.append(line.line_index)
-        self.events.extend(events)
+        if line.raw is not None:
+            self.events.extend(self.adapter.parse_entry(line.raw, ctx))
 
     def close(self):
         pass

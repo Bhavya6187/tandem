@@ -165,16 +165,26 @@ def status() -> None:
             click.echo(f"  quarantine: {qdir} (has entries)")
 
 
+def _default_sink_factory(store, session, source):
+    """Sync engine by default; TANDEM_LOG_EVENTS=1 switches to the debug
+    event logger (no shadow writes)."""
+    import os
+
+    from .runner import EventLogger
+    from .sync import SyncEngine
+
+    if os.environ.get("TANDEM_LOG_EVENTS"):
+        return EventLogger(session.tandem_id, source)
+    return SyncEngine(store, session, source)
+
+
 def _interactive() -> None:
-    from .runner import EventLogger, InteractiveRunner
+    from .runner import InteractiveRunner
 
     with StateStore() as store:
         session = _require_session(store)
     _check_versions(warn_only=True)
-    runner = InteractiveRunner(
-        session,
-        sink_factory=lambda source: EventLogger(session.tandem_id, source),
-    )
+    runner = InteractiveRunner(session, sink_factory=_default_sink_factory)
     sys.exit(runner.run())
 
 

@@ -226,10 +226,72 @@ class CodexAdapter(HarnessAdapter):
         # session_meta, turn_context, world_state, unknown
         return [sysev(f"codex:{etype}")]
 
+    # -- rendering (shadow append) -------------------------------------------
+
     def render_events(
         self, events: list[NormalizedEvent], ctx: SessionContext
     ) -> list[dict[str, Any]]:
-        raise NotImplementedError
+        """Normalized events -> rollout lines. User prompts get both the
+        model-facing response_item and the UI-facing event_msg (codex's own
+        writer does the same); assistant text and action summaries get
+        response_items so they land in the model's context on resume."""
+        out: list[dict[str, Any]] = []
+        for ev in events:
+            ts = ev.timestamp or iso_now_ms()
+            if ev.kind == "user_message":
+                out.append(
+                    {
+                        "timestamp": ts,
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": ev.text}],
+                        },
+                    }
+                )
+                out.append(
+                    {
+                        "timestamp": ts,
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "user_message",
+                            "message": ev.text,
+                            "images": [],
+                            "local_images": [],
+                            "audio": [],
+                            "local_audio": [],
+                            "text_elements": [],
+                        },
+                    }
+                )
+            elif ev.kind == "assistant_message":
+                phase = "final_answer" if ev.phase == "final" else "commentary"
+                out.append(
+                    {
+                        "timestamp": ts,
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": ev.text}],
+                            "phase": phase,
+                        },
+                    }
+                )
+                out.append(
+                    {
+                        "timestamp": ts,
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "agent_message",
+                            "message": ev.text,
+                            "phase": phase,
+                            "memory_citation": None,
+                        },
+                    }
+                )
+        return out
 
     def render_placeholder(self, text: str, ctx: SessionContext) -> list[dict[str, Any]]:
-        raise NotImplementedError
+        return self.render_note(text)
