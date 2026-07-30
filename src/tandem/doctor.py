@@ -18,6 +18,9 @@ _CLAUDE_ENTRY_TYPES = {
     "user", "assistant", "attachment", "system", "summary",
     "queue-operation", "last-prompt", "progress", "file-history-snapshot",
     "mode",  # {"type":"mode","mode":"normal",...} observed on --resume runs
+    # uuid-less metadata entries claude 2.1.220 interleaves with conversation
+    "permission-mode", "ai-title", "file-history-delta", "pr-link",
+    "relocated", "worktree-state",
 }
 _CODEX_LINE_TYPES = {
     "session_meta", "response_item", "event_msg", "turn_context",

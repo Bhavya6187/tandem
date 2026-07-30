@@ -36,6 +36,11 @@ home), `TANDEM_HOME` (tandem state).
     Not conversation content.
   - `queue-operation` (enqueue/dequeue of the prompt), `last-prompt`
     (`leafUuid` pointer), `summary`, `system` — bookkeeping.
+  - `permission-mode`, `ai-title`, `pr-link`, `relocated`, `worktree-state`,
+    `file-history-snapshot` + `file-history-delta` — uuid-less session
+    metadata (permission mode, AI-generated title, linked PR, worktree
+    moves, file-backup tracking). Not conversation content; claude resumes
+    transcripts containing them without complaint.
 - Resume: `claude --resume <sessionId>` (from the same cwd). A new session
   can be pinned to a chosen id with `claude --session-id <uuid>`.
 - Turn boundary: a `user` entry with string content starts a turn; an

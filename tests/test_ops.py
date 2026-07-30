@@ -262,3 +262,25 @@ class TestValidate:
                                    env.session.codex_session_id) == []
         assert validate_transcript("claude", env.claude_shadow,
                                    env.session.claude_session_id) == []
+
+    def test_claude_metadata_entry_types_validate(self, env_factory):
+        """claude 2.1.220 interleaves uuid-less metadata entries with the
+        conversation; a healthy transcript containing them must validate."""
+        from tandem.doctor import validate_transcript
+
+        env = env_factory()
+        sid = env.session.claude_session_id
+        for meta in [
+            {"type": "permission-mode", "permissionMode": "bypassPermissions",
+             "sessionId": sid},
+            {"type": "ai-title", "aiTitle": "Fix switch warnings",
+             "sessionId": sid},
+            {"type": "file-history-delta", "messageId": "m-1",
+             "snapshotMessageId": "s-1", "trackingPath": "pyproject.toml"},
+            {"type": "pr-link", "sessionId": sid, "prNumber": 3,
+             "prUrl": "https://github.com/x/y/pull/3", "prRepository": "x/y"},
+            {"type": "relocated", "sessionId": sid, "relocatedCwd": "/tmp/wt"},
+            {"type": "worktree-state", "worktreeSession": {"worktreeName": "wt"}},
+        ]:
+            write_line(env.claude_shadow, obj=meta)
+        assert validate_transcript("claude", env.claude_shadow, sid) == []
