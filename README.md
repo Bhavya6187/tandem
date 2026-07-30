@@ -12,8 +12,8 @@ spend: only one model runs per turn; the other stays in sync through pure
 local file translation.
 
 [![PyPI](https://img.shields.io/pypi/v/tandem-cli)](https://pypi.org/project/tandem-cli/)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://github.com/Bhavya6187/tandem/blob/main/pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/Bhavya6187/tandem/blob/main/LICENSE)
 
 ```bash
 uv tool install tandem-cli
@@ -164,7 +164,7 @@ between the tools).
 
 Session formats are internal to the CLIs and drift between releases.
 tandem pins what it was built against (observed formats documented in
-[docs/formats.md](docs/formats.md)):
+[docs/formats.md](https://github.com/Bhavya6187/tandem/blob/main/docs/formats.md)):
 
 | CLI | Tested | Accepted range |
 | --- | --- | --- |
@@ -215,4 +215,4 @@ passthrough); state is stdlib `sqlite3`.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/Bhavya6187/tandem/blob/main/LICENSE)
