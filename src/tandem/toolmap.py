@@ -226,6 +226,19 @@ def _parse_patch(patch: str) -> list[tuple[str, str, list[str]]]:
     return ops
 
 
+def _apply_outcome(result, structured: dict) -> tuple[dict, bool | None]:
+    """Fold codex's patch_apply_end enrichment ({success, changes}, attached
+    to the result by the codex adapter) into the synthesized Edit/Write
+    toolUseResult. Without this a failed apply would render as a clean edit."""
+    incoming = result.structured if isinstance(result.structured, dict) else None
+    if not incoming or not ("success" in incoming or "changes" in incoming):
+        return structured, None
+    for key in ("success", "changes"):
+        if key in incoming:
+            structured[key] = incoming[key]
+    return structured, True if incoming.get("success") is False else None
+
+
 def _patch_to_edit(call, result):
     patch = call.arguments if isinstance(call.arguments, str) else ""
     ops = _parse_patch(patch)
@@ -234,9 +247,12 @@ def _patch_to_edit(call, result):
     op, path, body = ops[0]
     if op == "Add":
         content = "\n".join(l[1:] for l in body if l.startswith("+"))
+        structured, is_error = _apply_outcome(
+            result, {"type": "create", "filePath": path, "content": content}
+        )
         return _retool(
             call, result, "Write", {"file_path": path, "content": content},
-            structured={"type": "create", "filePath": path, "content": content},
+            structured=structured, is_error=is_error,
         )
     if op == "Update":
         # Honesty rule: separate hunks describe non-adjacent regions, so
@@ -250,10 +266,13 @@ def _patch_to_edit(call, result):
             return None
         old = "\n".join(l[1:] for l in body if l[:1] in (" ", "-"))
         new = "\n".join(l[1:] for l in body if l[:1] in (" ", "+"))
+        structured, is_error = _apply_outcome(
+            result, {"filePath": path, "oldString": old, "newString": new}
+        )
         return _retool(
             call, result, "Edit",
             {"file_path": path, "old_string": old, "new_string": new},
-            structured={"filePath": path, "oldString": old, "newString": new},
+            structured=structured, is_error=is_error,
         )
     return None  # Delete etc.: Tier 2
 

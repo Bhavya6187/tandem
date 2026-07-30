@@ -258,6 +258,47 @@ class TestCodexToClaudeTier1:
         assert r.structured == {"filePath": "/p/a.py", "oldString": "ctx\nx = 1",
                                 "newString": "ctx\nx = 2"}
 
+    def test_failed_apply_patch_maps_to_an_errored_edit(self):
+        # the codex adapter enriches the result with patch_apply_end's
+        # {success, changes}; dropping it would render a failed apply as a
+        # clean Edit
+        c, r = toolmap.map_pair(
+            call("apply_patch", UPDATE_PATCH, source="codex"),
+            result("Failed to apply patch", source="codex",
+                   structured={"success": False, "changes": {}}),
+            "claude",
+        )
+        assert c.tool == "Edit"
+        assert r.is_error is True
+        assert r.structured["success"] is False
+        assert r.structured["changes"] == {}
+        assert r.structured["filePath"] == "/p/a.py"  # synthesized keys survive
+
+    def test_successful_apply_patch_enrichment_rides_along(self):
+        changes = {"/p/a.py": {"type": "update"}}
+        c, r = toolmap.map_pair(
+            call("apply_patch", UPDATE_PATCH, source="codex"),
+            result("Done!", source="codex",
+                   structured={"success": True, "changes": changes}),
+            "claude",
+        )
+        assert c.tool == "Edit"
+        assert r.is_error is False
+        assert r.structured["success"] is True
+        assert r.structured["changes"] == changes
+
+    def test_failed_add_patch_maps_to_an_errored_write(self):
+        c, r = toolmap.map_pair(
+            call("apply_patch", ADD_PATCH, source="codex"),
+            result("nope", source="codex",
+                   structured={"success": False, "changes": {}}),
+            "claude",
+        )
+        assert c.tool == "Write"
+        assert r.is_error is True
+        assert r.structured["success"] is False
+        assert r.structured["type"] == "create"
+
     def test_multi_file_patch_falls_back(self):
         c, _ = toolmap.map_pair(
             call("apply_patch", MULTI_PATCH, source="codex"),
