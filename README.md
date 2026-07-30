@@ -19,6 +19,8 @@ local file translation.
 uv tool install tandem-cli
 ```
 
+![tandem demo — one session moving between Claude Code and Codex](https://raw.githubusercontent.com/Bhavya6187/tandem/main/docs/demo.gif)
+
 </div>
 
 ---
