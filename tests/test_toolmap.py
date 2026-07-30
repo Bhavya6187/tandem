@@ -3,6 +3,7 @@
 import json
 
 from tandem import toolmap
+from tandem.converter import ReferenceConverter, TranslationError
 from tandem.events import (
     AssistantMessage,
     SessionContext,
@@ -11,6 +12,8 @@ from tandem.events import (
     UserMessage,
 )
 from tandem.harness import get_adapter
+
+from conftest import claude_assistant, claude_tool_result
 
 
 class TestShadowRolloutMeta:
@@ -321,6 +324,46 @@ class TestCodexToolRendering:
         assert [e["payload"]["type"] for e in entries] == [
             "custom_tool_call", "custom_tool_call_output"]
         assert entries[0]["payload"]["input"].startswith("*** Begin Patch")
+
+    def test_mixed_pairs_interleave_through_the_converter(self):
+        """The renderer decides output type from a batch-local custom_ids set,
+        so a function_call and a custom_tool_call outstanding at once must
+        never cross-label their outputs. Pair-at-result emission is what makes
+        that safe: each mapped pair is rendered in its own batch, in the order
+        the results arrived."""
+        conv = ReferenceConverter()
+        ctx = _ctx()
+        entries: list = []
+        for raw in [
+            claude_assistant([
+                {"type": "tool_use", "id": "c1", "name": "Bash",
+                 "input": {"command": "ls"}},
+                {"type": "tool_use", "id": "c2", "name": "Write",
+                 "input": {"file_path": "/p/x.txt", "content": "hi"}},
+            ]),
+            # results come back out of call order, Write first
+            claude_tool_result("c2", "File created", structured={
+                "type": "create", "filePath": "/p/x.txt", "content": "hi"}),
+            claude_tool_result("c1", "x.txt"),
+        ]:
+            got = conv.translate_entry(raw, "claude->codex", ctx)
+            assert not isinstance(got, TranslationError), got
+            entries.extend(got)
+
+        # the two tool_use blocks alone emit nothing: both calls are stashed
+        # until their results arrive
+        assert [e["payload"]["type"] for e in entries] == [
+            "custom_tool_call", "custom_tool_call_output",
+            "function_call", "function_call_output",
+        ]
+        patch_call, patch_out, exec_call, exec_out = (e["payload"] for e in entries)
+        assert patch_call["name"] == "apply_patch"
+        assert patch_call["call_id"] == "c2"
+        assert patch_out["call_id"] == "c2"
+        assert exec_call["name"] == "exec_command"
+        assert exec_call["call_id"] == "c1"
+        assert exec_out["call_id"] == "c1"
+        assert ctx.pending_calls == {}
 
 
 class TestClaudeToolRendering:
