@@ -137,10 +137,16 @@ class StateStore:
         return self._row_to_session(row) if row else None
 
     def latest_session_for_cwd(self, cwd: str) -> PairedSession | None:
-        """Most recently used paired session for a working directory."""
+        """Most recently used paired session for a working directory.
+
+        COALESCE keeps the ordering NULL-immune: a row whose last_used_at was
+        never backfilled (a crash between the ALTER and its commit) falls back
+        to its creation time instead of sorting behind every older row.
+        """
         row = self._conn.execute(
             "SELECT * FROM sessions WHERE cwd = ?"
-            " ORDER BY last_used_at DESC, created_at DESC LIMIT 1",
+            " ORDER BY COALESCE(last_used_at, created_at) DESC, created_at DESC"
+            " LIMIT 1",
             (cwd,),
         ).fetchone()
         return self._row_to_session(row) if row else None

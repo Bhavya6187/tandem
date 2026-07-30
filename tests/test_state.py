@@ -79,6 +79,28 @@ def test_latest_prefers_most_recently_used(tmp_path):
         assert store.get_session(s2.tandem_id) is not None
 
 
+def test_latest_is_immune_to_null_last_used(tmp_path):
+    """A crash between the ALTER and its backfill commit leaves last_used_at
+    NULL forever (the migration only runs when the column is absent). Such a
+    row must fall back to created_at, not sort behind every older session."""
+    with make_store(tmp_path) as store:
+        older = store.create_session("/proj", "claude", "c-1", "x-1")
+        newer = store.create_session("/proj", "claude", "c-2", "x-2")
+        store._conn.execute(
+            "UPDATE sessions SET last_used_at = ?, created_at = ?"
+            " WHERE tandem_id = ?",
+            ("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00",
+             older.tandem_id),
+        )
+        store._conn.execute(
+            "UPDATE sessions SET last_used_at = NULL, created_at = ?"
+            " WHERE tandem_id = ?",
+            ("2026-06-01T00:00:00+00:00", newer.tandem_id),
+        )
+        store._conn.commit()
+        assert store.latest_session_for_cwd("/proj").tandem_id == newer.tandem_id
+
+
 V1_SCHEMA = """
 CREATE TABLE sessions (
     tandem_id TEXT PRIMARY KEY,
