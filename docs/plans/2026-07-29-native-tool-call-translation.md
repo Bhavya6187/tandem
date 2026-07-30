@@ -645,6 +645,10 @@ UPDATE_PATCH = ("*** Begin Patch\n*** Update File: /p/a.py\n@@\n ctx\n-x = 1\n+x
                 "*** End Patch")
 MULTI_PATCH = ("*** Begin Patch\n*** Add File: /p/a\n+1\n*** Add File: /p/b\n+2\n"
                "*** End Patch")
+TWO_HUNK_PATCH = ("*** Begin Patch\n*** Update File: /p/a.py\n@@\n ctx\n-x = 1\n+x = 2\n"
+                  "@@\n far\n-y = 1\n+y = 2\n*** End Patch")
+MOVE_PATCH = ("*** Begin Patch\n*** Update File: /p/old.py\n*** Move to: /p/new.py\n"
+              "@@\n ctx\n-x = 1\n+x = 2\n*** End Patch")
 
 
 class TestCodexToClaudeTier1:
@@ -676,6 +680,26 @@ class TestCodexToClaudeTier1:
         )
         assert c.tool == "apply_patch"
         assert c.arguments == {"input": MULTI_PATCH}
+
+    def test_multi_hunk_update_falls_back(self):
+        # two hunks touch non-adjacent regions; splicing them into one
+        # old_string would assert text that appears nowhere in the file
+        c, _ = toolmap.map_pair(
+            call("apply_patch", TWO_HUNK_PATCH, source="codex"),
+            result("Done!", source="codex"), "claude",
+        )
+        assert c.tool == "apply_patch"
+        assert c.arguments == {"input": TWO_HUNK_PATCH}
+
+    def test_move_to_update_falls_back(self):
+        # an Edit record would swallow the rename and name a path that no
+        # longer exists: honesty rule, Tier 2
+        c, _ = toolmap.map_pair(
+            call("apply_patch", MOVE_PATCH, source="codex"),
+            result("Done!", source="codex"), "claude",
+        )
+        assert c.tool == "apply_patch"
+        assert c.arguments == {"input": MOVE_PATCH}
 
     def test_update_plan_becomes_todowrite(self):
         c, r = toolmap.map_pair(
@@ -731,6 +755,15 @@ def _patch_to_edit(call, result):
             structured={"type": "create", "filePath": path, "content": content},
         )
     if op == "Update":
+        # Honesty rule: separate hunks describe non-adjacent regions, so
+        # splicing them yields an old_string that appears nowhere in the file;
+        # a Move to: line would vanish, leaving the record asserting an
+        # in-place edit of a path that no longer exists. Both are Tier 2.
+        # (Zero @@ lines is a valid single-hunk patch and still maps.)
+        if sum(1 for l in body if l.startswith("@@")) > 1 or any(
+            l.startswith("*** Move to:") for l in body
+        ):
+            return None
         old = "\n".join(l[1:] for l in body if l[:1] in (" ", "-"))
         new = "\n".join(l[1:] for l in body if l[:1] in (" ", "+"))
         return _retool(

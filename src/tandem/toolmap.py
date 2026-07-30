@@ -239,6 +239,15 @@ def _patch_to_edit(call, result):
             structured={"type": "create", "filePath": path, "content": content},
         )
     if op == "Update":
+        # Honesty rule: separate hunks describe non-adjacent regions, so
+        # splicing them yields an old_string that appears nowhere in the file;
+        # a Move to: line would vanish, leaving the record asserting an
+        # in-place edit of a path that no longer exists. Both are Tier 2.
+        # (Zero @@ lines is a valid single-hunk patch and still maps.)
+        if sum(1 for l in body if l.startswith("@@")) > 1 or any(
+            l.startswith("*** Move to:") for l in body
+        ):
+            return None
         old = "\n".join(l[1:] for l in body if l[:1] in (" ", "-"))
         new = "\n".join(l[1:] for l in body if l[:1] in (" ", "+"))
         return _retool(

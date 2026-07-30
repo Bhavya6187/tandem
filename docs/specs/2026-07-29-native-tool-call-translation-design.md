@@ -113,7 +113,7 @@ Tier 2. Mapping never fails an entry.
 | `exec_command {cmd}` | `tool_use Bash {"command": …}`; exit-code header stripped into `toolUseResult {stdout, exitCode}`, `is_error` when non-zero |
 | `apply_patch`, single `Add File` | `tool_use Write {file_path, content}`; `toolUseResult {type: "create", filePath, content}` |
 | `apply_patch`, single `Update File` | `tool_use Edit {file_path, old_string, new_string}` — old = context+deleted lines, new = context+added lines, reconstructed from the hunk; `patch_apply_end` enrichment (success/changes), when seen, feeds `toolUseResult` |
-| `apply_patch`, anything else (multi-file, `Delete File`, malformed) | Tier 2: `tool_use apply_patch {"input": <patch text>}` |
+| `apply_patch`, anything else (multi-file, multi-hunk, `Move to:`, `Delete File`, malformed) | Tier 2: `tool_use apply_patch {"input": <patch text>}` — multi-hunk would splice non-adjacent regions into an `old_string` matching nothing in the file, and a `Move to:` rename would vanish behind an in-place-edit record |
 | `update_plan {plan}` | `tool_use TodoWrite {todos: [{content, status}]}`; result content verbatim |
 
 ### Tier 2 residue (measured, fine to leave verbatim)
