@@ -5,7 +5,7 @@ tmp homes (same env vars as conftest.Env)."""
 import click.testing
 import pytest
 
-from tandem import cli
+from tandem import cli, compat
 from tandem.state import StateStore
 
 
@@ -139,7 +139,13 @@ def test_resume_warns_but_proceeds_without_binaries(homes, entered, monkeypatch)
     assert entered[0].tandem_id == s.tandem_id
 
 
-def test_doctor_no_session_hints_tandem(homes, ok_versions):
+def test_doctor_no_session_hints_tandem(homes, monkeypatch):
+    # run_doctor probes versions through the adapters, not cli._check_versions,
+    # so patch the detection itself: no real `claude`/`codex` subprocess.
+    monkeypatch.setattr(
+        compat, "detect_cli_version",
+        lambda binary: {"claude": "2.1.220", "codex": "0.145.0"}.get(binary),
+    )
     r = click.testing.CliRunner().invoke(cli.main, ["doctor"])
     assert r.exit_code == 1
     assert "tandem start" not in r.output
