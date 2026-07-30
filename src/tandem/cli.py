@@ -18,8 +18,21 @@ def _cwd() -> str:
     return str(Path.cwd())
 
 
+# Set by the tandem prompt (shell.py) around each dispatched command so it
+# acts on that shell's own session. Without it, a second `tandem` in the same
+# directory becomes the cwd-MRU and silently steals `status`/`sync`/`run --on`
+# typed in the first shell.
+_SESSION_ID: str | None = None
+
+
+def _resolve_session(store: StateStore) -> PairedSession | None:
+    if _SESSION_ID is not None:
+        return store.get_session(_SESSION_ID)
+    return store.latest_session_for_cwd(_cwd())
+
+
 def _require_session(store: StateStore) -> PairedSession:
-    session = store.latest_session_for_cwd(_cwd())
+    session = _resolve_session(store)
     if session is None:
         click.echo(
             "No tandem session for this directory. Run `tandem` to start one.",
@@ -206,6 +219,29 @@ def _default_sink_factory(store, session, source):
     return SyncEngine(store, session, source)
 
 
+def _report_switch(old: str, new_active: str, problems, mem) -> None:
+    """Report the outcome of a role flip. Shared by the one-shot `switch`
+    command and the tandem prompt's `switch`, so neither path drops
+    memory-sync actions or the may-not-resume advisory."""
+    click.echo(
+        f"active harness: {get_adapter(old).display_name} -> "
+        f"{get_adapter(new_active).display_name}"
+    )
+    for a in mem.actions:
+        click.echo(f"  memory: {a}")
+    for w in mem.warnings:
+        click.secho(f"  memory: {w}", fg="yellow", err=True)
+    for p in problems:
+        click.secho(f"  warning: {p}", fg="yellow", err=True)
+    if problems:
+        click.secho(
+            "  the newly active session may not resume cleanly; "
+            "run `tandem doctor` for details.",
+            fg="yellow",
+            err=True,
+        )
+
+
 @main.command()
 def switch() -> None:
     """Make the shadow harness active (instant; no re-conversion)."""
@@ -219,23 +255,7 @@ def switch() -> None:
         except Exception as exc:
             click.secho(f"switch failed: {exc}", fg="red", err=True)
             sys.exit(1)
-        click.echo(
-            f"active harness: {get_adapter(old).display_name} -> "
-            f"{get_adapter(new_active).display_name}"
-        )
-        for a in mem.actions:
-            click.echo(f"  memory: {a}")
-        for w in mem.warnings:
-            click.secho(f"  memory: {w}", fg="yellow", err=True)
-        for p in problems:
-            click.secho(f"  warning: {p}", fg="yellow", err=True)
-        if problems:
-            click.secho(
-                "  the newly active session may not resume cleanly; "
-                "run `tandem doctor` for details.",
-                fg="yellow",
-                err=True,
-            )
+        _report_switch(old, new_active, problems, mem)
         click.echo("Run `tandem resume` to continue in the new harness.")
 
 
@@ -280,7 +300,7 @@ def doctor(live: bool) -> None:
     from .doctor import run_doctor
 
     with StateStore() as store:
-        session = store.latest_session_for_cwd(_cwd())
+        session = _resolve_session(store)
         report = run_doctor(store, session, live=live)
     icons = {"ok": ("✓", "green"), "warn": ("!", "yellow"), "fail": ("✗", "red")}
     for check in report.checks:
