@@ -143,6 +143,33 @@ class TestSyncCodexToClaude:
         assert entries[1]["parentUuid"] == entries[0]["uuid"]
         assert entries[2]["parentUuid"] == entries[1]["uuid"]
 
+    def test_synced_entries_carry_claude_model(self, env_factory):
+        """After claude itself has run, synced assistant entries carry the
+        model it last used, so `claude --resume` restores the real model
+        instead of complaining about '<synced>'."""
+        env = env_factory(active="codex")
+        write_line(env.claude_shadow,
+                   claude_assistant([{"type": "text", "text": "hi"}]))
+        for obj in self.codex_lines():
+            write_line(env.source_file, obj)
+        loop, _ = env.loop(source="codex")
+        loop.drain()
+        synced = [e for e in read_jsonl(env.claude_shadow)
+                  if e.get("type") == "assistant" and "codex" in str(e.get("message"))]
+        assert synced
+        assert all(e["message"]["model"] == "claude-fable-5" for e in synced)
+
+    def test_synced_model_placeholder_when_claude_never_ran(self, env_factory):
+        # regression guard for the fresh-shadow case: no real model to copy
+        env = env_factory(active="codex")
+        for obj in self.codex_lines():
+            write_line(env.source_file, obj)
+        loop, _ = env.loop(source="codex")
+        loop.drain()
+        synced = [e for e in read_jsonl(env.claude_shadow)
+                  if e.get("type") == "assistant"]
+        assert all(e["message"]["model"] == "<synced>" for e in synced)
+
     def test_leaf_rederived_from_file(self, env_factory):
         """If claude itself appended entries (it was active earlier), new
         synced entries chain onto claude's real leaf, not a stale one."""
