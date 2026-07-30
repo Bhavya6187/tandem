@@ -248,8 +248,8 @@ class CodexAdapter(HarnessAdapter):
     ) -> list[dict[str, Any]]:
         """Normalized events -> rollout lines. User prompts get both the
         model-facing response_item and the UI-facing event_msg (codex's own
-        writer does the same); assistant text and action summaries get
-        response_items so they land in the model's context on resume.
+        writer does the same); assistant text gets a response_item so it
+        lands in the model's context on resume.
 
         Tool activity is rendered as native pairs (response_item only, no
         event_msg): dict arguments -> function_call with JSON-stringified

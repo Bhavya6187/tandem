@@ -184,7 +184,10 @@ Claude side: `Agent`/`Task`, `TaskCreate`/`TaskUpdate`, `AskUserQuestion`,
 `write_stdin`, `spawn_agent`/`wait_agent`/`close_agent`, `view_image`….
 On the traces on this machine, Tier 1 covers ~87% of Claude-side call
 volume (Bash+Edit+Write+Read of 152 calls in the M1–M5 session) and ~97%
-of codex-side (exec_command+apply_patch+update_plan of ~930 calls).
+of codex-side (exec_command+apply_patch+update_plan of ~930 calls). Those
+are *name*-level shares, not the Tier 1 hit rate: the honesty rule sends
+some of them to Tier 2 anyway — of the 49 real `apply_patch` Update ops on
+this machine, 18 are multi-`@@` and land in Tier 2.
 
 ## Codex rendering (`harness/codex.py`)
 
