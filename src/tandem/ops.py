@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from . import paths
-from .harness import get_adapter
+from .harness import get_adapter, other
 from .runner import TailLoop, await_codex_rollout
 from .state import PairedSession, StateStore
 from .sync import SyncEngine, SyncSetupError
@@ -34,9 +34,15 @@ def source_transcript(session: PairedSession, source: str) -> Path | None:
     return adapter.transcript_path(session.cwd, sid)
 
 
-def drain_source(store: StateStore, session: PairedSession, source: str) -> int:
+def drain_source(
+    store: StateStore, session: PairedSession, source: str,
+    *, flush_dangling: bool = False,
+) -> int:
     """Translate any unsynced tail of `source`'s file into the other file.
-    Pure local file I/O. Returns lines consumed."""
+    Pure local file I/O. Returns lines consumed. With flush_dangling=True,
+    close any still-unpaired tool calls with placeholder results afterwards
+    (required when the source is being handed off: both replay APIs reject
+    a dangling call)."""
     transcript = source_transcript(session, source)
     if transcript is None:
         return 0
@@ -50,6 +56,8 @@ def drain_source(store: StateStore, session: PairedSession, source: str) -> int:
             break
     if loop.errors:
         raise SyncSetupError("; ".join(loop.errors))
+    if flush_dangling:
+        engine.flush_dangling(loop.ctx, loop.cursor)
     return total
 
 
@@ -96,7 +104,7 @@ def switch_session(store: StateStore, session: PairedSession):
         _create_codex_shadow_late(store, session)
         session = store.get_session(session.tandem_id) or session
 
-    drain_source(store, session, old_active)
+    drain_source(store, session, old_active, flush_dangling=True)
     fast_forward(store, session, new_active)
     store.set_active(session.tandem_id, new_active)
 
@@ -146,7 +154,7 @@ def run_oneoff(
     # Catch up the active side first, then mark the target's whole file as
     # known so only the new turn flows back afterwards. (When target IS the
     # active side there is nothing to fast-forward — its cursor is live.)
-    drain_source(store, session, session.active)
+    drain_source(store, session, session.active, flush_dangling=True)
     if target != session.active and sid and source_transcript(session, target) is not None:
         fast_forward(store, session, target)
 
@@ -170,5 +178,30 @@ def run_oneoff(
                 fast_forward_to_zero.line_index = 0
                 store.save_cursor(fast_forward_to_zero)
 
-    drain_source(store, session, target)
+    # Echo suppression (see the module docstring): this drain appends
+    # tandem's translation of the target's turn to the OTHER harness's file.
+    # Those appends are by construction already represented in the target's
+    # file, so the echo side's cursor has to move past them — otherwise its
+    # next drain translates them straight back, duplicating call ids and text.
+    echo_side = other(target)
+    echo_pre_size = _file_size(source_transcript(session, echo_side))
+    echo_pre_offset = store.get_cursor(session.tandem_id, echo_side).byte_offset
+
+    drain_source(store, session, target, flush_dangling=True)
+
+    # Only when the echo side was fully synced before the drain is everything
+    # now in its file known to be ours. If it had an unsynced tail (a
+    # concurrent writer), fast-forwarding would swallow a live turn: leave the
+    # cursor alone and let the normal drain pick both up.
+    if echo_pre_size is not None and echo_pre_offset == echo_pre_size:
+        fast_forward(store, session, echo_side)
     return code
+
+
+def _file_size(path: Path | None) -> int | None:
+    if path is None:
+        return None
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None

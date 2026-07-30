@@ -10,6 +10,8 @@
 
 **Spec:** `docs/specs/2026-07-29-native-tool-call-translation-design.md` — read it before starting.
 
+**Baseline:** Revalidated against main after the tandem-shell merge (`9f21464`). Every file Tasks 1–9 modify is unchanged by that merge; the shell (`shell.py`) and CLI both dispatch role flips through `ops.switch_session` and one-offs through `ops.run_oneoff`, so the Task-8 flush wiring points are still the single choke points. The `tandem sync` command's manual `drain_source` call (`cli.py:339`) intentionally does **not** flush — the active harness keeps running, so its in-flight calls are not dangles. CLI vocabulary for Task 10: `tandem start` no longer exists — bare `tandem [--active claude|codex]` pairs and enters a session, and `switch` is available both as a CLI verb and at the tandem shell prompt (which re-enters the new active harness immediately).
+
 ## Global Constraints
 
 - Attribution: tool calls/results carry **no** `[via claude-code]`/`[via codex]` tag; text messages keep tags unchanged.
@@ -432,15 +434,44 @@ class TestClaudeToCodexTier1:
         assert c.tool == "Edit"
 
     def test_grep_and_glob(self):
+        # Grep's schema defaults output_mode to files_with_matches, and a
+        # transcript records only the args actually passed: omitted => -l
         c, _ = toolmap.map_pair(
             call("Grep", {"pattern": "def main", "path": "src"}),
-            result("src/a.py:1:def main"), "codex",
+            result("src/a.py"), "codex",
         )
-        assert c.arguments == {"cmd": "rg -n 'def main' src"}
+        assert c.arguments == {"cmd": "rg -l 'def main' src"}
         c, _ = toolmap.map_pair(
             call("Glob", {"pattern": "**/*.py"}), result("a.py"), "codex",
         )
         assert c.arguments == {"cmd": "rg --files -g '**/*.py'"}
+
+    def test_grep_content_mode_uses_line_numbers(self):
+        c, _ = toolmap.map_pair(
+            call("Grep", {"pattern": "def main", "path": "src",
+                          "output_mode": "content"}),
+            result("src/a.py:1:def main"), "codex",
+        )
+        assert c.arguments == {"cmd": "rg -n 'def main' src"}
+
+    def test_grep_count_mode_falls_back(self):
+        # 'src/a.py:3' means "3 matches", which `rg -n` output would read as
+        # line 3: honesty rule, Tier 2
+        c, _ = toolmap.map_pair(
+            call("Grep", {"pattern": "def main", "path": "src",
+                          "output_mode": "count"}),
+            result("src/a.py:3"), "codex",
+        )
+        assert c.tool == "Grep"
+
+    def test_grep_head_limit_falls_back(self):
+        # truncated output under a command implying the full result
+        c, _ = toolmap.map_pair(
+            call("Grep", {"pattern": "def main", "output_mode": "content",
+                          "head_limit": 10}),
+            result("src/a.py:1:def main"), "codex",
+        )
+        assert c.tool == "Grep"
 
     def test_todowrite_becomes_update_plan(self):
         c, _ = toolmap.map_pair(
@@ -523,7 +554,15 @@ def _grep_to_rg(call, result):
     args = call.arguments
     if not isinstance(args, dict) or not args.get("pattern"):
         return None
-    flag = "-l" if args.get("output_mode") == "files_with_matches" else "-n"
+    # Grep's schema defaults output_mode to files_with_matches and a transcript
+    # records only the args actually passed, so an omitted mode means -l. count
+    # output (path:<n> = n matches) would read as a line number under rg -n, and
+    # head_limit shows truncated output under a command implying the full
+    # result: neither is expressible honestly, so both degrade to Tier 2.
+    mode = args.get("output_mode") or "files_with_matches"
+    if mode not in ("files_with_matches", "content") or args.get("head_limit"):
+        return None
+    flag = "-n" if mode == "content" else "-l"
     cmd = f"rg {flag}"
     if args.get("-i"):
         cmd += " -i"
@@ -606,6 +645,10 @@ UPDATE_PATCH = ("*** Begin Patch\n*** Update File: /p/a.py\n@@\n ctx\n-x = 1\n+x
                 "*** End Patch")
 MULTI_PATCH = ("*** Begin Patch\n*** Add File: /p/a\n+1\n*** Add File: /p/b\n+2\n"
                "*** End Patch")
+TWO_HUNK_PATCH = ("*** Begin Patch\n*** Update File: /p/a.py\n@@\n ctx\n-x = 1\n+x = 2\n"
+                  "@@\n far\n-y = 1\n+y = 2\n*** End Patch")
+MOVE_PATCH = ("*** Begin Patch\n*** Update File: /p/old.py\n*** Move to: /p/new.py\n"
+              "@@\n ctx\n-x = 1\n+x = 2\n*** End Patch")
 
 
 class TestCodexToClaudeTier1:
@@ -637,6 +680,26 @@ class TestCodexToClaudeTier1:
         )
         assert c.tool == "apply_patch"
         assert c.arguments == {"input": MULTI_PATCH}
+
+    def test_multi_hunk_update_falls_back(self):
+        # two hunks touch non-adjacent regions; splicing them into one
+        # old_string would assert text that appears nowhere in the file
+        c, _ = toolmap.map_pair(
+            call("apply_patch", TWO_HUNK_PATCH, source="codex"),
+            result("Done!", source="codex"), "claude",
+        )
+        assert c.tool == "apply_patch"
+        assert c.arguments == {"input": TWO_HUNK_PATCH}
+
+    def test_move_to_update_falls_back(self):
+        # an Edit record would swallow the rename and name a path that no
+        # longer exists: honesty rule, Tier 2
+        c, _ = toolmap.map_pair(
+            call("apply_patch", MOVE_PATCH, source="codex"),
+            result("Done!", source="codex"), "claude",
+        )
+        assert c.tool == "apply_patch"
+        assert c.arguments == {"input": MOVE_PATCH}
 
     def test_update_plan_becomes_todowrite(self):
         c, r = toolmap.map_pair(
@@ -692,6 +755,15 @@ def _patch_to_edit(call, result):
             structured={"type": "create", "filePath": path, "content": content},
         )
     if op == "Update":
+        # Honesty rule: separate hunks describe non-adjacent regions, so
+        # splicing them yields an old_string that appears nowhere in the file;
+        # a Move to: line would vanish, leaving the record asserting an
+        # in-place edit of a path that no longer exists. Both are Tier 2.
+        # (Zero @@ lines is a valid single-hunk patch and still maps.)
+        if sum(1 for l in body if l.startswith("@@")) > 1 or any(
+            l.startswith("*** Move to:") for l in body
+        ):
+            return None
         old = "\n".join(l[1:] for l in body if l[:1] in (" ", "-"))
         new = "\n".join(l[1:] for l in body if l[:1] in (" ", "+"))
         return _retool(
@@ -1489,17 +1561,17 @@ No code — this validates the whole feature against the real CLIs, mirroring ho
 
 - [ ] **Step 1: claude→codex live check**
 
-In a scratch dir: `tandem start` with claude active; run a short claude turn that uses at least one Bash, one Write, and one Edit. Then `tandem switch` (or the CLI's switch verb) and confirm:
+In a scratch project dir: run bare `tandem` (claude is the default active). In the claude session, run a short turn that uses at least one Bash, one Write, and one Edit, then exit claude to land at the tandem shell prompt and type `switch`. The shell flips roles and immediately resumes codex interactively — this exercises the Task-1 `model_provider` fix on the normal path. Confirm:
 - the codex shadow rollout contains `function_call exec_command` / `custom_tool_call apply_patch` pairs (not prose), and
-- **interactive** `codex resume <codex-session-id>` opens and answers a question about the synced work (this also exercises the Task-1 `model_provider` fix).
+- the resumed codex answers a question about the synced work (e.g. "what file did I just create and what's in it?").
 
 - [ ] **Step 2: codex→claude live check**
 
-Same pairing, codex active: run a codex turn with an `exec_command` and an `apply_patch`. Switch and confirm `claude --resume <claude-session-id>` opens, renders the history, and answers "what did the last patch change?" correctly from the synced `tool_use`/`tool_result` entries.
+In a second scratch dir: `tandem --active codex`; run a codex turn with an `exec_command` and an `apply_patch`, exit to the tandem prompt, `switch`. Confirm the resumed claude session renders the history and answers "what did the last patch change?" correctly from the synced `tool_use`/`tool_result` entries.
 
 - [ ] **Step 3: dangle check**
 
-Interrupt a claude turn mid-tool-call (Ctrl-C while a long `sleep` Bash runs), switch, and confirm the codex shadow's last two response_items are the mapped call plus `(tool result not recorded)`, and that codex still resumes cleanly.
+In the Step-1 pairing: start a claude turn with a long-running Bash (`sleep 120`), Ctrl-C claude mid-call, then `switch` at the tandem prompt. Confirm the codex shadow's last two response_items are the mapped `exec_command` call plus a `function_call_output` of `(tool result not recorded)`, and that codex still resumes cleanly on top.
 
 - [ ] **Step 4: Record outcomes**
 

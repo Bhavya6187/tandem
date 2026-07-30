@@ -8,11 +8,53 @@ from tandem.util import read_jsonl
 
 from conftest import (
     claude_assistant,
+    claude_tool_result,
     claude_user,
     codex_turn,
     shadow_texts,
     write_line,
 )
+
+
+def codex_tool_turn(user_text, assistant_text, call_id="call-echo-1"):
+    """A codex turn that includes a completed native tool call."""
+    return [
+        {"timestamp": "t", "type": "event_msg",
+         "payload": {"type": "task_started", "turn_id": "x"}},
+        {"timestamp": "t", "type": "event_msg",
+         "payload": {"type": "user_message", "message": user_text}},
+        {"timestamp": "t", "type": "response_item",
+         "payload": {"type": "function_call", "name": "exec_command",
+                     "arguments": '{"cmd": "ls"}', "call_id": call_id}},
+        {"timestamp": "t", "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": call_id,
+                     "output": "a.py"}},
+        {"timestamp": "t", "type": "response_item",
+         "payload": {"type": "message", "role": "assistant", "phase": "final_answer",
+                     "content": [{"type": "output_text", "text": assistant_text}]}},
+        {"timestamp": "t", "type": "event_msg",
+         "payload": {"type": "task_complete", "turn_id": "x",
+                     "last_agent_message": assistant_text}},
+    ]
+
+
+def codex_call_ids(rollout_path):
+    return [
+        e["payload"].get("call_id")
+        for e in read_jsonl(rollout_path)
+        if e.get("type") == "response_item"
+        and e["payload"].get("type") in ("function_call", "custom_tool_call")
+    ]
+
+
+def claude_tool_use_ids(transcript_path):
+    return [
+        b.get("id")
+        for e in read_jsonl(transcript_path)
+        if e.get("type") == "assistant"
+        for b in (e.get("message") or {}).get("content") or []
+        if isinstance(b, dict) and b.get("type") == "tool_use"
+    ]
 
 
 class TestSwitch:
@@ -137,6 +179,63 @@ class TestOneOff:
             "[via claude-code] next claude prompt" in t
             for t in shadow_texts(env.codex_shadow)
         )
+
+    def test_oneoff_appends_do_not_echo_back(self, env_factory, monkeypatch):
+        """run_oneoff's closing drain writes tandem's translation of the
+        target's turn into the OTHER file; that side's cursor must move past
+        those appends, or the next drain bounces them back — duplicate
+        call_ids, which both replay APIs reject."""
+        env = env_factory(active="claude")
+        ops.fast_forward(env.store, env.session, "claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            for obj in codex_tool_turn("patch it", "Patched."):
+                write_line(env.codex_shadow, obj)
+
+            class R:
+                returncode = 0
+
+            return R()
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_oneoff(env.store, env.session, "codex", "patch it")
+
+        # the echo side (claude) is drained again, as the next switch/sync does
+        ops.drain_source(env.store, env.refresh(), "claude")
+
+        ids = codex_call_ids(env.codex_shadow)
+        assert ids == ["call-echo-1"], f"echoed call ids: {ids}"
+        texts = shadow_texts(env.codex_shadow)
+        assert sum("Patched." in t for t in texts) == 1, texts
+
+    def test_oneoff_on_claude_does_not_echo_back(self, env_factory, monkeypatch):
+        """Mirror direction: codex active, one-off routed to claude."""
+        env = env_factory(active="codex")
+        ops.fast_forward(env.store, env.session, "codex")
+
+        def fake_run(argv, cwd=None, **kw):
+            write_line(env.claude_shadow, claude_user("patch it"))
+            write_line(env.claude_shadow, claude_assistant(
+                [{"type": "tool_use", "id": "tu-echo-1", "name": "Bash",
+                  "input": {"command": "ls"}}], uuid="a-echo-1"))
+            write_line(env.claude_shadow, claude_tool_result("tu-echo-1", "a.py"))
+            write_line(env.claude_shadow, claude_assistant(
+                [{"type": "text", "text": "Patched."}], uuid="a-echo-2"))
+
+            class R:
+                returncode = 0
+
+            return R()
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_oneoff(env.store, env.session, "claude", "patch it")
+
+        ops.drain_source(env.store, env.refresh(), "codex")
+
+        ids = claude_tool_use_ids(env.claude_shadow)
+        assert ids == ["tu-echo-1"], f"echoed tool_use ids: {ids}"
+        dump = json.dumps(read_jsonl(env.claude_shadow))
+        assert dump.count("Patched.") == 1, dump
 
 
 class TestValidate:

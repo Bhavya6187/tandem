@@ -55,20 +55,56 @@ class TestClaudeToCodex:
             if e["type"] == "response_item" and e["payload"].get("role") == "assistant"
         ]
         texts = [a["payload"]["content"][0]["text"] for a in assistant_items]
-        # 2 claude text messages + 2 tool-call action summaries
-        assert len(texts) == 4
+        # 2 claude text messages, still attribution-tagged
+        assert len(texts) == 2
         assert all(t.startswith("[via claude-code]") for t in texts)
 
-        summaries = [t for t in texts if "hello.txt" in t and ("created" in t or "ran" in t)]
-        assert any("created" in t and "+hi tandem" in t for t in texts)
-        assert any("ran `cat" in t and "hi tandem" in t for t in texts)
+        # the Write became a native custom_tool_call apply_patch pair
+        customs = [e["payload"] for e in entries
+                   if e["payload"].get("type") == "custom_tool_call"]
+        assert len(customs) == 1
+        assert customs[0]["name"] == "apply_patch"
+        assert "*** Add File:" in customs[0]["input"]
+        assert "+hi tandem" in customs[0]["input"]
+
+        # the Bash became a native exec_command pair
+        fcalls = [e["payload"] for e in entries
+                  if e["payload"].get("type") == "function_call"]
+        assert len(fcalls) == 1
+        assert fcalls[0]["name"] == "exec_command"
+        cmd = json.loads(fcalls[0]["arguments"])["cmd"]
+        assert cmd.startswith("cat ") and cmd.endswith("hello.txt")
+        outs = [e["payload"] for e in entries
+                if e["payload"].get("type", "").endswith("_output")]
+        assert len(outs) == 2
+        assert any("hi tandem" in o["output"] for o in outs)
 
         # tool pairing consumed all pending calls
         assert ctx.pending_calls == {}
 
         # thinking, attachments, queue ops produce nothing
         kinds = {e["payload"].get("type") for e in entries}
-        assert kinds == {"message", "user_message", "agent_message"}
+        assert kinds == {
+            "message", "user_message", "agent_message",
+            "custom_tool_call", "custom_tool_call_output",
+            "function_call", "function_call_output",
+        }
+
+    def test_orphan_result_falls_back_to_prose(self):
+        # a result whose call was never seen (e.g. a restart lost the
+        # pairing): a lone native tool_result would break replay, so the
+        # fallback stays prose
+        conv = ReferenceConverter()
+        ctx = make_ctx("claude->codex")
+        got = conv.translate_entry(
+            {"type": "user", "uuid": "u1", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "gone", "content": "3 failed"}]}},
+            "claude->codex", ctx,
+        )
+        assert [e["payload"]["type"] for e in got] == ["message", "agent_message"]
+        assert got[0]["payload"]["content"][0]["text"] == (
+            "[via claude-code] tool result (ok): 3 failed"
+        )
 
     def test_error_localized_to_entry(self):
         conv = ReferenceConverter()
@@ -98,36 +134,42 @@ class TestCodexToClaude:
         assert ctx.claude_leaf_uuid == entries[-1]["uuid"]
         assert all(e["sessionId"] == ctx.claude_session_id for e in entries)
 
-        users = [e for e in entries if e["type"] == "user"]
-        assert len(users) == 1
-        assert users[0]["message"]["content"].startswith(
+        prompts = [e for e in entries if e["type"] == "user"
+                   and isinstance(e["message"]["content"], str)]
+        assert len(prompts) == 1
+        assert prompts[0]["message"]["content"].startswith(
             "[via codex] Create a file named hello.txt"
         )
 
-        assistants = [e for e in entries if e["type"] == "assistant"]
-        texts = [a["message"]["content"][0]["text"] for a in assistants]
-        assert all(t.startswith("[via codex]") for t in texts)
-        # 3 codex messages (2 commentary + 1 final) + 4 action summaries
-        assert len(texts) == 7
-
-        patch_summaries = [t for t in texts if "applied patch" in t]
-        assert len(patch_summaries) == 1
-        assert "add hello.txt" in patch_summaries[0]
-        assert "*** Begin Patch" in patch_summaries[0]
-
-        exec_summaries = [t for t in texts if t.startswith("[via codex] ran `")]
-        assert len(exec_summaries) == 3
-        assert any("`cat hello.txt` -> exit 0" in t for t in exec_summaries)
-        assert ctx.pending_calls == {}
-
-    def test_exec_output_header_stripped(self):
-        entries, _ = translate_file("codex-probe.jsonl", "codex->claude")
         texts = [
-            e["message"]["content"][0]["text"]
-            for e in entries
+            e["message"]["content"][0]["text"] for e in entries
             if e["type"] == "assistant"
+            and e["message"]["content"][0]["type"] == "text"
         ]
-        cat = next(t for t in texts if "`cat hello.txt`" in t)
-        assert "Chunk ID" not in cat
-        assert "Original token count" not in cat
-        assert "hi tandem" in cat
+        # 3 codex messages (2 commentary + 1 final), still tagged; no summaries
+        assert len(texts) == 3
+        assert all(t.startswith("[via codex]") for t in texts)
+
+        tool_uses = [
+            e["message"]["content"][0] for e in entries
+            if e["type"] == "assistant"
+            and e["message"]["content"][0]["type"] == "tool_use"
+        ]
+        # apply_patch add hello.txt -> Write; 3 exec_command -> Bash
+        # (count, not order: the probe's call order is not pinned here)
+        assert sorted(t["name"] for t in tool_uses) == ["Bash", "Bash", "Bash", "Write"]
+        write = next(t for t in tool_uses if t["name"] == "Write")
+        assert write["input"]["file_path"].endswith("hello.txt")
+        assert "hi tandem" in write["input"]["content"]
+        assert any(t["name"] == "Bash" and t["input"]["command"] == "cat hello.txt"
+                   for t in tool_uses)
+
+        results = [e for e in entries if e["type"] == "user"
+                   and isinstance(e["message"]["content"], list)]
+        assert len(results) == 4
+        cat = next(e for e in results
+                   if "hi tandem" in e["message"]["content"][0]["content"])
+        # exec header stripped from content, exit code in toolUseResult
+        assert "Original token count" not in cat["message"]["content"][0]["content"]
+        assert cat["toolUseResult"]["exitCode"] == 0
+        assert ctx.pending_calls == {}

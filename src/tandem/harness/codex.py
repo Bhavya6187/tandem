@@ -9,6 +9,7 @@ Session format observed on codex-cli 0.145.0 (docs/formats.md):
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,9 @@ class CodexAdapter(HarnessAdapter):
                 "cli_version": version,
                 "source": "exec",
                 "thread_source": "user",
+                # codex >= 0.145 interactive thread/resume rejects rollouts
+                # without a provider id; "openai" is codex's built-in default
+                "model_provider": "openai",
                 "history_mode": "legacy",
             },
         }
@@ -244,9 +248,15 @@ class CodexAdapter(HarnessAdapter):
     ) -> list[dict[str, Any]]:
         """Normalized events -> rollout lines. User prompts get both the
         model-facing response_item and the UI-facing event_msg (codex's own
-        writer does the same); assistant text and action summaries get
-        response_items so they land in the model's context on resume."""
+        writer does the same); assistant text gets a response_item so it
+        lands in the model's context on resume.
+
+        Tool activity is rendered as native pairs (response_item only, no
+        event_msg): dict arguments -> function_call with JSON-stringified
+        arguments, str arguments -> custom_tool_call with input; the matching
+        result follows as function_call_output / custom_tool_call_output."""
         out: list[dict[str, Any]] = []
+        custom_ids: set[str] = set()  # calls rendered as custom_tool_call
         for ev in events:
             ts = ev.timestamp or iso_now_ms()
             if ev.kind == "user_message":
@@ -302,6 +312,28 @@ class CodexAdapter(HarnessAdapter):
                         },
                     }
                 )
+            elif ev.kind == "tool_call":
+                if isinstance(ev.arguments, str):
+                    custom_ids.add(ev.call_id)
+                    payload: dict[str, Any] = {
+                        "type": "custom_tool_call", "name": ev.tool,
+                        "input": ev.arguments, "call_id": ev.call_id,
+                    }
+                else:
+                    payload = {
+                        "type": "function_call", "name": ev.tool,
+                        "arguments": json.dumps(ev.arguments, ensure_ascii=False),
+                        "call_id": ev.call_id,
+                    }
+                out.append({"timestamp": ts, "type": "response_item", "payload": payload})
+            elif ev.kind == "tool_result":
+                ptype = ("custom_tool_call_output" if ev.call_id in custom_ids
+                         else "function_call_output")
+                out.append({
+                    "timestamp": ts, "type": "response_item",
+                    "payload": {"type": ptype, "call_id": ev.call_id,
+                                "output": ev.output},
+                })
         return out
 
     def render_placeholder(self, text: str, ctx: SessionContext) -> list[dict[str, Any]]:

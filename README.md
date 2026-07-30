@@ -55,15 +55,20 @@ $ tandem sync-mcp         # opt-in: copy MCP server configs between the tools
   (no bulk re-export at switch time). Appends are whole-line + fsync, and a
   write-ahead intent in the sync cursor makes translation exactly-once
   across crashes. On restart, sync resumes from the last confirmed entry.
-- **Tool calls become action summaries.** The harnesses have different tool
-  vocabularies (Read/Edit/Bash vs shell/apply_patch), so tool calls are
-  never replayed. Each completed call is rendered as compact plain text the
-  shadow model reads as context — `` ran `pytest -q` -> exit 1 `` with
-  head/tail-sampled output, or `edited src/auth.py:` with the unified diff
-  (kept in full under 80 lines, truncated beyond).
-- **Attribution.** Every synced entry is tagged `[via claude-code]` /
-  `[via codex]` (tandem's own notes use `[tandem]`), so interleaved
-  histories stay legible to both the user and the models.
+- **Tool calls are translated natively.** The harnesses have different tool
+  vocabularies (Read/Edit/Bash vs exec_command/apply_patch), so each
+  completed call+result pair is re-expressed in the shadow's own vocabulary
+  — `Bash` ↔ `exec_command`, `Edit`/`Write` ↔ `apply_patch`, `TodoWrite` ↔
+  `update_plan` — and lands as a real tool-call record, so shadow history
+  reads as the shadow's own work. Anything that would not map truthfully
+  (and every unrecognized tool) passes through verbatim with its name and
+  arguments intact. A call whose result never arrived is closed with a
+  `(tool result not recorded)` placeholder when the source is handed off,
+  since both replay APIs reject a dangling call.
+- **Attribution.** Every synced *text* message is tagged `[via claude-code]`
+  / `[via codex]` (tandem's own notes use `[tandem]`), so interleaved
+  histories stay legible to both the user and the models. Tool activity is
+  untagged — it is mirrored as native records, not prose.
 - **Error localization.** An entry that fails translation becomes a
   placeholder in the shadow —
   `[tandem: turn N could not be translated from <tool> — <reason>; raw

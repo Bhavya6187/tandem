@@ -33,8 +33,18 @@ class TestSyncClaudeToCodex:
         texts = shadow_texts(env.codex_shadow)
         assert texts[0] == "[tandem] seed"
         assert "[via claude-code] please fix the bug" in texts[1]
-        assert any("ran `pytest -q`" in t and "3 failed" in t for t in texts)
         assert texts[-1] == "[via claude-code] Fixed."
+
+        # the Bash call rides as a native function_call pair, not prose
+        rollout = read_jsonl(env.codex_shadow)
+        fcalls = [e["payload"] for e in rollout
+                  if e.get("type") == "response_item"
+                  and e["payload"].get("type") == "function_call"]
+        assert any('pytest -q' in f["arguments"] for f in fcalls)
+        outs = [e["payload"] for e in rollout
+                if e.get("type") == "response_item"
+                and e["payload"].get("type") == "function_call_output"]
+        assert any("3 failed" in o["output"] for o in outs)
 
     def test_corrupt_line_quarantined_with_placeholder(self, env_factory):
         env = env_factory()

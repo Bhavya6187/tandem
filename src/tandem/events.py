@@ -37,9 +37,9 @@ class AssistantMessage(_EventBase):
 
 
 class ToolCall(_EventBase):
-    """A tool invocation by the active model. Never replayed as a real tool
-    call in the shadow; paired with its ToolResult and rendered as a plain
-    text action summary (see converter policy)."""
+    """A tool invocation by the active model. Paired with its ToolResult and
+    re-expressed in the shadow harness's own tool vocabulary, then rendered
+    as a native call/result pair (see converter policy and toolmap)."""
 
     kind: Literal["tool_call"] = "tool_call"
     call_id: str
@@ -95,5 +95,10 @@ class SessionContext(BaseModel):
     pending_calls: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # uuid of the last entry in the Claude shadow file (parentUuid chain)
     claude_leaf_uuid: str | None = None
+    # message.id shared by the current contiguous run of rendered assistant
+    # entries; any rendered user-side entry resets it (a real transcript has
+    # one id per API response, and regrouping by id must not strand a
+    # tool_use away from its tool_result)
+    claude_run_msg_id: str | None = None
     claude_session_id: str | None = None
     codex_session_id: str | None = None

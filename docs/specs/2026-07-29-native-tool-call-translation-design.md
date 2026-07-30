@@ -37,6 +37,67 @@ the work.
   three planted markers in `tool_result` content were quoted back verbatim
   (exit 0, 3/3).
 
+### Live validation (2026-07-29, claude 2.1.220 / codex-cli 0.145.0)
+
+End-to-end run of the shipped code against the real CLIs and the real
+`~/.claude` / `~/.codex` stores (task 10; headless equivalents of the
+interactive steps, driving `tandem.ops` directly as the shell does).
+
+- **Step 1 — claude→codex: PASS.** A pinned `claude --session-id … -p` turn
+  did Write + Bash + Edit; pairing it and `drain_source(…, flush_dangling=True)`
+  produced a shadow rollout whose `response_item`s are two
+  `custom_tool_call`/`custom_tool_call_output` `apply_patch` pairs (Add from
+  Write, Update from Edit, the latter carrying the `structuredPatch` hunk) and
+  one `function_call`/`function_call_output` `exec_command` pair — no prose
+  summaries of tool activity anywhere. `session_meta` carried
+  `originator: "tandem"` and `model_provider: "openai"`.
+  `codex exec resume … "Without using any tools: …"` exited 0 and answered
+  `hello.txt` / `tandem validated` / the exact `cat` command, so the Responses
+  API accepted the native pairs and their content reached the model.
+- **Step 1b — interactive `thread/resume`: PASS.** Driving `codex app-server
+  --stdio` with `initialize` + `initialized` + `thread/resume {threadId}`
+  returned a successful result (`modelProvider: "openai"`, thread idle) — no
+  `-32600 Model provider … not found`, confirming the `model_provider` rider
+  on the path the TUI uses. Observed UI-only gap: the returned thread `turns`
+  list contains only `userMessage`/`agentMessage` items — codex builds its
+  scrollback from `event_msg` lines, and tandem writes tool pairs as
+  `response_item`s only, so synced tool calls are in the model's context but
+  are not rendered in codex's history view.
+- **Step 2 — codex→claude: PASS (with a tool-vocabulary finding).** A real
+  `codex exec -s workspace-write` turn created `greet.txt` via `apply_patch`
+  and read it back. Draining into a fresh claude shadow produced an intact
+  `uuid`/`parentUuid` chain (verified link by link), a `tool_use` named
+  `Write` with `{file_path, content}` from the `apply_patch`, and
+  `tool_result` user entries each carrying a `toolUseResult` sibling
+  (`{type, filePath, content}` for the Write, `{stdout}` for the rest).
+  `claude --resume … -p` exited 0 and named `greet.txt` / `hola tandem` from
+  history. Finding: this codex build (model `gpt-5.6-sol`) does **not** emit
+  `exec_command` `function_call`s for shell work — it emits a
+  `custom_tool_call` named `exec` whose input is a JS snippet
+  (`const r = await tools.exec_command({...}); text(r.output);`). The
+  `exec_command → Bash` Tier-1 mapping therefore never fires for this build;
+  those calls degrade to Tier-2 passthrough (`tool_use` name `exec`, input
+  `{"input": "<js>"}`), which claude accepted and read correctly. Second-order
+  nit from the same shape: that tool's `custom_tool_call_output.output` is a
+  *list* of `input_text` blocks, and `CodexAdapter.parse_entry`'s
+  `str(output)` fallback renders it as a Python repr
+  (`[{'type': 'input_text', 'text': …}]`) in the claude shadow. Legible but
+  not clean; candidate follow-up.
+- **Step 3 — dangle flush: PASS.** A resumed claude turn was SIGKILLed mid
+  tool call (transcript tail = a `Bash` `tool_use` with no `tool_result`).
+  `drain_source(…, flush_dangling=True)` closed it: the rollout's last two
+  `response_item`s are the mapped `function_call exec_command` and a
+  `function_call_output` with output `(tool result not recorded)`.
+  `codex exec resume … "Reply OK"` then exited 0 — codex accepts the flushed
+  pair.
+- Incidental: tandem names shadow rollout files from UTC
+  (`sessions/2026/07/30/rollout-2026-07-30T02-06-52-…`) while codex itself
+  uses local time (`sessions/2026/07/29/rollout-2026-07-29T19-08-45-…`).
+  Harmless — lookup globs `**/rollout-*-<id>.jsonl` and both CLIs resumed
+  the file — but the on-disk date bucket can differ by a day. The `SEED_NOTE`
+  text also still promises "Tool calls from the other agent appear as action
+  summaries, not replayable calls", which this feature makes false.
+
 ## Converter policy (`converter.py`)
 
 `_apply_policy` changes for `ToolCall`/`ToolResult`; all other event kinds
@@ -102,7 +163,8 @@ Tier 2. Mapping never fails an entry.
 | `Read` with offset/limit | equivalent `sed -n '<start>,<end>p'` pipe form; exact template an implementation choice — if it can't be expressed honestly, Tier 2 |
 | `Write {file_path, content}` (result type `create`) | `custom_tool_call apply_patch`: `*** Begin Patch / *** Add File: <path> / +<content> / *** End Patch`; overwrites (result type `update`) → Tier 2 |
 | `Edit {file_path, old_string, new_string}` | `custom_tool_call apply_patch`: `*** Update File: <path>` with `-`old / `+`new lines (V4A matches on context, so the strings map directly) |
-| `Grep {pattern, …}` / `Glob {pattern}` | `function_call exec_command` with the equivalent `rg -n …` / `rg --files -g …` command |
+| `Grep {pattern, …}` | `function_call exec_command` with the equivalent `rg …` command. The flag must match what the recorded output actually is: `output_mode` omitted (the schema default is `files_with_matches`) or `files_with_matches` → `rg -l`; `output_mode: "content"` → `rg -n`. `output_mode: "count"` → Tier 2 (a `path:<n>` match count would read as a line number under `rg -n`), and so does any `head_limit` (truncated output under a command implying the full result) |
+| `Glob {pattern}` | `function_call exec_command` with the equivalent `rg --files -g …` command |
 | `TodoWrite {todos}` | `function_call update_plan {plan: [{step, status}]}` — the status vocabularies (`pending/in_progress/completed`) already coincide |
 
 ### Tier 1: codex→claude
@@ -112,7 +174,7 @@ Tier 2. Mapping never fails an entry.
 | `exec_command {cmd}` | `tool_use Bash {"command": …}`; exit-code header stripped into `toolUseResult {stdout, exitCode}`, `is_error` when non-zero |
 | `apply_patch`, single `Add File` | `tool_use Write {file_path, content}`; `toolUseResult {type: "create", filePath, content}` |
 | `apply_patch`, single `Update File` | `tool_use Edit {file_path, old_string, new_string}` — old = context+deleted lines, new = context+added lines, reconstructed from the hunk; `patch_apply_end` enrichment (success/changes), when seen, feeds `toolUseResult` |
-| `apply_patch`, anything else (multi-file, `Delete File`, malformed) | Tier 2: `tool_use apply_patch {"input": <patch text>}` |
+| `apply_patch`, anything else (multi-file, multi-hunk, `Move to:`, `Delete File`, malformed) | Tier 2: `tool_use apply_patch {"input": <patch text>}` — multi-hunk would splice non-adjacent regions into an `old_string` matching nothing in the file, and a `Move to:` rename would vanish behind an in-place-edit record |
 | `update_plan {plan}` | `tool_use TodoWrite {todos: [{content, status}]}`; result content verbatim |
 
 ### Tier 2 residue (measured, fine to leave verbatim)
@@ -122,7 +184,10 @@ Claude side: `Agent`/`Task`, `TaskCreate`/`TaskUpdate`, `AskUserQuestion`,
 `write_stdin`, `spawn_agent`/`wait_agent`/`close_agent`, `view_image`….
 On the traces on this machine, Tier 1 covers ~87% of Claude-side call
 volume (Bash+Edit+Write+Read of 152 calls in the M1–M5 session) and ~97%
-of codex-side (exec_command+apply_patch+update_plan of ~930 calls).
+of codex-side (exec_command+apply_patch+update_plan of ~930 calls). Those
+are *name*-level shares, not the Tier 1 hit rate: the honesty rule sends
+some of them to Tier 2 anyway — of the 49 real `apply_patch` Update ops on
+this machine, 18 are multi-`@@` and land in Tier 2.
 
 ## Codex rendering (`harness/codex.py`)
 
