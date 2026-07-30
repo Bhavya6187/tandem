@@ -96,6 +96,93 @@ def _bash_to_exec(call, result):
     return _retool(call, result, "exec_command", {"cmd": str(args.get("command", ""))})
 
 
+def _sh_quote(path: str) -> str:
+    q = shlex.quote(path)
+    return q
+
+
+def _read_to_cat(call, result):
+    args = call.arguments
+    if not isinstance(args, dict) or not args.get("file_path"):
+        return None
+    cmd = f"cat -n {_sh_quote(args['file_path'])}"
+    offset, limit = args.get("offset"), args.get("limit")
+    if offset or limit:
+        start = int(offset or 1)
+        end = f"{start + int(limit) - 1}" if limit else "$"
+        cmd += f" | sed -n '{start},{end}p'"
+    return _retool(call, result, "exec_command", {"cmd": cmd})
+
+
+def _patch(op: str, path: str, body: str) -> str:
+    return f"*** Begin Patch\n*** {op} File: {path}\n{body}\n*** End Patch"
+
+
+def _write_to_patch(call, result):
+    args = call.arguments
+    s = result.structured or {}
+    if not isinstance(args, dict) or s.get("type") != "create":
+        return None  # overwrite or unknown: honesty rule, Tier 2
+    content = s.get("content") if isinstance(s.get("content"), str) else args.get("content", "")
+    body = "\n".join("+" + line for line in content.splitlines())
+    return _retool(call, result, "apply_patch",
+                   _patch("Add", args.get("file_path", "?"), body))
+
+
+def _edit_to_patch(call, result):
+    args = call.arguments
+    if not isinstance(args, dict) or args.get("replace_all"):
+        return None
+    hunks = (result.structured or {}).get("structuredPatch") or []
+    if hunks:
+        lines: list[str] = []
+        for h in hunks:
+            lines.append("@@")
+            lines.extend(h.get("lines") or [])
+        body = "\n".join(lines)
+    else:
+        old = [f"-{l}" for l in str(args.get("old_string", "")).splitlines()]
+        new = [f"+{l}" for l in str(args.get("new_string", "")).splitlines()]
+        body = "\n".join(old + new)
+    return _retool(call, result, "apply_patch",
+                   _patch("Update", args.get("file_path", "?"), body))
+
+
+def _grep_to_rg(call, result):
+    args = call.arguments
+    if not isinstance(args, dict) or not args.get("pattern"):
+        return None
+    flag = "-l" if args.get("output_mode") == "files_with_matches" else "-n"
+    cmd = f"rg {flag}"
+    if args.get("-i"):
+        cmd += " -i"
+    if args.get("glob"):
+        cmd += f" -g {shlex.quote(args['glob'])}"
+    cmd += f" {shlex.quote(args['pattern'])}"
+    if args.get("path"):
+        cmd += f" {_sh_quote(args['path'])}"
+    return _retool(call, result, "exec_command", {"cmd": cmd})
+
+
+def _glob_to_rg(call, result):
+    args = call.arguments
+    if not isinstance(args, dict) or not args.get("pattern"):
+        return None
+    cmd = f"rg --files -g {shlex.quote(args['pattern'])}"
+    if args.get("path"):
+        cmd += f" {_sh_quote(args['path'])}"
+    return _retool(call, result, "exec_command", {"cmd": cmd})
+
+
+def _todos_to_plan(call, result):
+    args = call.arguments
+    if not isinstance(args, dict) or not isinstance(args.get("todos"), list):
+        return None
+    plan = [{"step": t.get("content", ""), "status": t.get("status", "pending")}
+            for t in args["todos"] if isinstance(t, dict)]
+    return _retool(call, result, "update_plan", {"plan": plan})
+
+
 # -- codex -> claude ---------------------------------------------------------
 
 def _exec_to_bash(call, result):
@@ -116,6 +203,12 @@ def _exec_to_bash(call, result):
 
 _TO_CODEX = {
     "Bash": _bash_to_exec,
+    "Read": _read_to_cat,
+    "Write": _write_to_patch,
+    "Edit": _edit_to_patch,
+    "Grep": _grep_to_rg,
+    "Glob": _glob_to_rg,
+    "TodoWrite": _todos_to_plan,
 }
 
 _TO_CLAUDE = {

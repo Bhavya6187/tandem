@@ -91,3 +91,86 @@ class TestPassThrough:
         # Bash with pathological arguments degrades to pass-through
         c, _ = toolmap.map_pair(call("Bash", "i am not a dict"), result("x"), "codex")
         assert c.tool == "Bash"
+
+
+class TestClaudeToCodexTier1:
+    def test_read_plain(self):
+        c, r = toolmap.map_pair(
+            call("Read", {"file_path": "/a/b.py"}),
+            result("1\timport os"), "codex",
+        )
+        assert c.tool == "exec_command"
+        assert c.arguments == {"cmd": "cat -n /a/b.py"}
+        assert r.output == "1\timport os"
+
+    def test_read_ranged(self):
+        c, _ = toolmap.map_pair(
+            call("Read", {"file_path": "/a/b.py", "offset": 10, "limit": 5}),
+            result("10\tx"), "codex",
+        )
+        assert c.arguments == {"cmd": "cat -n /a/b.py | sed -n '10,14p'"}
+
+    def test_write_create_becomes_add_file_patch(self):
+        c, _ = toolmap.map_pair(
+            call("Write", {"file_path": "/p/hello.txt", "content": "hi\nthere"}),
+            result("ok", structured={"type": "create", "filePath": "/p/hello.txt",
+                                     "content": "hi\nthere"}),
+            "codex",
+        )
+        assert c.tool == "apply_patch"
+        assert isinstance(c.arguments, str)   # str => custom_tool_call
+        assert c.arguments == (
+            "*** Begin Patch\n*** Add File: /p/hello.txt\n+hi\n+there\n*** End Patch"
+        )
+
+    def test_write_overwrite_falls_back(self):
+        c, _ = toolmap.map_pair(
+            call("Write", {"file_path": "/p/x.txt", "content": "new"}),
+            result("ok", structured={"type": "update", "filePath": "/p/x.txt"}),
+            "codex",
+        )
+        assert c.tool == "Write"   # Tier 2: honesty rule
+
+    def test_edit_becomes_update_file_patch(self):
+        c, _ = toolmap.map_pair(
+            call("Edit", {"file_path": "/p/a.py", "old_string": "x = 1",
+                          "new_string": "x = 2"}),
+            result("ok"), "codex",
+        )
+        assert c.tool == "apply_patch"
+        assert c.arguments == (
+            "*** Begin Patch\n*** Update File: /p/a.py\n-x = 1\n+x = 2\n*** End Patch"
+        )
+
+    def test_edit_replace_all_falls_back(self):
+        c, _ = toolmap.map_pair(
+            call("Edit", {"file_path": "/p/a.py", "old_string": "x",
+                          "new_string": "y", "replace_all": True}),
+            result("ok"), "codex",
+        )
+        assert c.tool == "Edit"
+
+    def test_grep_and_glob(self):
+        c, _ = toolmap.map_pair(
+            call("Grep", {"pattern": "def main", "path": "src"}),
+            result("src/a.py:1:def main"), "codex",
+        )
+        assert c.arguments == {"cmd": "rg -n 'def main' src"}
+        c, _ = toolmap.map_pair(
+            call("Glob", {"pattern": "**/*.py"}), result("a.py"), "codex",
+        )
+        assert c.arguments == {"cmd": "rg --files -g '**/*.py'"}
+
+    def test_todowrite_becomes_update_plan(self):
+        c, _ = toolmap.map_pair(
+            call("TodoWrite", {"todos": [
+                {"content": "fix bug", "status": "in_progress", "activeForm": "Fixing"},
+                {"content": "add test", "status": "pending", "activeForm": "Adding"},
+            ]}),
+            result("Todos have been modified successfully"), "codex",
+        )
+        assert c.tool == "update_plan"
+        assert c.arguments == {"plan": [
+            {"step": "fix bug", "status": "in_progress"},
+            {"step": "add test", "status": "pending"},
+        ]}
