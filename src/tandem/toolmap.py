@@ -209,6 +209,59 @@ def _exec_to_bash(call, result):
                    output=body, structured=structured, is_error=is_error)
 
 
+_FILE_OP_RE = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+)$")
+
+
+def _parse_patch(patch: str) -> list[tuple[str, str, list[str]]]:
+    """V4A patch text -> [(op, path, body-lines)]. Ignores Begin/End lines."""
+    ops: list[tuple[str, str, list[str]]] = []
+    for line in patch.splitlines():
+        if line in ("*** Begin Patch", "*** End Patch"):
+            continue
+        m = _FILE_OP_RE.match(line)
+        if m:
+            ops.append((m.group(1), m.group(2), []))
+        elif ops:
+            ops[-1][2].append(line)
+    return ops
+
+
+def _patch_to_edit(call, result):
+    patch = call.arguments if isinstance(call.arguments, str) else ""
+    ops = _parse_patch(patch)
+    if len(ops) != 1:
+        return None
+    op, path, body = ops[0]
+    if op == "Add":
+        content = "\n".join(l[1:] for l in body if l.startswith("+"))
+        return _retool(
+            call, result, "Write", {"file_path": path, "content": content},
+            structured={"type": "create", "filePath": path, "content": content},
+        )
+    if op == "Update":
+        old = "\n".join(l[1:] for l in body if l[:1] in (" ", "-"))
+        new = "\n".join(l[1:] for l in body if l[:1] in (" ", "+"))
+        return _retool(
+            call, result, "Edit",
+            {"file_path": path, "old_string": old, "new_string": new},
+            structured={"filePath": path, "oldString": old, "newString": new},
+        )
+    return None  # Delete etc.: Tier 2
+
+
+def _plan_to_todos(call, result):
+    args = call.arguments
+    if isinstance(args, str):
+        args = json.loads(args)
+    if not isinstance(args, dict) or not isinstance(args.get("plan"), list):
+        return None
+    todos = [{"content": s.get("step", ""), "status": s.get("status", "pending"),
+              "activeForm": s.get("step", "")}
+             for s in args["plan"] if isinstance(s, dict)]
+    return _retool(call, result, "TodoWrite", {"todos": todos},
+                   structured={"stdout": result.output})
+
+
 _TO_CODEX = {
     "Bash": _bash_to_exec,
     "Read": _read_to_cat,
@@ -221,4 +274,6 @@ _TO_CODEX = {
 
 _TO_CLAUDE = {
     "exec_command": _exec_to_bash,
+    "apply_patch": _patch_to_edit,
+    "update_plan": _plan_to_todos,
 }

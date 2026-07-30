@@ -203,3 +203,54 @@ class TestClaudeToCodexTier1:
             {"step": "fix bug", "status": "in_progress"},
             {"step": "add test", "status": "pending"},
         ]}
+
+
+ADD_PATCH = "*** Begin Patch\n*** Add File: /p/hello.txt\n+hi\n+there\n*** End Patch"
+UPDATE_PATCH = ("*** Begin Patch\n*** Update File: /p/a.py\n@@\n ctx\n-x = 1\n+x = 2\n"
+                "*** End Patch")
+MULTI_PATCH = ("*** Begin Patch\n*** Add File: /p/a\n+1\n*** Add File: /p/b\n+2\n"
+               "*** End Patch")
+
+
+class TestCodexToClaudeTier1:
+    def test_apply_patch_add_becomes_write(self):
+        c, r = toolmap.map_pair(
+            call("apply_patch", ADD_PATCH, source="codex"),
+            result("Done!", source="codex"), "claude",
+        )
+        assert c.tool == "Write"
+        assert c.arguments == {"file_path": "/p/hello.txt", "content": "hi\nthere"}
+        assert r.structured == {"type": "create", "filePath": "/p/hello.txt",
+                                "content": "hi\nthere"}
+
+    def test_apply_patch_update_becomes_edit(self):
+        c, r = toolmap.map_pair(
+            call("apply_patch", UPDATE_PATCH, source="codex"),
+            result("Done!", source="codex"), "claude",
+        )
+        assert c.tool == "Edit"
+        assert c.arguments == {"file_path": "/p/a.py", "old_string": "ctx\nx = 1",
+                               "new_string": "ctx\nx = 2"}
+        assert r.structured == {"filePath": "/p/a.py", "oldString": "ctx\nx = 1",
+                                "newString": "ctx\nx = 2"}
+
+    def test_multi_file_patch_falls_back(self):
+        c, _ = toolmap.map_pair(
+            call("apply_patch", MULTI_PATCH, source="codex"),
+            result("Done!", source="codex"), "claude",
+        )
+        assert c.tool == "apply_patch"
+        assert c.arguments == {"input": MULTI_PATCH}
+
+    def test_update_plan_becomes_todowrite(self):
+        c, r = toolmap.map_pair(
+            call("update_plan",
+                 '{"plan": [{"step": "fix bug", "status": "in_progress"}]}',
+                 source="codex"),
+            result("Plan updated", source="codex"), "claude",
+        )
+        assert c.tool == "TodoWrite"
+        assert c.arguments == {"todos": [
+            {"content": "fix bug", "status": "in_progress", "activeForm": "fix bug"},
+        ]}
+        assert r.output == "Plan updated"
