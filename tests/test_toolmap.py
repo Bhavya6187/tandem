@@ -3,7 +3,13 @@
 import json
 
 from tandem import toolmap
-from tandem.events import SessionContext, ToolCall, ToolResult
+from tandem.events import (
+    AssistantMessage,
+    SessionContext,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
 from tandem.harness import get_adapter
 
 
@@ -315,3 +321,64 @@ class TestCodexToolRendering:
         assert [e["payload"]["type"] for e in entries] == [
             "custom_tool_call", "custom_tool_call_output"]
         assert entries[0]["payload"]["input"].startswith("*** Begin Patch")
+
+
+class TestClaudeToolRendering:
+    def test_tool_pair_and_message_id_runs(self):
+        ctx = _ctx("codex->claude")
+        adapter = get_adapter("claude")
+        entries = adapter.render_events([
+            AssistantMessage(source="codex", text="Looking around."),
+            call("Bash", {"command": "ls"}, source="codex", call_id="c1"),
+            result("a.py", source="codex", call_id="c1",
+                   structured={"stdout": "a.py", "exitCode": 0}),
+            call("Bash", {"command": "cat a.py"}, source="codex", call_id="c2"),
+            result("print(1)", source="codex", call_id="c2",
+                   structured={"stdout": "print(1)", "exitCode": 0}),
+        ], ctx)
+
+        types = [e["type"] for e in entries]
+        assert types == ["assistant", "assistant", "user", "assistant", "user"]
+
+        text_msg, tool1, res1, tool2, res2 = entries
+        # text and the first tool_use share one API message id; the
+        # tool_result (a user entry) ends the run, so the next call gets a
+        # fresh id
+        assert tool1["message"]["id"] == text_msg["message"]["id"]
+        assert tool2["message"]["id"] != tool1["message"]["id"]
+
+        block = tool1["message"]["content"][0]
+        assert block == {"type": "tool_use", "id": "c1", "name": "Bash",
+                         "input": {"command": "ls"}}
+        assert tool1["message"]["stop_reason"] == "tool_use"
+
+        rblock = res1["message"]["content"][0]
+        assert rblock == {"type": "tool_result", "tool_use_id": "c1",
+                          "content": "a.py", "is_error": False}
+        assert res1["toolUseResult"] == {"stdout": "a.py", "exitCode": 0}
+
+        # uuid/parentUuid chain is intact across the mixed entries
+        for prev, cur in zip(entries, entries[1:]):
+            assert cur["parentUuid"] == prev["uuid"]
+        assert ctx.claude_leaf_uuid == entries[-1]["uuid"]
+
+    def test_is_error_flag_rides(self):
+        ctx = _ctx("codex->claude")
+        entries = get_adapter("claude").render_events([
+            call("Bash", {"command": "false"}, source="codex", call_id="c3"),
+            result("", source="codex", call_id="c3", is_error=True,
+                   structured={"stdout": "", "exitCode": 1}),
+        ], ctx)
+        assert entries[1]["message"]["content"][0]["is_error"] is True
+
+    def test_user_message_also_ends_the_run(self):
+        ctx = _ctx("codex->claude")
+        entries = get_adapter("claude").render_events([
+            AssistantMessage(source="codex", text="one"),
+            AssistantMessage(source="codex", text="two"),
+            UserMessage(source="user", text="go on"),
+            AssistantMessage(source="codex", text="three"),
+        ], ctx)
+        a1, a2, _user, a3 = entries
+        assert a1["message"]["id"] == a2["message"]["id"]
+        assert a3["message"]["id"] != a1["message"]["id"]

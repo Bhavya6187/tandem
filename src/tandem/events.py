@@ -95,5 +95,10 @@ class SessionContext(BaseModel):
     pending_calls: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # uuid of the last entry in the Claude shadow file (parentUuid chain)
     claude_leaf_uuid: str | None = None
+    # message.id shared by the current contiguous run of rendered assistant
+    # entries; any rendered user-side entry resets it (a real transcript has
+    # one id per API response, and regrouping by id must not strand a
+    # tool_use away from its tool_result)
+    claude_run_msg_id: str | None = None
     claude_session_id: str | None = None
     codex_session_id: str | None = None

@@ -227,24 +227,37 @@ class ClaudeCodeAdapter(HarnessAdapter):
         self, events: list[NormalizedEvent], ctx: SessionContext
     ) -> list[dict[str, Any]]:
         """Normalized events -> native transcript entries, chained onto the
-        current leaf. Only message-bearing events reach here (converter
-        policy folds tool activity into AssistantMessages)."""
+        current leaf. Messages and tool activity both render natively;
+        consecutive assistant entries share one message.id."""
         out: list[dict[str, Any]] = []
         for ev in events:
+            if ev.kind in ("user_message", "tool_result"):
+                ctx.claude_run_msg_id = None
             if ev.kind == "user_message":
                 entry = self._base_entry(ctx, "user")
                 entry["message"] = {"role": "user", "content": ev.text}
             elif ev.kind == "assistant_message":
                 entry = self._base_entry(ctx, "assistant")
+                entry["message"] = self._assistant_message(
+                    ctx, entry, [{"type": "text", "text": ev.text}], "end_turn"
+                )
+            elif ev.kind == "tool_call":
+                entry = self._base_entry(ctx, "assistant")
+                inp = ev.arguments if isinstance(ev.arguments, dict) else {"input": ev.arguments}
+                entry["message"] = self._assistant_message(
+                    ctx, entry,
+                    [{"type": "tool_use", "id": ev.call_id, "name": ev.tool,
+                      "input": inp}],
+                    "tool_use",
+                )
+            elif ev.kind == "tool_result":
+                entry = self._base_entry(ctx, "user")
                 entry["message"] = {
-                    "role": "assistant",
-                    "model": "<synced>",
-                    "id": f"msg_tandem_{entry['uuid'][:8]}",
-                    "type": "message",
-                    "content": [{"type": "text", "text": ev.text}],
-                    "stop_reason": "end_turn",
-                    "stop_sequence": None,
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": ev.call_id,
+                                 "content": ev.output, "is_error": ev.is_error}],
                 }
+                entry["toolUseResult"] = ev.structured or {"stdout": ev.output}
             else:
                 continue
             if ev.timestamp:
@@ -252,6 +265,22 @@ class ClaudeCodeAdapter(HarnessAdapter):
             ctx.claude_leaf_uuid = entry["uuid"]
             out.append(entry)
         return out
+
+    def _assistant_message(
+        self, ctx: SessionContext, entry: dict[str, Any],
+        content: list[dict[str, Any]], stop_reason: str,
+    ) -> dict[str, Any]:
+        if ctx.claude_run_msg_id is None:
+            ctx.claude_run_msg_id = f"msg_tandem_{entry['uuid'][:8]}"
+        return {
+            "role": "assistant",
+            "model": "<synced>",
+            "id": ctx.claude_run_msg_id,
+            "type": "message",
+            "content": content,
+            "stop_reason": stop_reason,
+            "stop_sequence": None,
+        }
 
     def render_placeholder(self, text: str, ctx: SessionContext) -> list[dict[str, Any]]:
         entry = self._base_entry(ctx, "user")
