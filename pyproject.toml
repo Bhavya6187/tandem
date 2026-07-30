@@ -1,17 +1,36 @@
 [project]
-name = "tandem"
+name = "tandem-cli"
 version = "0.1.0"
 description = "Meta-harness that runs Claude Code and Codex CLI with live trace sync."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
+authors = [
+    { name = "Bhavya Agarwal", email = "bhavya.6187@gmail.com" },
+]
+keywords = ["claude-code", "codex", "cli", "agents", "session-sync"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "click>=8.1",
     "pydantic>=2.7",
     "watchdog>=4.0",
     "pexpect>=4.9",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Bhavya6187/tandem"
+Repository = "https://github.com/Bhavya6187/tandem"
+Issues = "https://github.com/Bhavya6187/tandem/issues"
 
 [project.scripts]
 tandem = "tandem.cli:main"
