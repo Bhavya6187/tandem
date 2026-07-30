@@ -77,6 +77,9 @@ class CodexAdapter(HarnessAdapter):
                 "cli_version": version,
                 "source": "exec",
                 "thread_source": "user",
+                # codex >= 0.145 interactive thread/resume rejects rollouts
+                # without a provider id; "openai" is codex's built-in default
+                "model_provider": "openai",
                 "history_mode": "legacy",
             },
         }
