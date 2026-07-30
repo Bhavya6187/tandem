@@ -3,7 +3,8 @@
 import json
 
 from tandem import toolmap
-from tandem.events import ToolCall, ToolResult
+from tandem.events import SessionContext, ToolCall, ToolResult
+from tandem.harness import get_adapter
 
 
 class TestShadowRolloutMeta:
@@ -23,6 +24,15 @@ def call(tool, arguments, source="claude", call_id="c1"):
 def result(output, source="claude", call_id="c1", structured=None, is_error=False):
     return ToolResult(source=source, call_id=call_id, output=output,
                       structured=structured, is_error=is_error)
+
+
+def _ctx(direction="claude->codex"):
+    return SessionContext(
+        tandem_id="t1", cwd="/p", direction=direction,
+        claude_session_id="11111111-1111-4111-8111-111111111111",
+        codex_session_id="019faca1-0000-7000-8000-000000000001",
+        claude_leaf_uuid="seed",
+    )
 
 
 class TestBashExecCommand:
@@ -278,3 +288,30 @@ class TestCodexToClaudeTier1:
             {"content": "fix bug", "status": "in_progress", "activeForm": "fix bug"},
         ]}
         assert r.output == "Plan updated"
+
+
+class TestCodexToolRendering:
+    def test_function_call_pair(self):
+        ctx = _ctx()
+        entries = get_adapter("codex").render_events([
+            call("exec_command", {"cmd": "ls"}, call_id="c9"),
+            result("a.py", call_id="c9"),
+        ], ctx)
+        assert [e["payload"]["type"] for e in entries] == [
+            "function_call", "function_call_output"]
+        assert entries[0]["payload"]["name"] == "exec_command"
+        assert entries[0]["payload"]["arguments"] == '{"cmd": "ls"}'
+        assert entries[0]["payload"]["call_id"] == "c9"
+        assert entries[1]["payload"] == {
+            "type": "function_call_output", "call_id": "c9", "output": "a.py"}
+        assert all(e["type"] == "response_item" for e in entries)
+
+    def test_custom_tool_call_pair(self):
+        ctx = _ctx()
+        entries = get_adapter("codex").render_events([
+            call("apply_patch", "*** Begin Patch\n*** End Patch", call_id="c2"),
+            result("Done!", call_id="c2"),
+        ], ctx)
+        assert [e["payload"]["type"] for e in entries] == [
+            "custom_tool_call", "custom_tool_call_output"]
+        assert entries[0]["payload"]["input"].startswith("*** Begin Patch")
