@@ -151,15 +151,44 @@ class TestClaudeToCodexTier1:
         assert c.tool == "Edit"
 
     def test_grep_and_glob(self):
+        # Grep's schema defaults output_mode to files_with_matches, and a
+        # transcript records only the args actually passed: omitted => -l
         c, _ = toolmap.map_pair(
             call("Grep", {"pattern": "def main", "path": "src"}),
-            result("src/a.py:1:def main"), "codex",
+            result("src/a.py"), "codex",
         )
-        assert c.arguments == {"cmd": "rg -n 'def main' src"}
+        assert c.arguments == {"cmd": "rg -l 'def main' src"}
         c, _ = toolmap.map_pair(
             call("Glob", {"pattern": "**/*.py"}), result("a.py"), "codex",
         )
         assert c.arguments == {"cmd": "rg --files -g '**/*.py'"}
+
+    def test_grep_content_mode_uses_line_numbers(self):
+        c, _ = toolmap.map_pair(
+            call("Grep", {"pattern": "def main", "path": "src",
+                          "output_mode": "content"}),
+            result("src/a.py:1:def main"), "codex",
+        )
+        assert c.arguments == {"cmd": "rg -n 'def main' src"}
+
+    def test_grep_count_mode_falls_back(self):
+        # 'src/a.py:3' means "3 matches", which `rg -n` output would read as
+        # line 3: honesty rule, Tier 2
+        c, _ = toolmap.map_pair(
+            call("Grep", {"pattern": "def main", "path": "src",
+                          "output_mode": "count"}),
+            result("src/a.py:3"), "codex",
+        )
+        assert c.tool == "Grep"
+
+    def test_grep_head_limit_falls_back(self):
+        # truncated output under a command implying the full result
+        c, _ = toolmap.map_pair(
+            call("Grep", {"pattern": "def main", "output_mode": "content",
+                          "head_limit": 10}),
+            result("src/a.py:1:def main"), "codex",
+        )
+        assert c.tool == "Grep"
 
     def test_todowrite_becomes_update_plan(self):
         c, _ = toolmap.map_pair(

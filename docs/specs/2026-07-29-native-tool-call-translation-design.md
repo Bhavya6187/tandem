@@ -102,7 +102,8 @@ Tier 2. Mapping never fails an entry.
 | `Read` with offset/limit | equivalent `sed -n '<start>,<end>p'` pipe form; exact template an implementation choice — if it can't be expressed honestly, Tier 2 |
 | `Write {file_path, content}` (result type `create`) | `custom_tool_call apply_patch`: `*** Begin Patch / *** Add File: <path> / +<content> / *** End Patch`; overwrites (result type `update`) → Tier 2 |
 | `Edit {file_path, old_string, new_string}` | `custom_tool_call apply_patch`: `*** Update File: <path>` with `-`old / `+`new lines (V4A matches on context, so the strings map directly) |
-| `Grep {pattern, …}` / `Glob {pattern}` | `function_call exec_command` with the equivalent `rg -n …` / `rg --files -g …` command |
+| `Grep {pattern, …}` | `function_call exec_command` with the equivalent `rg …` command. The flag must match what the recorded output actually is: `output_mode` omitted (the schema default is `files_with_matches`) or `files_with_matches` → `rg -l`; `output_mode: "content"` → `rg -n`. `output_mode: "count"` → Tier 2 (a `path:<n>` match count would read as a line number under `rg -n`), and so does any `head_limit` (truncated output under a command implying the full result) |
+| `Glob {pattern}` | `function_call exec_command` with the equivalent `rg --files -g …` command |
 | `TodoWrite {todos}` | `function_call update_plan {plan: [{step, status}]}` — the status vocabularies (`pending/in_progress/completed`) already coincide |
 
 ### Tier 1: codex→claude

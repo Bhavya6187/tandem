@@ -152,7 +152,15 @@ def _grep_to_rg(call, result):
     args = call.arguments
     if not isinstance(args, dict) or not args.get("pattern"):
         return None
-    flag = "-l" if args.get("output_mode") == "files_with_matches" else "-n"
+    # Grep's schema defaults output_mode to files_with_matches and a transcript
+    # records only the args actually passed, so an omitted mode means -l. count
+    # output (path:<n> = n matches) would read as a line number under rg -n, and
+    # head_limit shows truncated output under a command implying the full
+    # result: neither is expressible honestly, so both degrade to Tier 2.
+    mode = args.get("output_mode") or "files_with_matches"
+    if mode not in ("files_with_matches", "content") or args.get("head_limit"):
+        return None
+    flag = "-n" if mode == "content" else "-l"
     cmd = f"rg {flag}"
     if args.get("-i"):
         cmd += " -i"
