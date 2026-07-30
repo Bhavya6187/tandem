@@ -10,6 +10,8 @@
 
 **Spec:** `docs/specs/2026-07-29-native-tool-call-translation-design.md` — read it before starting.
 
+**Baseline:** Revalidated against main after the tandem-shell merge (`9f21464`). Every file Tasks 1–9 modify is unchanged by that merge; the shell (`shell.py`) and CLI both dispatch role flips through `ops.switch_session` and one-offs through `ops.run_oneoff`, so the Task-8 flush wiring points are still the single choke points. The `tandem sync` command's manual `drain_source` call (`cli.py:339`) intentionally does **not** flush — the active harness keeps running, so its in-flight calls are not dangles. CLI vocabulary for Task 10: `tandem start` no longer exists — bare `tandem [--active claude|codex]` pairs and enters a session, and `switch` is available both as a CLI verb and at the tandem shell prompt (which re-enters the new active harness immediately).
+
 ## Global Constraints
 
 - Attribution: tool calls/results carry **no** `[via claude-code]`/`[via codex]` tag; text messages keep tags unchanged.
@@ -1489,17 +1491,17 @@ No code — this validates the whole feature against the real CLIs, mirroring ho
 
 - [ ] **Step 1: claude→codex live check**
 
-In a scratch dir: `tandem start` with claude active; run a short claude turn that uses at least one Bash, one Write, and one Edit. Then `tandem switch` (or the CLI's switch verb) and confirm:
+In a scratch project dir: run bare `tandem` (claude is the default active). In the claude session, run a short turn that uses at least one Bash, one Write, and one Edit, then exit claude to land at the tandem shell prompt and type `switch`. The shell flips roles and immediately resumes codex interactively — this exercises the Task-1 `model_provider` fix on the normal path. Confirm:
 - the codex shadow rollout contains `function_call exec_command` / `custom_tool_call apply_patch` pairs (not prose), and
-- **interactive** `codex resume <codex-session-id>` opens and answers a question about the synced work (this also exercises the Task-1 `model_provider` fix).
+- the resumed codex answers a question about the synced work (e.g. "what file did I just create and what's in it?").
 
 - [ ] **Step 2: codex→claude live check**
 
-Same pairing, codex active: run a codex turn with an `exec_command` and an `apply_patch`. Switch and confirm `claude --resume <claude-session-id>` opens, renders the history, and answers "what did the last patch change?" correctly from the synced `tool_use`/`tool_result` entries.
+In a second scratch dir: `tandem --active codex`; run a codex turn with an `exec_command` and an `apply_patch`, exit to the tandem prompt, `switch`. Confirm the resumed claude session renders the history and answers "what did the last patch change?" correctly from the synced `tool_use`/`tool_result` entries.
 
 - [ ] **Step 3: dangle check**
 
-Interrupt a claude turn mid-tool-call (Ctrl-C while a long `sleep` Bash runs), switch, and confirm the codex shadow's last two response_items are the mapped call plus `(tool result not recorded)`, and that codex still resumes cleanly.
+In the Step-1 pairing: start a claude turn with a long-running Bash (`sleep 120`), Ctrl-C claude mid-call, then `switch` at the tandem prompt. Confirm the codex shadow's last two response_items are the mapped `exec_command` call plus a `function_call_output` of `(tool result not recorded)`, and that codex still resumes cleanly on top.
 
 - [ ] **Step 4: Record outcomes**
 
