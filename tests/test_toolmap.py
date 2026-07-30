@@ -491,6 +491,28 @@ class TestDangleFlush:
                 and e["payload"].get("type") == "function_call_output"]
         assert "(tool result not recorded)" in outs
 
+    def test_drain_source_without_flag_leaves_the_call_open(
+        self, env_factory, monkeypatch
+    ):
+        # `tandem sync` drains without flush_dangling: a call whose result has
+        # not landed yet is still live, so it must stay pending in the
+        # persisted cursor and get no placeholder. Flushing here would close a
+        # call the source is about to answer itself.
+        from tandem import ops
+        env = env_factory()
+        self._pendings(env)
+        monkeypatch.setattr(
+            ops, "source_transcript", lambda session, source: env.source_file
+        )
+        ops.drain_source(env.store, env.session, "claude")  # default: no flush
+
+        cur = env.store.get_cursor(env.session.tandem_id, "claude")
+        assert "dangling-1" in cur.pending["pending_calls"]
+        rollout = read_jsonl(env.codex_shadow)
+        payloads = [e["payload"] for e in rollout if e.get("type") == "response_item"]
+        assert not [p for p in payloads if p.get("call_id") == "dangling-1"]
+        assert toolmap.PLACEHOLDER_OUTPUT not in env.codex_shadow.read_text()
+
     def test_landed_flush_intent_is_not_replayed(self, env_factory):
         # crash after the flush append but before the cursor cleared: the
         # pending calls it closed must not be flushed a second time

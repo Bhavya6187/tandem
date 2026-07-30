@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from . import paths
-from .harness import get_adapter
+from .harness import get_adapter, other
 from .runner import TailLoop, await_codex_rollout
 from .state import PairedSession, StateStore
 from .sync import SyncEngine, SyncSetupError
@@ -178,5 +178,30 @@ def run_oneoff(
                 fast_forward_to_zero.line_index = 0
                 store.save_cursor(fast_forward_to_zero)
 
+    # Echo suppression (see the module docstring): this drain appends
+    # tandem's translation of the target's turn to the OTHER harness's file.
+    # Those appends are by construction already represented in the target's
+    # file, so the echo side's cursor has to move past them — otherwise its
+    # next drain translates them straight back, duplicating call ids and text.
+    echo_side = other(target)
+    echo_pre_size = _file_size(source_transcript(session, echo_side))
+    echo_pre_offset = store.get_cursor(session.tandem_id, echo_side).byte_offset
+
     drain_source(store, session, target, flush_dangling=True)
+
+    # Only when the echo side was fully synced before the drain is everything
+    # now in its file known to be ours. If it had an unsynced tail (a
+    # concurrent writer), fast-forwarding would swallow a live turn: leave the
+    # cursor alone and let the normal drain pick both up.
+    if echo_pre_size is not None and echo_pre_offset == echo_pre_size:
+        fast_forward(store, session, echo_side)
     return code
+
+
+def _file_size(path: Path | None) -> int | None:
+    if path is None:
+        return None
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
