@@ -34,6 +34,12 @@ continues the **same conversation** a second later — same files, same
 history, same plan. Your two subscriptions become one long runway instead
 of two separate walls.
 
+### 🌩️ Immune to outages.
+
+An Anthropic or OpenAI outage doesn't stop your work. If the active
+model's API goes down, `switch` — the same session continues seamlessly
+in the other harness, and you can switch back whenever the outage clears.
+
 ### 💳 Subscriptions, not API bills.
 
 tandem wraps the official CLIs under the auth you already have — your
