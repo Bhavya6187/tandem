@@ -1,5 +1,5 @@
 """Shared fixtures: a paired session under tmp homes with both shadow files
-seeded the way `tandem start` does, plus fake native entry builders."""
+seeded the way a fresh `tandem` launch does, plus fake native entry builders."""
 
 import json
 from pathlib import Path

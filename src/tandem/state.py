@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     codex_session_id TEXT,
     created_at TEXT NOT NULL,
     last_sync_at TEXT,
-    archived INTEGER NOT NULL DEFAULT 0
+    last_used_at TEXT
 );
 CREATE TABLE IF NOT EXISTS sync_cursors (
     tandem_id TEXT NOT NULL,
@@ -55,6 +55,7 @@ class PairedSession:
     codex_session_id: str | None
     created_at: str
     last_sync_at: str | None
+    last_used_at: str | None = None
 
     @property
     def shadow(self) -> str:
@@ -80,6 +81,10 @@ class StateStore:
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(sessions)")}
+        if "last_used_at" not in cols:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN last_used_at TEXT")
+            self._conn.execute("UPDATE sessions SET last_used_at = created_at")
         self._conn.commit()
 
     def close(self) -> None:
@@ -105,11 +110,12 @@ class StateStore:
         with self._conn:
             self._conn.execute(
                 "INSERT INTO sessions (tandem_id, cwd, active, claude_session_id,"
-                " codex_session_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (tandem_id, cwd, active, claude_session_id, codex_session_id, now),
+                " codex_session_id, created_at, last_used_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (tandem_id, cwd, active, claude_session_id, codex_session_id, now, now),
             )
         return PairedSession(
-            tandem_id, cwd, active, claude_session_id, codex_session_id, now, None
+            tandem_id, cwd, active, claude_session_id, codex_session_id, now, None, now
         )
 
     def _row_to_session(self, row: sqlite3.Row) -> PairedSession:
@@ -121,6 +127,7 @@ class StateStore:
             codex_session_id=row["codex_session_id"],
             created_at=row["created_at"],
             last_sync_at=row["last_sync_at"],
+            last_used_at=row["last_used_at"],
         )
 
     def get_session(self, tandem_id: str) -> PairedSession | None:
@@ -129,14 +136,27 @@ class StateStore:
         ).fetchone()
         return self._row_to_session(row) if row else None
 
-    def session_for_cwd(self, cwd: str) -> PairedSession | None:
-        """Newest non-archived paired session for a working directory."""
+    def latest_session_for_cwd(self, cwd: str) -> PairedSession | None:
+        """Most recently used paired session for a working directory.
+
+        COALESCE keeps the ordering NULL-immune: a row whose last_used_at was
+        never backfilled (a crash between the ALTER and its commit) falls back
+        to its creation time instead of sorting behind every older row.
+        """
         row = self._conn.execute(
-            "SELECT * FROM sessions WHERE cwd = ? AND archived = 0"
-            " ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM sessions WHERE cwd = ?"
+            " ORDER BY COALESCE(last_used_at, created_at) DESC, created_at DESC"
+            " LIMIT 1",
             (cwd,),
         ).fetchone()
         return self._row_to_session(row) if row else None
+
+    def touch_used(self, tandem_id: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE sessions SET last_used_at = ? WHERE tandem_id = ?",
+                (_now(), tandem_id),
+            )
 
     def set_active(self, tandem_id: str, active: str) -> None:
         with self._conn:
@@ -159,12 +179,6 @@ class StateStore:
             self._conn.execute(
                 "UPDATE sessions SET last_sync_at = ? WHERE tandem_id = ?",
                 (_now(), tandem_id),
-            )
-
-    def archive_session(self, tandem_id: str) -> None:
-        with self._conn:
-            self._conn.execute(
-                "UPDATE sessions SET archived = 1 WHERE tandem_id = ?", (tandem_id,)
             )
 
     # -- sync cursors --------------------------------------------------------

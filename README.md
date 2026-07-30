@@ -9,15 +9,20 @@ format. Switching is instant — the shadow was always resume-ready via that
 tool's native `--resume`/`resume` mechanism.
 
 ```
-$ tandem start          # pair a claude + codex session for this directory
-$ tandem                # work in the active harness (untouched native UX)
-$ tandem switch         # flip active/shadow, instantly
-$ tandem                # continue the same conversation in the other tool
+$ tandem                  # fresh paired claude+codex session; enters claude
+$ tandem --active codex   # fresh session with codex active instead
+tandem (claude)> switch   # after exiting claude: continue instantly in codex
+tandem (codex)> exit
+to continue this session: tandem resume a1b2c3d4e5f6
+$ tandem resume           # continue the most recent session here
+$ tandem resume <id>      # continue a specific session (id from the exit hint,
+                          #   run from that session's own directory)
 $ tandem run --on codex "second opinion: why is this test flaky?"
-$ tandem status         # pairing, roles, sync position
-$ tandem doctor [--live]# verify both sessions are resumable
-$ tandem sync           # manual catch-up translation (local file I/O only)
-$ tandem sync-mcp       # opt-in: copy MCP server configs between the tools
+$ tandem status           # pairing, roles, sync position
+$ tandem switch           # one-shot flip; does not enter a harness
+$ tandem doctor [--live]  # verify both sessions are resumable
+$ tandem sync             # manual catch-up translation (local file I/O only)
+$ tandem sync-mcp         # opt-in: copy MCP server configs between the tools
 ```
 
 ## How it works
@@ -27,6 +32,18 @@ $ tandem sync-mcp       # opt-in: copy MCP server configs between the tools
   The shadow side is pure local file I/O: tandem tails the active
   transcript, translates each entry, and appends to the shadow's session
   file. The shadow's model is never called to "catch up".
+- **A persistent prompt, not the OS shell.** Leaving the harness lands you
+  at `tandem (claude)>` instead of back in your shell. There, `switch`
+  flips roles and drops you straight into the other tool (no re-launch
+  needed), Enter or `resume` re-enters the current one, and
+  `status`/`sync`/`doctor`/`run --on …`/`sync-mcp` run the same
+  implementations as their one-shot forms, always against this session.
+  `exit` (or Ctrl-D) returns to your shell and prints
+  `to continue this session: tandem resume <id>` — pass that id to
+  `tandem resume <id>` from the session's own directory. Every one-shot
+  command also works from the OS shell, targeting the directory's most
+  recently used session; one-shot `tandem switch` only flips, it does not
+  enter a harness.
 - **PTY passthrough.** `tandem` launches the real CLI on a pty (raw mode,
   SIGWINCH resize forwarding, signals through the line discipline). Tandem
   never scrapes terminal output; the transcript files are the source of
@@ -52,7 +69,7 @@ $ tandem sync-mcp       # opt-in: copy MCP server configs between the tools
   `[tandem: turn N could not be translated from <tool> — <reason>; raw
   entry quarantined at ~/.tandem/quarantine/...]` — at most one per turn,
   and sync continues. The shadow is never corrupted or truncated.
-- **Memory files.** `tandem start` and every `tandem switch` sync
+- **Memory files.** A fresh `tandem` launch and every switch sync
   CLAUDE.md ↔ AGENTS.md: shared content lives in a
   `<!-- tandem:shared:begin/end -->` block (newer file wins), tool-specific
   text outside the block is preserved, and a file without markers is read
