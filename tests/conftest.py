@@ -79,6 +79,17 @@ class Env:
         monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+        # hermetic version checks: run_doctor must not shell out to real CLIs
+        from tandem.compat import COMPAT
+        from tandem.harness.claude_code import ClaudeCodeAdapter
+        from tandem.harness.codex import CodexAdapter
+
+        monkeypatch.setattr(
+            ClaudeCodeAdapter, "detect_version", lambda self: COMPAT["claude"].tested
+        )
+        monkeypatch.setattr(
+            CodexAdapter, "detect_version", lambda self: COMPAT["codex"].tested
+        )
         self.cwd = str(tmp_path / "proj")
         Path(self.cwd).mkdir()
         self.store = StateStore(db_path=tmp_path / ".tandem" / "state.db")
