@@ -283,6 +283,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
         }
 
     def render_placeholder(self, text: str, ctx: SessionContext) -> list[dict[str, Any]]:
+        # a rendered user-side entry, so it ends the assistant run like any
+        # other: no message.id may straddle it
+        ctx.claude_run_msg_id = None
         entry = self._base_entry(ctx, "user")
         entry["message"] = {"role": "user", "content": text}
         ctx.claude_leaf_uuid = entry["uuid"]

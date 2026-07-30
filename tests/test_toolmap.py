@@ -382,3 +382,13 @@ class TestClaudeToolRendering:
         a1, a2, _user, a3 = entries
         assert a1["message"]["id"] == a2["message"]["id"]
         assert a3["message"]["id"] != a1["message"]["id"]
+
+    def test_placeholder_also_ends_the_run(self):
+        # a quarantine placeholder is a rendered user-side entry: an id must
+        # never straddle it, or regrouping strands a tool_use from its result
+        ctx = _ctx("codex->claude")
+        adapter = get_adapter("claude")
+        first = adapter.render_events([AssistantMessage(source="codex", text="one")], ctx)
+        adapter.render_placeholder("[tandem: could not translate turn 3]", ctx)
+        second = adapter.render_events([AssistantMessage(source="codex", text="two")], ctx)
+        assert second[0]["message"]["id"] != first[0]["message"]["id"]
