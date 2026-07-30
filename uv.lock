@@ -223,7 +223,7 @@ wheels = [
 ]
 
 [[package]]
-name = "tandem"
+name = "tandem-cli"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
