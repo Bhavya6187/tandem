@@ -12,8 +12,9 @@ from tandem.events import (
     UserMessage,
 )
 from tandem.harness import get_adapter
+from tandem.util import read_jsonl
 
-from conftest import claude_assistant, claude_tool_result
+from conftest import claude_assistant, claude_tool_result, claude_user, write_line
 
 
 class TestShadowRolloutMeta:
@@ -435,3 +436,96 @@ class TestClaudeToolRendering:
         adapter.render_placeholder("[tandem: could not translate turn 3]", ctx)
         second = adapter.render_events([AssistantMessage(source="codex", text="two")], ctx)
         assert second[0]["message"]["id"] != first[0]["message"]["id"]
+
+
+class TestDangleFlush:
+    def _pendings(self, env):
+        write_line(env.source_file, claude_user("do the thing"))
+        write_line(env.source_file, claude_assistant(
+            [{"type": "tool_use", "id": "dangling-1", "name": "Bash",
+              "input": {"command": "sleep 999"}}]
+        ))
+
+    def test_flush_closes_pending_call(self, env_factory):
+        env = env_factory()
+        loop, engine = env.loop()
+        self._pendings(env)
+        loop.drain()
+        assert loop.ctx.pending_calls  # the call is stashed, unpaired
+
+        n = engine.flush_dangling(loop.ctx, loop.cursor)
+        assert n == 2
+        assert loop.ctx.pending_calls == {}
+
+        rollout = read_jsonl(env.codex_shadow)
+        pl = [e["payload"] for e in rollout if e.get("type") == "response_item"]
+        fc = [p for p in pl if p.get("type") == "function_call"]
+        out = [p for p in pl if p.get("type") == "function_call_output"]
+        assert fc[-1]["name"] == "exec_command"
+        assert fc[-1]["call_id"] == "dangling-1"
+        assert out[-1] == {"type": "function_call_output",
+                           "call_id": "dangling-1",
+                           "output": "(tool result not recorded)"}
+
+    def test_flush_noop_when_nothing_pending(self, env_factory):
+        env = env_factory()
+        loop, engine = env.loop()
+        write_line(env.source_file, claude_user("hi"))
+        loop.drain()
+        before = env.codex_shadow.read_text()
+        assert engine.flush_dangling(loop.ctx, loop.cursor) == 0
+        assert env.codex_shadow.read_text() == before
+
+    def test_drain_source_flag_flushes(self, env_factory, monkeypatch):
+        from tandem import ops
+        env = env_factory()
+        self._pendings(env)
+        # route drain_source at the stand-in transcript
+        monkeypatch.setattr(
+            ops, "source_transcript", lambda session, source: env.source_file
+        )
+        ops.drain_source(env.store, env.session, "claude", flush_dangling=True)
+        rollout = read_jsonl(env.codex_shadow)
+        outs = [e["payload"]["output"] for e in rollout
+                if e.get("type") == "response_item"
+                and e["payload"].get("type") == "function_call_output"]
+        assert "(tool result not recorded)" in outs
+
+    def test_landed_flush_intent_is_not_replayed(self, env_factory):
+        # crash after the flush append but before the cursor cleared: the
+        # pending calls it closed must not be flushed a second time
+        env = env_factory()
+        loop, engine = env.loop()
+        self._pendings(env)
+        loop.drain()
+        cur = env.store.get_cursor(env.session.tandem_id, "claude")
+        assert cur.pending["pending_calls"]
+        cur.pending["intent"] = {"line": -1, "pre_size": 0}  # file grew => landed
+        env.store.save_cursor(cur)
+
+        before = env.codex_shadow.read_text()
+        loop2, engine2 = env.loop()
+        assert loop2.ctx.pending_calls  # restored from the cursor
+        assert engine2.flush_dangling(loop2.ctx, loop2.cursor) == 0
+        assert env.codex_shadow.read_text() == before
+        reread = env.store.get_cursor(env.session.tandem_id, "claude")
+        assert reread.pending["pending_calls"] == {}
+        assert "intent" not in reread.pending
+
+    def test_unlanded_flush_intent_is_replayed(self, env_factory):
+        # crash before the append: the calls are still open, so flush again
+        env = env_factory()
+        loop, engine = env.loop()
+        self._pendings(env)
+        loop.drain()
+        size = env.codex_shadow.stat().st_size
+        cur = env.store.get_cursor(env.session.tandem_id, "claude")
+        cur.pending["intent"] = {"line": -1, "pre_size": size}  # did not grow
+        env.store.save_cursor(cur)
+
+        loop2, engine2 = env.loop()
+        assert engine2.flush_dangling(loop2.ctx, loop2.cursor) == 2
+        assert env.codex_shadow.stat().st_size > size
+        reread = env.store.get_cursor(env.session.tandem_id, "claude")
+        assert reread.pending["pending_calls"] == {}
+        assert "intent" not in reread.pending

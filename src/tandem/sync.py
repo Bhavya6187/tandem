@@ -35,6 +35,11 @@ class SyncSetupError(RuntimeError):
     pass
 
 
+# sentinel line index for a dangle-flush write-ahead intent (real source line
+# indices are >= 0, so it can never collide with a line append)
+_FLUSH_LINE = -1
+
+
 class SyncEngine:
     """EventSink translating from `source` into the other harness's file."""
 
@@ -86,7 +91,14 @@ class SyncEngine:
                 grew = self.shadow_path.stat().st_size > int(intent["pre_size"])
             except OSError:
                 grew = False
-            if grew:
+            if int(intent["line"]) == _FLUSH_LINE:
+                if grew:
+                    # the flush landed before the crash; its calls are closed
+                    ctx.pending_calls.clear()
+                cursor.pending.pop("intent", None)
+                ctx_to_cursor(ctx, cursor)
+                self.store.save_cursor(cursor)
+            elif grew:
                 # The append for this line landed before the crash; skip the
                 # re-append but still re-run translation for ctx effects.
                 self._skip_append_line = int(intent["line"])
@@ -119,6 +131,33 @@ class SyncEngine:
 
     def close(self) -> None:
         pass
+
+    # -- source handoff ------------------------------------------------------
+
+    def flush_dangling(self, ctx: SessionContext, cursor: SyncCursor) -> int:
+        """Close every pending tool call with a placeholder result. Called
+        after a drain when the source is being handed off (role switch,
+        one-off). Exactly-once via the same write-ahead intent as line
+        appends, keyed on the sentinel line index _FLUSH_LINE."""
+        if not self._prepared:
+            self._prepare(ctx, cursor)
+        fn = getattr(self.converter, "flush_dangling", None)
+        if fn is None or not ctx.pending_calls:
+            return 0
+        events = fn(ctx)
+        entries = self.target.render_events(events, ctx) if events else []
+        if not entries:
+            ctx_to_cursor(ctx, cursor)
+            self.store.save_cursor(cursor)
+            return 0
+        pre_size = self.shadow_path.stat().st_size
+        cursor.pending["intent"] = {"line": _FLUSH_LINE, "pre_size": pre_size}
+        self.store.save_cursor(cursor)
+        append_jsonl_fsync(self.shadow_path, entries)
+        cursor.pending.pop("intent", None)
+        ctx_to_cursor(ctx, cursor)
+        self.store.save_cursor(cursor)
+        return len(entries)
 
     # -- internals -----------------------------------------------------------
 

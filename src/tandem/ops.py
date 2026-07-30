@@ -34,9 +34,15 @@ def source_transcript(session: PairedSession, source: str) -> Path | None:
     return adapter.transcript_path(session.cwd, sid)
 
 
-def drain_source(store: StateStore, session: PairedSession, source: str) -> int:
+def drain_source(
+    store: StateStore, session: PairedSession, source: str,
+    *, flush_dangling: bool = False,
+) -> int:
     """Translate any unsynced tail of `source`'s file into the other file.
-    Pure local file I/O. Returns lines consumed."""
+    Pure local file I/O. Returns lines consumed. With flush_dangling=True,
+    close any still-unpaired tool calls with placeholder results afterwards
+    (required when the source is being handed off: both replay APIs reject
+    a dangling call)."""
     transcript = source_transcript(session, source)
     if transcript is None:
         return 0
@@ -50,6 +56,8 @@ def drain_source(store: StateStore, session: PairedSession, source: str) -> int:
             break
     if loop.errors:
         raise SyncSetupError("; ".join(loop.errors))
+    if flush_dangling:
+        engine.flush_dangling(loop.ctx, loop.cursor)
     return total
 
 
@@ -96,7 +104,7 @@ def switch_session(store: StateStore, session: PairedSession):
         _create_codex_shadow_late(store, session)
         session = store.get_session(session.tandem_id) or session
 
-    drain_source(store, session, old_active)
+    drain_source(store, session, old_active, flush_dangling=True)
     fast_forward(store, session, new_active)
     store.set_active(session.tandem_id, new_active)
 
@@ -146,7 +154,7 @@ def run_oneoff(
     # Catch up the active side first, then mark the target's whole file as
     # known so only the new turn flows back afterwards. (When target IS the
     # active side there is nothing to fast-forward — its cursor is live.)
-    drain_source(store, session, session.active)
+    drain_source(store, session, session.active, flush_dangling=True)
     if target != session.active and sid and source_transcript(session, target) is not None:
         fast_forward(store, session, target)
 
@@ -170,5 +178,5 @@ def run_oneoff(
                 fast_forward_to_zero.line_index = 0
                 store.save_cursor(fast_forward_to_zero)
 
-    drain_source(store, session, target)
+    drain_source(store, session, target, flush_dangling=True)
     return code

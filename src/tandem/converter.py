@@ -90,7 +90,7 @@ class ReferenceConverter:
             elif isinstance(ev, ToolCall):
                 ctx.pending_calls[ev.call_id] = ev.model_dump(exclude_none=True)
             elif isinstance(ev, ToolResult):
-                stored = ctx.pending_calls.pop(ev.call_id or "", None)
+                stored = ctx.pending_calls.pop(ev.call_id, None) if ev.call_id else None
                 if stored:
                     # _structured is the codex adapter's out-of-band enrichment
                     # channel, not a ToolCall field (which forbids extras)
@@ -120,4 +120,21 @@ class ReferenceConverter:
                     )
                 )
             # thinking and other system events: dropped
+        return out
+
+    def flush_dangling(self, ctx: SessionContext) -> list[NormalizedEvent]:
+        """Mapped call + placeholder-result pairs for every pending call.
+        Both replay APIs reject a call without a result, so a drained source
+        must never leave one behind. Clears ctx.pending_calls."""
+        target_id = ctx.direction.split("->")[1]
+        out: list[NormalizedEvent] = []
+        for call_id, stored in list(ctx.pending_calls.items()):
+            stored.pop("_structured", None)
+            call = ToolCall.model_validate(stored)
+            placeholder = ToolResult(
+                source=call.source, turn_index=call.turn_index,
+                call_id=call_id, output=toolmap.PLACEHOLDER_OUTPUT,
+            )
+            out.extend(toolmap.map_pair(call, placeholder, target_id))
+        ctx.pending_calls.clear()
         return out
