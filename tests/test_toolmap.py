@@ -447,6 +447,17 @@ class TestClaudeToolRendering:
             assert cur["parentUuid"] == prev["uuid"]
         assert ctx.claude_leaf_uuid == entries[-1]["uuid"]
 
+    def test_render_uses_last_real_claude_model(self):
+        # claude --resume rejects "<synced>" as a session model; rendered
+        # entries carry the model claude last used when one is known
+        ctx = _ctx("codex->claude")
+        ctx.claude_model = "claude-fable-5"
+        entries = get_adapter("claude").render_events([
+            AssistantMessage(source="codex", text="hi"),
+            call("Bash", {"command": "ls"}, source="codex", call_id="c9"),
+        ], ctx)
+        assert all(e["message"]["model"] == "claude-fable-5" for e in entries)
+
     def test_is_error_flag_rides(self):
         ctx = _ctx("codex->claude")
         entries = get_adapter("claude").render_events([

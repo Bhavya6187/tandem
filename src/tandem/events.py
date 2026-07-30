@@ -102,3 +102,6 @@ class SessionContext(BaseModel):
     claude_run_msg_id: str | None = None
     claude_session_id: str | None = None
     codex_session_id: str | None = None
+    # model claude itself last used; rendered assistant entries carry it so
+    # `claude --resume` can restore the session model (it rejects "<synced>")
+    claude_model: str | None = None

@@ -274,7 +274,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
             ctx.claude_run_msg_id = f"msg_tandem_{entry['uuid'][:8]}"
         return {
             "role": "assistant",
-            "model": "<synced>",
+            "model": ctx.claude_model or "<synced>",
             "id": ctx.claude_run_msg_id,
             "type": "message",
             "content": content,
@@ -291,9 +291,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
         ctx.claude_leaf_uuid = entry["uuid"]
         return [entry]
 
-    def derive_leaf_uuid(self, transcript: Path) -> str | None:
-        """Last chainable uuid in an existing transcript (the harness itself
-        may have appended since tandem last wrote)."""
+    def _tail_objects(self, transcript: Path) -> list[dict[str, Any]]:
         try:
             with open(transcript, "rb") as f:
                 f.seek(0, 2)
@@ -301,8 +299,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 f.seek(max(0, size - 262144))
                 tail = f.read().decode("utf-8", errors="replace")
         except OSError:
-            return None
-        leaf = None
+            return []
+        out = []
         for line in tail.splitlines():
             line = line.strip()
             if not line:
@@ -311,8 +309,30 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(obj, dict) and obj.get("uuid") and obj.get("type") in (
+            if isinstance(obj, dict):
+                out.append(obj)
+        return out
+
+    def derive_leaf_uuid(self, transcript: Path) -> str | None:
+        """Last chainable uuid in an existing transcript (the harness itself
+        may have appended since tandem last wrote)."""
+        leaf = None
+        for obj in self._tail_objects(transcript):
+            if obj.get("uuid") and obj.get("type") in (
                 "user", "assistant", "attachment", "system",
             ):
                 leaf = obj["uuid"]
         return leaf
+
+    def derive_last_model(self, transcript: Path) -> str | None:
+        """Model of the last main-thread assistant entry with a real model
+        name. Skips the "<synced>" placeholder (pre-fix tandem appends) and
+        sidechain entries (subagents may run on a different model)."""
+        model = None
+        for obj in self._tail_objects(transcript):
+            if obj.get("type") != "assistant" or obj.get("isSidechain"):
+                continue
+            m = (obj.get("message") or {}).get("model")
+            if m and m != "<synced>":
+                model = m
+        return model

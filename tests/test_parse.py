@@ -81,6 +81,48 @@ class TestClaudeParse:
         assert ev.kind == "system" and ev.subtype == "sidechain"
 
 
+class TestDeriveLastModel:
+    """claude --resume restores the session model from the transcript, so
+    rendered entries must carry the model claude itself last used."""
+
+    def write(self, tmp_path, entries):
+        p = tmp_path / "transcript.jsonl"
+        p.write_text("".join(json.dumps(e) + "\n" for e in entries))
+        return p
+
+    def test_last_real_model_wins(self, tmp_path):
+        p = self.write(tmp_path, [
+            {"type": "assistant", "uuid": "a1",
+             "message": {"role": "assistant", "model": "claude-opus-5",
+                         "content": []}},
+            {"type": "assistant", "uuid": "a2",
+             "message": {"role": "assistant", "model": "claude-fable-5",
+                         "content": []}},
+        ])
+        assert get_adapter("claude").derive_last_model(p) == "claude-fable-5"
+
+    def test_synced_and_sidechain_models_skipped(self, tmp_path):
+        p = self.write(tmp_path, [
+            {"type": "assistant", "uuid": "a1",
+             "message": {"role": "assistant", "model": "claude-fable-5",
+                         "content": []}},
+            {"type": "assistant", "uuid": "side", "isSidechain": True,
+             "message": {"role": "assistant", "model": "claude-haiku-4-5",
+                         "content": []}},
+            {"type": "assistant", "uuid": "a2",
+             "message": {"role": "assistant", "model": "<synced>",
+                         "content": []}},
+        ])
+        assert get_adapter("claude").derive_last_model(p) == "claude-fable-5"
+
+    def test_no_real_model_returns_none(self, tmp_path):
+        p = self.write(tmp_path, [
+            {"type": "user", "uuid": "u1",
+             "message": {"role": "user", "content": "hi"}},
+        ])
+        assert get_adapter("claude").derive_last_model(p) is None
+
+
 class TestCodexParse:
     def test_golden_rollout(self):
         adapter = get_adapter("codex")

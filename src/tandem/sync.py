@@ -104,10 +104,15 @@ class SyncEngine:
                 self._skip_append_line = int(intent["line"])
         if self.target_id == "claude":
             # The claude file may have grown since we last wrote (its own CLI
-            # appends while claude is active); chain onto the real leaf.
-            leaf = get_adapter("claude").derive_leaf_uuid(self.shadow_path)
+            # appends while claude is active); chain onto the real leaf and
+            # pick up the model claude last used for rendered entries.
+            adapter = get_adapter("claude")
+            leaf = adapter.derive_leaf_uuid(self.shadow_path)
             if leaf:
                 ctx.claude_leaf_uuid = leaf
+            model = adapter.derive_last_model(self.shadow_path)
+            if model:
+                ctx.claude_model = model
 
     # -- sink interface ------------------------------------------------------
 
