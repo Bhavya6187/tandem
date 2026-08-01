@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -320,6 +321,36 @@ def sub(model: str | None, context_mode: str | None, task: str | None) -> None:
             keep_forks=cfg.keep_forks,
         )
     sys.exit(code)
+
+
+@main.command(name="hook-route")
+def hook_route_cmd() -> None:
+    """Claude Code PreToolUse hook: reroute subagent dispatches to codex.
+
+    Reads hook JSON on stdin; prints a decision or nothing. ALWAYS exits 0
+    — exit 2 would block the dispatch, and any failure here must degrade
+    to native behavior."""
+    try:
+        from .config import load_subagents_config
+        from .hookroute import route
+
+        payload = json.loads(sys.stdin.read() or "{}")
+        cwd = payload.get("cwd") or _cwd()
+        cfg = load_subagents_config()
+        with StateStore() as store:
+            session = store.latest_session_for_cwd(cwd)
+        codex_ok = False
+        if session is not None:
+            adapter = get_adapter("codex")
+            v = adapter.detect_version()
+            codex_ok = v is not None and adapter.version_supported(v)
+        decision = route(payload, cfg, cwd, paths.claude_home(),
+                         has_session=session is not None, codex_ok=codex_ok)
+        if decision is not None:
+            click.echo(json.dumps(decision))
+    except Exception:
+        pass
+    sys.exit(0)
 
 
 @main.command()
