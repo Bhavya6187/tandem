@@ -390,10 +390,21 @@ counting reroutes there reports zero every time. The hook's own stdout
    averaged in.
 10. **A `no_code_block` fail can be a formatting miss, not a search miss.**
     The verifier scores the newest turn that actually contains a fenced block,
-    so an async dispatch's trailing "task complete" summary no longer erases an
-    answer the agent already gave. It is still the agent's job to produce a
-    block at all; `answer_had_code_block: false` in `verdict.json` tells the
-    two apart.
+    so an async dispatch's trailing "task complete" summary no longer erases a
+    *fence-free* answer the agent already gave. It is still the agent's job to
+    produce a block at all; `answer_had_code_block: false` in `verdict.json`
+    tells the two apart.
+11. **That fix is partial, in arm A's direction.** "Newest turn with any
+    fence" is not "newest turn with the answer": a trailing summary that
+    re-quotes even one line of the function outranks the complete earlier
+    answer and is what gets scored. `answer_had_code_block` reads true either
+    way, so no field in `verdict.json` distinguishes them — only the
+    transcript does. Arm A structurally produces more of those trailing turns
+    than arm B, and how many is not deterministic (the same task gave arm A
+    three result events in one smoke run and one in the next), so a smaller,
+    same-signed version of the shape-bias the fix exists to remove is still
+    there. A partial or oddly-truncated arm-A answer is a reason to open
+    `transcript.jsonl`, not a reason to trust the row.
 
 ---
 

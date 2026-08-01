@@ -157,7 +157,19 @@ def final_answer_with_block(events: Iterable[Mapping[str, Any]]) -> str:
     form. Not "the turn with the best block" — the LAST one, so a model that
     corrects itself is still taken at its latest word — and never a
     subagent's block (`answer_turns` filters those out), which would score a
-    worker's report as the agent's answer."""
+    worker's report as the agent's answer.
+
+    THE RESIDUAL, and it is the same bias in miniature. "Newest turn with ANY
+    fence" is not "newest turn with the answer". A task-notification summary
+    that re-quotes one line of the function — or any fenced fragment at all —
+    outranks the complete earlier answer and gets scored instead, and
+    `answer_had_code_block` reads true either way, so nothing downstream can
+    tell the two apart. Arm A structurally produces more of those trailing
+    turns than arm B (SMOKE1 arm A: 3 result events; SMOKE2 arm A: 1 — the
+    tail is not even deterministic), so what is left is a smaller, same-signed
+    version of the shape-bias this function exists to remove. Nothing here
+    detects it; a suspiciously partial arm-A answer is a reason to open
+    transcript.jsonl, not a reason to trust the number."""
     turns = answer_turns(events)
     for text in reversed(turns):
         if fenced_blocks(text):
