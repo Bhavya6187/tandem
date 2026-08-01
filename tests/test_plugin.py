@@ -2,15 +2,71 @@
 
 import json
 import re
+import tomllib
 from pathlib import Path
 
-PLUGIN = Path(__file__).parent.parent / "plugin"
+ROOT = Path(__file__).parent.parent
+PLUGIN = ROOT / "plugin"
+MARKETPLACE = ROOT / ".claude-plugin" / "marketplace.json"
 
 
 def test_manifest_parses():
     m = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
     assert m["name"] == "tandem"
     assert m["version"]
+
+
+def test_marketplace_manifest_declares_the_tandem_marketplace():
+    """The top-level `name` is the `@<marketplace>` half of
+    `claude plugin install tandem@tandem` — it is NOT derived from the
+    GitHub owner/repo the user passes to `marketplace add`, so it has to be
+    exactly "tandem" for the documented install command to work."""
+    m = json.loads(MARKETPLACE.read_text())
+    assert m["name"] == "tandem"
+    assert m["owner"] == {
+        "name": "Bhavya Agarwal",
+        "url": "https://github.com/Bhavya6187",
+    }
+    assert len(m["plugins"]) == 1
+
+
+def test_marketplace_entry_source_resolves_to_the_plugin_directory():
+    """A relative source is resolved against the marketplace root (the dir
+    holding `.claude-plugin/`), i.e. the repo root."""
+    entry = json.loads(MARKETPLACE.read_text())["plugins"][0]
+    assert entry["source"] == "./plugin"
+    assert (ROOT / entry["source"]).resolve() == PLUGIN.resolve()
+    assert (PLUGIN / ".claude-plugin" / "plugin.json").is_file()
+
+
+def test_marketplace_entry_name_matches_the_plugin_manifest():
+    """Claude installs the plugin under the entry's `name`, and every
+    plugin-scoped reference (`tandem:codex-worker`, hook rewrite target)
+    is built from it — the two manifests must not drift apart."""
+    entry = json.loads(MARKETPLACE.read_text())["plugins"][0]
+    plugin = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
+    assert entry["name"] == plugin["name"]
+    assert entry["description"] == plugin["description"]
+
+
+def test_marketplace_entry_leaves_version_and_strict_to_plugin_json():
+    """Version resolution is plugin.json → entry → git SHA, so an entry
+    `version` is silently shadowed by plugin.json and only invites drift.
+    `strict` defaults to true (plugin.json authoritative); `strict: false`
+    against a component-declaring plugin.json is a documented load failure,
+    so it stays unset too."""
+    entry = json.loads(MARKETPLACE.read_text())["plugins"][0]
+    assert set(entry) == {"name", "source", "description"}
+
+
+def test_plugin_version_matches_pyproject_version():
+    """Hand-maintained twin of pyproject's version. It gates update
+    delivery: `plugin marketplace update` skips a plugin whose resolved
+    version already matches the installed one, so a stale plugin.json
+    version means shipped fixes never reach users."""
+    plugin = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    assert plugin["version"] == pyproject["project"]["version"]
 
 
 def test_hooks_register_hook_route():

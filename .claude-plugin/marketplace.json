@@ -1,0 +1,15 @@
+{
+  "name": "tandem",
+  "description": "tandem's plugin marketplace: run Claude Code subagents on cheap codex models.",
+  "owner": {
+    "name": "Bhavya Agarwal",
+    "url": "https://github.com/Bhavya6187"
+  },
+  "plugins": [
+    {
+      "name": "tandem",
+      "source": "./plugin",
+      "description": "Route Claude Code subagent dispatches to cheap codex models via tandem."
+    }
+  ]
+}
