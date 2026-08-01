@@ -10,7 +10,7 @@ from pathlib import Path
 
 import click
 
-from . import compat, paths
+from . import __version__, compat, paths
 from .constants import SEED_NOTE
 from .events import SessionContext
 from .harness import get_adapter, other
@@ -72,7 +72,7 @@ def _check_versions(warn_only: bool = False) -> dict[str, str | None]:
 
 
 @click.group(invoke_without_command=True)
-@click.version_option(package_name="tandem")
+@click.version_option(version=__version__, prog_name="tandem")
 @click.option(
     "--active",
     type=click.Choice(["claude", "codex"]),
