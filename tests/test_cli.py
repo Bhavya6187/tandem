@@ -5,6 +5,7 @@ tmp homes (same env vars as conftest.Env)."""
 import click.testing
 import pytest
 
+import tandem
 from tandem import cli, compat
 from tandem.state import StateStore
 
@@ -33,6 +34,14 @@ def entered(monkeypatch):
     calls = []
     monkeypatch.setattr(cli, "_enter_session", lambda s: (calls.append(s), 0)[1])
     return calls
+
+
+def test_version_reports_installed_dist():
+    # The dist is named tandem-cli, not tandem; --version must come from
+    # tandem.__version__ or it crashes in venvs without a "tandem" dist.
+    r = click.testing.CliRunner().invoke(cli.main, ["--version"])
+    assert r.exit_code == 0
+    assert tandem.__version__ in r.output
 
 
 def test_bare_tandem_pairs_fresh_each_launch(homes, ok_versions, entered):
