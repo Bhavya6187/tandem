@@ -4,12 +4,16 @@ Failure discipline: any problem -> None (native dispatch), CLI always exit 0."""
 import json
 from pathlib import Path
 
+from tandem import paths
 from tandem.config import SubagentsConfig
 from tandem.hookroute import (
     BRIDGE_AGENT,
     BRIDGE_MODEL,
     BRIDGE_NAME,
+    NOTICE_CODEX,
+    NOTICE_NO_SESSION,
     find_agent_body,
+    missed_reroute_notice,
     route,
 )
 
@@ -29,6 +33,21 @@ def _route(payload, cfg=CFG, has_session=True, codex_ok=True,
            cwd="/tmp/x", claude_home=Path("/nonexistent")):
     return route(payload, cfg, cwd, claude_home,
                  has_session=has_session, codex_ok=codex_ok)
+
+
+def _notice(payload, cfg=CFG, has_session=False, codex_ok=True,
+            already_warned=False):
+    return missed_reroute_notice(payload, cfg, has_session=has_session,
+                                 codex_ok=codex_ok,
+                                 already_warned=already_warned)
+
+
+def _run_hook(payload):
+    import click.testing
+
+    from tandem import cli
+    return click.testing.CliRunner().invoke(
+        cli.main, ["hook-route"], input=json.dumps(payload))
 
 
 class TestRewrite:
@@ -98,6 +117,51 @@ class TestPassthrough:
         assert _route(_payload(prompt="")) is None
 
 
+class TestNotice:
+    def test_no_session_notice_carries_no_permission_decision(self):
+        out = _notice(_payload())
+        assert out == {"systemMessage": NOTICE_NO_SESSION}
+        assert "hookSpecificOutput" not in out and "decision" not in out
+        assert "Run `tandem` here" in NOTICE_NO_SESSION
+
+    def test_codex_variant_names_its_own_cause(self):
+        out = _notice(_payload(), has_session=True, codex_ok=False)
+        assert out == {"systemMessage": NOTICE_CODEX}
+        assert NOTICE_CODEX != NOTICE_NO_SESSION
+        assert "codex" in NOTICE_CODEX
+
+    def test_silent_when_the_reroute_works(self):
+        # a rewrite is emitted here; a notice must never accompany one
+        assert _notice(_payload(), has_session=True, codex_ok=True) is None
+
+    def test_route_off_never_warns(self):
+        # explicit user choice — silence is the requested behavior
+        assert _notice(_payload(), cfg=SubagentsConfig(route="off")) is None
+        assert _notice(_payload(), cfg=SubagentsConfig(route="off"),
+                       has_session=True, codex_ok=False) is None
+
+    def test_already_warned_suppresses(self):
+        assert _notice(_payload(), already_warned=True) is None
+
+    def test_only_agent_dispatches_warn(self):
+        payload = _payload()
+        payload["tool_name"] = "Bash"
+        assert _notice(payload) is None
+        del payload["tool_name"]
+        assert _notice(payload) is None
+
+    def test_fork_and_bridge_still_warn_without_a_session(self):
+        # deliberately not special-cased: with no paired session nothing can
+        # reroute, so the explanation is due whatever the dispatch asked for
+        assert _notice(_payload(subagent_type="fork")) is not None
+        assert _notice(_payload(subagent_type=BRIDGE_AGENT)) is not None
+
+    def test_malformed_input_still_warns(self):
+        # the notice explains the environment, not the dispatch's shape
+        assert _notice({"tool_name": "Agent"}) == {
+            "systemMessage": NOTICE_NO_SESSION}
+
+
 class TestFindAgentBody:
     def test_builtin_and_plugin_scoped_have_no_body(self, tmp_path):
         assert find_agent_body("Explore", str(tmp_path), tmp_path) == ""
@@ -128,6 +192,9 @@ class TestCli:
         out = json.loads(r.output)
         assert out["hookSpecificOutput"]["updatedInput"]["subagent_type"] \
             == BRIDGE_AGENT
+        # the working path is untouched by the notice: no extra key, no stamp
+        assert "systemMessage" not in out
+        assert not (paths.tandem_home() / "warned").exists()
 
     def test_any_crash_exits_zero_silent(self, monkeypatch, tmp_path):
         import click.testing
@@ -148,3 +215,89 @@ class TestCli:
             cli.main, ["hook-route"], input="not json {{{")
         assert r.exit_code == 0
         assert r.output == ""
+
+
+class TestCliNotice:
+    """The wrapper half: stamp bookkeeping and what reaches stdout."""
+
+    def _unpaired(self, tmp_path, monkeypatch, session_id="s-1"):
+        monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+        payload = _payload()
+        payload["cwd"] = str(tmp_path)      # no paired session here
+        if session_id is not None:
+            payload["session_id"] = session_id
+        return payload
+
+    def test_first_dispatch_warns_without_deciding_and_stamps(
+            self, tmp_path, monkeypatch):
+        payload = self._unpaired(tmp_path, monkeypatch)
+        r = _run_hook(payload)
+        assert r.exit_code == 0
+        out = json.loads(r.output)
+        assert out == {"systemMessage": NOTICE_NO_SESSION}
+        assert "hookSpecificOutput" not in out and "decision" not in out
+        assert (tmp_path / ".tandem" / "warned" / "s-1").exists()
+
+    def test_second_dispatch_same_session_is_silent(
+            self, tmp_path, monkeypatch):
+        payload = self._unpaired(tmp_path, monkeypatch)
+        assert _run_hook(payload).output != ""
+        again = _run_hook(payload)
+        assert again.exit_code == 0
+        assert again.output == ""
+        # a different claude session warns again
+        payload["session_id"] = "s-2"
+        assert json.loads(_run_hook(payload).output) == {
+            "systemMessage": NOTICE_NO_SESSION}
+
+    def test_route_off_is_silent(self, tmp_path, monkeypatch):
+        payload = self._unpaired(tmp_path, monkeypatch)
+        (tmp_path / ".tandem").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".tandem" / "config.toml").write_text(
+            '[subagents]\nroute = "off"\n')
+        r = _run_hook(payload)
+        assert r.exit_code == 0
+        assert r.output == ""
+        assert not (tmp_path / ".tandem" / "warned").exists()
+
+    def test_paired_session_with_broken_codex_names_codex(
+            self, env_factory, monkeypatch):
+        from tandem.harness.codex import CodexAdapter
+        env = env_factory(active="claude")
+        monkeypatch.setattr(CodexAdapter, "detect_version", lambda self: None)
+        payload = _payload()
+        payload["cwd"] = env.cwd
+        payload["session_id"] = "s-codex"
+        r = _run_hook(payload)
+        assert r.exit_code == 0
+        assert json.loads(r.output) == {"systemMessage": NOTICE_CODEX}
+
+    def test_unusable_stamp_dir_warns_anyway_and_exits_zero(
+            self, tmp_path, monkeypatch):
+        payload = self._unpaired(tmp_path, monkeypatch)
+        (tmp_path / ".tandem").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".tandem" / "warned").write_text("not a directory")
+        for _ in range(2):  # unstampable => warns every time, never blocks
+            r = _run_hook(payload)
+            assert r.exit_code == 0
+            assert json.loads(r.output) == {"systemMessage": NOTICE_NO_SESSION}
+
+    def test_missing_session_id_warns_anyway(self, tmp_path, monkeypatch):
+        payload = self._unpaired(tmp_path, monkeypatch, session_id=None)
+        for _ in range(2):  # nothing to stamp => no suppression, still exit 0
+            r = _run_hook(payload)
+            assert r.exit_code == 0
+            assert json.loads(r.output) == {"systemMessage": NOTICE_NO_SESSION}
+        assert not (tmp_path / ".tandem" / "warned").exists()
+
+    def test_stamps_are_pruned_after_a_week(self, tmp_path, monkeypatch):
+        import os
+        payload = self._unpaired(tmp_path, monkeypatch)
+        warned = tmp_path / ".tandem" / "warned"
+        warned.mkdir(parents=True)
+        stale = warned / "s-old"
+        stale.touch()
+        os.utime(stale, (0, 0))
+        _run_hook(payload)
+        assert not stale.exists()
+        assert (warned / "s-1").exists()

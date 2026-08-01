@@ -1,8 +1,10 @@
 """PreToolUse routing: should this native Agent dispatch run on codex?
 
 Pure decision logic — the CLI wrapper owns process concerns (stdin, exit
-codes). Returning None means 'emit nothing': the dispatch proceeds
-natively. That is the failure mode for everything unexpected."""
+codes, the once-per-session stamp file). Returning None means 'emit
+nothing': the dispatch proceeds natively. That is the failure mode for
+everything unexpected. The second decision here — missed_reroute_notice —
+is what keeps two of those silences explainable instead of merely quiet."""
 
 from __future__ import annotations
 
@@ -18,6 +20,21 @@ from .config import SubagentsConfig
 BRIDGE_NAME = "codex-worker"
 BRIDGE_AGENT = f"tandem:{BRIDGE_NAME}"
 BRIDGE_MODEL = "haiku"
+
+# The plugin is installed globally in claude, so its silence is ambiguous:
+# "no tandem session here" and "tandem is broken" look identical from the
+# UI. These two lines are the only thing that distinguishes them, and each
+# names the one command that fixes its own cause.
+NOTICE_NO_SESSION = (
+    "tandem: subagent plugin is active but this directory has no paired "
+    "tandem session — dispatches stay on claude. Run `tandem` here to "
+    "enable codex subagents."
+)
+NOTICE_CODEX = (
+    "tandem: subagent plugin is active but codex is missing or its version "
+    "is unsupported — dispatches stay on claude. Run `tandem doctor` to see "
+    "what is wrong."
+)
 
 
 def route(
@@ -69,6 +86,36 @@ def route(
             "updatedInput": updated,
         }
     }
+
+
+def missed_reroute_notice(
+    payload: dict,
+    cfg: SubagentsConfig,
+    *,
+    has_session: bool,
+    codex_ok: bool,
+    already_warned: bool,
+) -> dict | None:
+    """The 'plugin fired, nothing was rerouted' notice, or None for silence.
+
+    A bare top-level `systemMessage` — no permission decision, so the
+    dispatch still falls through claude's normal permission flow and runs
+    natively. Mutually exclusive with route()'s rewrite by construction: a
+    rewrite requires has_session and codex_ok, and those two silence this.
+    `route = "off"` is an explicit user choice, so it stays silent even
+    though nothing reroutes. Whether this session was warned already is the
+    caller's business (it owns the stamp file), as is printing the result."""
+    if payload.get("tool_name") not in ("Agent", "Task"):
+        return None
+    if cfg.route != "all" or already_warned:
+        return None
+    if has_session and codex_ok:
+        return None
+    # deliberately not narrowed to reroutable dispatches: with no session or
+    # no codex, a fork/bridge/malformed dispatch is just as unrerouted, and
+    # the notice explains the environment rather than the call
+    return {"systemMessage": NOTICE_NO_SESSION if not has_session
+            else NOTICE_CODEX}
 
 
 def find_agent_body(subagent_type: str, cwd: str, claude_home: Path) -> str:

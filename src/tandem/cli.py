@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -346,6 +348,59 @@ def sub(model: str | None, context_mode: str | None, quiet: bool,
     sys.exit(code)
 
 
+# Stamps are per claude session id and worthless once that session is gone;
+# a week is long enough that a resumed session stays quiet.
+_WARN_STAMP_TTL = 7 * 24 * 3600
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
+
+def _warn_stamp(payload: dict) -> Path | None:
+    """Where this claude session's 'already warned' stamp lives, or None when
+    the payload carries no usable `session_id`. The id is untrusted text, so
+    anything that is not a plain filename component (traversal, separators)
+    counts as absent — the notice then repeats rather than tandem writing
+    outside TANDEM_HOME."""
+    sid = payload.get("session_id")
+    if not isinstance(sid, str) or not _SESSION_ID_RE.fullmatch(sid):
+        return None
+    if not sid.strip("."):        # "." and ".." match the pattern
+        return None
+    return paths.tandem_home() / "warned" / sid
+
+
+def _already_warned(stamp: Path | None) -> bool:
+    """True only when a notice is *provably* already out for this session.
+    Every doubt resolves to False — repeating the one message that explains
+    the silence is cheaper than swallowing it."""
+    if stamp is None:
+        return False
+    try:
+        return stamp.exists()
+    except OSError:
+        return False
+
+
+def _mark_warned(stamp: Path | None) -> None:
+    """Record the notice and opportunistically prune week-old stamps. All
+    best-effort: the message is already printed, and no bookkeeping failure
+    may reach the dispatch."""
+    if stamp is None:
+        return
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+        cutoff = time.time() - _WARN_STAMP_TTL
+        stale = [p for p in stamp.parent.iterdir()
+                 if p.stat().st_mtime < cutoff]
+    except OSError:
+        return
+    for p in stale:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
 @main.command(name="hook-route")
 def hook_route_cmd() -> None:
     """Claude Code PreToolUse hook: reroute subagent dispatches to codex.
@@ -354,6 +409,15 @@ def hook_route_cmd() -> None:
     ALWAYS exits 0 — exit 2 would block the dispatch, and any failure here
     must degrade to native behavior.
 
+    When nothing is rerouted because tandem is not usable here — no paired
+    session for the cwd, or codex missing/unsupported — it prints a bare
+    top-level `{"systemMessage": …}` instead: a user-visible line with NO
+    permission decision, so claude still runs the dispatch natively. That
+    fires once per claude session, stamped under `$TANDEM_HOME/warned/`.
+    Stamp I/O is best-effort and failures warn again rather than go silent,
+    since the notice exists precisely to explain otherwise-invisible
+    behavior.
+
     The function body is not the whole story: click's usage-error path exits
     2 before this ever runs (version skew — plugin installed, an older
     tandem on PATH without this subcommand — or a stray argument). So the
@@ -361,7 +425,7 @@ def hook_route_cmd() -> None:
     is what makes exit 2 unreachable in practice."""
     try:
         from .config import load_subagents_config
-        from .hookroute import route
+        from .hookroute import missed_reroute_notice, route
 
         payload = json.loads(sys.stdin.read() or "{}")
         cwd = payload.get("cwd") or _cwd()
@@ -377,6 +441,15 @@ def hook_route_cmd() -> None:
                          has_session=session is not None, codex_ok=codex_ok)
         if decision is not None:
             click.echo(json.dumps(decision))
+        else:
+            stamp = _warn_stamp(payload)
+            notice = missed_reroute_notice(
+                payload, cfg,
+                has_session=session is not None, codex_ok=codex_ok,
+                already_warned=_already_warned(stamp))
+            if notice is not None:
+                click.echo(json.dumps(notice))
+                _mark_warned(stamp)     # only ever stamp what we printed
     except Exception:
         pass
     sys.exit(0)

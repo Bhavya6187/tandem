@@ -151,14 +151,15 @@ dispatch in v1 is fresh-type (forks pass through natively).
 
 ### `tandem hook-route` (new CLI command)
 
-Reads the PreToolUse JSON from stdin. Emits nothing (exit 0) — meaning
-"dispatch proceeds natively" — when any of these hold:
+Reads the PreToolUse JSON from stdin. Emits no permission decision (exit 0)
+— meaning "dispatch proceeds natively" — when any of these hold:
 
 - `tool_name` is not `Agent`/`Task` (defense in depth: the hook matcher is
   config we do not control at call time);
 - no paired tandem session for the cwd, or codex missing/unsupported
   (the plugin is installed globally in Claude; outside tandem sessions the
-  hook must be an invisible no-op);
+  hook must not touch the dispatch) — the one case that is not silent: it
+  carries the one-time notice described under exit discipline below;
 - `route = "off"` in config;
 - `subagent_type` is `"fork"` (claude forks stay native in v1 — they're
   prompt-cache-cheap and semantically claude's own full-context worker);
@@ -201,6 +202,31 @@ is therefore registered as `tandem hook-route || true`; the shell-level
 guard is what makes exit 2 unreachable. `route()` additionally re-checks
 `tool_name ∈ {Agent, Task}` itself, so a mis-scoped matcher can never make
 it rewrite an unrelated tool's input.
+
+**The one silence that gets a voice.** The plugin is installed globally, so
+a dispatch in a directory with no paired session — or one where codex is
+missing/unsupported — is indistinguishable from a dispatch on a machine
+without tandem at all: nothing reroutes, nothing says why. When `route =
+"all"` and an `Agent`/`Task` dispatch cannot be rerouted for either of
+those reasons, hook-route therefore prints a bare top-level
+`{"systemMessage": "…"}` naming the actual cause. `systemMessage` is the
+documented universal hook-output field ("warning message shown to the
+user", claude 2.1.220), and carrying it *without* a permission decision
+leaves the call in claude's normal permission flow — the dispatch still
+runs natively, exactly as if the hook had said nothing. Not a `deny`:
+blocking a dispatch to explain a missing optimization would be worse than
+the optimization's absence. It never accompanies a rewrite, and `route =
+"off"` stays silent — that silence is what the user asked for.
+
+Once per claude session, not per dispatch: the PreToolUse payload's
+top-level `session_id` names a stamp file under `$TANDEM_HOME/warned/`,
+written only after a notice was actually printed, pruned opportunistically
+at ~7 days. The stamp is the CLI wrapper's business (the decision layer
+stays pure: it is told `already_warned` and answers whether and what to
+warn). Every bookkeeping failure — unwritable or occupied `$TANDEM_HOME`,
+a payload with no `session_id` — degrades to warn-anyway rather than
+stay-silent: a repeated line is a smaller loss than the one message that
+explains otherwise-invisible behavior. Exit 0 on every path.
 
 ### The plugin (`plugin/` in this repo)
 
@@ -304,7 +330,8 @@ price of "no forged results" under the documented hook surface.
 | Failure | Behavior |
 | --- | --- |
 | hook-route crashes / config unreadable | exit 0, no output → native dispatch |
-| no paired session / codex missing | hook passthrough; if reached anyway, `tandem sub` exits nonzero, bridge relays `[tandem-sub failed]`, main model does the work itself |
+| no paired session / codex missing | native dispatch + a one-time `systemMessage` notice naming the cause (no permission decision, once per claude session); if the bridge is reached anyway, `tandem sub` exits nonzero, bridge relays `[tandem-sub failed]`, main model does the work itself |
+| notice stamp unwritable / payload has no `session_id` | notice repeats instead of being suppressed; exit 0, dispatch untouched |
 | codex exec nonzero / outage | bridge relays output + `[tandem-sub failed]`; main model retries or does the work natively |
 | shadow missing on `--context full` | seed a fresh rollout from the drained active side (existing `_create_codex_shadow_late` pattern) |
 | parallel dispatches, full mode | file lock serializes drain-then-copy; execs then run concurrently. The other drainer is the *session's own tail thread*, running continuously against the same cursor in the `tandem run` process; it takes `_sub_lock` around each drain too, so both sides serialize on one flock. (Guarding only the `tandem sub` side left two concurrent drains of one cursor row free to translate the same lines twice — duplicate turns and call ids in the fork.) Match mode touches no shared state — no contention |
@@ -398,7 +425,10 @@ price of "no forged results" under the documented hook surface.
 ## Testing
 
 - Unit: `hook-route` stdin→stdout fixtures (rewrite, all passthrough
-  cases, model-field rewrite, named-agent body inlining, crash→exit-0);
+  cases, model-field rewrite, named-agent body inlining, crash→exit-0;
+  notice emitted with no decision, suppressed on the second dispatch of a
+  session, silent under `route = "off"`, codex-cause variant, warn-anyway
+  on stamp failure — all exit 0);
   fork op golden tests (session_meta rewrite, fork never in sync cursors);
   `tandem sub` argv/stdin handling via the existing `_run` seam; config
   parsing.
