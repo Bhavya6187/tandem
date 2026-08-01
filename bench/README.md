@@ -390,21 +390,26 @@ counting reroutes there reports zero every time. The hook's own stdout
    averaged in.
 10. **A `no_code_block` fail can be a formatting miss, not a search miss.**
     The verifier scores the newest turn that actually contains a fenced block,
-    so an async dispatch's trailing "task complete" summary no longer erases a
-    *fence-free* answer the agent already gave. It is still the agent's job to
-    produce a block at all; `answer_had_code_block: false` in `verdict.json`
-    tells the two apart.
-11. **That fix is partial, in arm A's direction.** "Newest turn with any
-    fence" is not "newest turn with the answer": a trailing summary that
-    re-quotes even one line of the function outranks the complete earlier
-    answer and is what gets scored. `answer_had_code_block` reads true either
-    way, so no field in `verdict.json` distinguishes them — only the
-    transcript does. Arm A structurally produces more of those trailing turns
-    than arm B, and how many is not deterministic (the same task gave arm A
-    three result events in one smoke run and one in the next), so a smaller,
-    same-signed version of the shape-bias the fix exists to remove is still
-    there. A partial or oddly-truncated arm-A answer is a reason to open
-    `transcript.jsonl`, not a reason to trust the row.
+    so an async dispatch's trailing fence-free "task complete" summary no
+    longer erases the answer the agent already gave. It is still the agent's
+    job to produce a block at all; `answer_had_code_block: false` in
+    `verdict.json` tells a formatting miss from a search miss.
+11. **That fix is partial, in arm A's direction.** It only rescues an answer
+    from a trailing turn with **no** fence. "Newest turn with any fence" is
+    not "newest turn with the answer": when the trailing summary re-quotes
+    even one line of the function, that summary outranks the complete earlier
+    answer and is what gets scored. `answer_had_code_block` is `true` for the
+    fragment and `true` for the full answer, so no field in `verdict.json`
+    separates *the re-quoting summary* from *the answer it displaced* — only
+    the transcript does. For **lca** there is not even that: it scores through
+    the same rule and its verdict carries no `answer_had_code_block` field at
+    all, so a displaced file list shows up only as a low `recall`. Arm A
+    structurally produces more of those trailing turns than arm B, and how
+    many is not deterministic (the same task gave arm A three result events in
+    one smoke run and one in the next), so a smaller, same-signed version of
+    the shape-bias the fix exists to remove is still there. A partial or
+    oddly-truncated arm-A answer is a reason to open `transcript.jsonl`, not a
+    reason to trust the row.
 
 ---
 

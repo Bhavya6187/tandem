@@ -159,17 +159,20 @@ def final_answer_with_block(events: Iterable[Mapping[str, Any]]) -> str:
     subagent's block (`answer_turns` filters those out), which would score a
     worker's report as the agent's answer.
 
-    THE RESIDUAL, and it is the same bias in miniature. "Newest turn with ANY
-    fence" is not "newest turn with the answer". A task-notification summary
-    that re-quotes one line of the function — or any fenced fragment at all —
+    THE RESIDUAL, and it is the same bias in miniature. This only rescues an
+    answer from a trailing turn with NO fence: "newest turn with ANY fence" is
+    not "newest turn with the answer". A task-notification summary that
+    re-quotes one line of the function — or any fenced fragment at all —
     outranks the complete earlier answer and gets scored instead, and
-    `answer_had_code_block` reads true either way, so nothing downstream can
-    tell the two apart. Arm A structurally produces more of those trailing
-    turns than arm B (SMOKE1 arm A: 3 result events; SMOKE2 arm A: 1 — the
-    tail is not even deterministic), so what is left is a smaller, same-signed
-    version of the shape-bias this function exists to remove. Nothing here
-    detects it; a suspiciously partial arm-A answer is a reason to open
-    transcript.jsonl, not a reason to trust the number."""
+    `answer_had_code_block` is true for the fragment exactly as it is for the
+    answer, so nothing downstream separates the re-quoting summary from the
+    answer it displaced. lca does not even carry that field, so there a
+    displaced answer surfaces only as a low recall. Arm A produces more of
+    those trailing turns than arm B (SMOKE1 arm A: 3 result events; SMOKE2
+    arm A: 1 — the tail is not even deterministic), so what is left is a
+    smaller, same-signed version of the shape-bias this function exists to
+    remove. Nothing here detects it; a suspiciously partial arm-A answer is a
+    reason to open transcript.jsonl, not a reason to trust the number."""
     turns = answer_turns(events)
     for text in reversed(turns):
         if fenced_blocks(text):
