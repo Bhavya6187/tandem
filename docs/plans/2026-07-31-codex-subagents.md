@@ -4,14 +4,14 @@
 
 **Goal:** Native Claude Code subagent dispatches transparently execute on a cheap Codex model, via a PreToolUse reroute hook + a `codex-worker` bridge agent + a `tandem sub` execution engine.
 
-**Architecture:** A Claude plugin (static files, never a process) registers a PreToolUse hook running `tandem hook-route`, which rewrites `Agent` dispatches to a Bash-only bridge agent; the bridge runs `tandem sub`, which executes the task on codex — cold `codex exec` by default, or a fork of the shadow rollout for full context. Results return through Claude's native tool-result/task-notification machinery; tandem's existing sync mirrors everything. Spec: `docs/specs/2026-07-31-codex-subagents-design.md`.
+**Architecture:** A Claude plugin (static files, never a process) registers a PreToolUse hook running `tandem hook-route`, which rewrites `Agent` dispatches to a Bash-only bridge agent; the bridge runs `tandem sub`, which executes the task on codex — resuming a freshly seeded empty `tandem-sub` rollout by default, or a fork of the shadow rollout for full context. Results return through Claude's native tool-result/task-notification machinery; tandem's existing sync mirrors everything. Spec: `docs/specs/2026-07-31-codex-subagents-design.md`.
 
 **Tech Stack:** Python 3.11+, click, stdlib `tomllib`/`fcntl`/`sqlite3`, pytest (+ `click.testing.CliRunner`), existing tandem modules (`ops`, `paths`, `state`, `harness`, `doctor`).
 
 ## Global Constraints
 
 - Python ≥3.11; **no new dependencies** (config uses stdlib `tomllib`, locking uses `fcntl`).
-- `tandem hook-route` must **never exit 2** (exit 2 blocks the dispatch); every failure path exits 0 — failure mode is "no savings", never "broken subagents".
+- `tandem hook-route` must **never exit 2** (exit 2 blocks the dispatch); every failure path exits 0 — failure mode is "no savings", never "broken subagents". Caveat: click exits 2 on a usage error *before* our code runs (older tandem on PATH without the subcommand), so the hook is registered as `tandem hook-route || true` — the shell guard is the load-bearing half of the guarantee.
 - The task brief is forwarded **verbatim — no truncation, no summarization** at any step (stdin transport, not argv).
 - Fork rollouts are **never registered as sync sources**: no cursors created, no echo-suppression changes, shadow untouched.
 - `updatedInput` replaces the **entire** input object: carry every original field, rewrite exactly `subagent_type`, `model`, `prompt`.
@@ -755,14 +755,6 @@ class TestSubCli:
         r = click.testing.CliRunner().invoke(cli.main, ["sub", "-q", "brief"])
         assert r.exit_code == 0
         assert calls["kw"]["quiet"] is True
-
-    def test_sub_empty_task_errors(self, env_factory, monkeypatch):
-        import click.testing
-        env = env_factory(active="claude")
-        cli = self._cli_env(env, monkeypatch)
-        r = click.testing.CliRunner().invoke(cli.main, ["sub"], input="  \n")
-        assert r.exit_code == 1
-        assert "empty task" in r.output
 
     def test_sub_empty_task_errors(self, env_factory, monkeypatch):
         import click.testing

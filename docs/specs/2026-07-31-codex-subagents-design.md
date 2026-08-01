@@ -89,28 +89,41 @@ config policy decides: `match` resolves to `task`, because every rerouted
 dispatch in v1 is fresh-type (forks pass through natively).
 
 - **Invariant: the brief is forwarded verbatim — no truncation, no
-  summarization, at any step.**
+  summarization, at any step.** It also never touches argv: the brief is
+  untrusted text, and as a trailing positional codex's own parser reads a
+  leading `-` as a flag (`- review …` dies with `unexpected argument`
+  before the model runs; `-m gpt-9 …` is silently honored, i.e. argv
+  injection). tandem passes codex's documented stdin marker — `resume <id>
+  -` — and writes the brief to the child's stdin, in both quiet and
+  streaming modes. This also removes the argv length ceiling on
+  multi-paragraph briefs.
 - `--context task` (what match-mode resolves to for non-fork dispatches):
   no fork, no drain, no lock — seed a minimal rollout (fresh uuid7,
   `originator: "tandem-sub"`, `model_provider: "openai"`, one note line and
   no history) and run `codex exec -m <model> --skip-git-repo-check resume
-  <seed-id>` with the brief, in the session cwd. The worker still starts
-  cold; the seed exists so tandem *authors* the rollout rather than letting
-  codex mint one. A plain `codex exec` would write an ordinary rollout in
-  the session cwd — non-tandem originator, fresh mtime — which is exactly
-  what `await_codex_rollout` treats as "codex just minted a session": a
-  concurrent fresh-codex launch or one-off would bind the pair's
+  <seed-id> -` with the brief on stdin, in the session cwd. The worker
+  still starts cold; the seed exists so tandem *authors* the rollout rather
+  than letting codex mint one. A plain `codex exec` would write an ordinary
+  rollout in the session cwd — non-tandem originator, fresh mtime — which
+  is exactly what `await_codex_rollout` treats as "codex just minted a
+  session": a concurrent fresh-codex launch or one-off would bind the pair's
   `codex_session_id` to a throwaway worker transcript that `tandem sub`
   then deletes. Seeding puts cold runs behind the same originator guard as
-  forks, so no sub rollout is ever adoptable. Project rules reach the worker
-  the native way: codex reads the AGENTS.md tandem already keeps synced.
+  forks, so no sub rollout is ever adoptable. (`codex exec --ephemeral`
+  ["run without persisting session files to disk"] would also keep the cold
+  path out of discovery's way, and was rejected: it leaves nothing on disk,
+  so `keep_forks` has no worker transcript to retain and the debugging trail
+  — the one way to see what a cheap worker actually did — disappears. A
+  seeded rollout costs one small file and keeps both.) Project rules reach
+  the worker the native way: codex reads the AGENTS.md tandem already keeps
+  synced.
 - `--context full`: drain the active source with `flush_dangling` (same
   machinery as `run_oneoff`), copy the shadow rollout to a fresh uuid7
   rollout in codex's sessions dir — rewrite `session_meta` id, set
   `originator: "tandem-sub"`, keep `model_provider: "openai"` — then
-  `codex exec resume <fork-id> -m <model>` with the brief. The fork is
-  **never registered as a sync source**: no cursor, no echo-suppression
-  changes, shadow untouched.
+  `codex exec -m <model> resume <fork-id> -` with the brief on stdin. The
+  fork is **never registered as a sync source**: no cursor, no
+  echo-suppression changes, shadow untouched.
 - Fanout: pass `--enable <fanout_feature>` when configured. On codex 0.145
   nothing needs passing (S2): the `multi_agent` feature is stable and on by
   default, so the worker may `spawn_agent` natively at its own discretion,
@@ -294,7 +307,7 @@ price of "no forged results" under the documented hook surface.
 | no paired session / codex missing | hook passthrough; if reached anyway, `tandem sub` exits nonzero, bridge relays `[tandem-sub failed]`, main model does the work itself |
 | codex exec nonzero / outage | bridge relays output + `[tandem-sub failed]`; main model retries or does the work natively |
 | shadow missing on `--context full` | seed a fresh rollout from the drained active side (existing `_create_codex_shadow_late` pattern) |
-| parallel dispatches, full mode | file lock serializes drain-then-copy; execs then run concurrently. Match mode touches no shared state — no contention |
+| parallel dispatches, full mode | file lock serializes drain-then-copy; execs then run concurrently. The other drainer is the *session's own tail thread*, running continuously against the same cursor in the `tandem run` process; it takes `_sub_lock` around each drain too, so both sides serialize on one flock. (Guarding only the `tandem sub` side left two concurrent drains of one cursor row free to translate the same lines twice — duplicate turns and call ids in the fork.) Match mode touches no shared state — no contention |
 | dangling calls at fork time | `flush_dangling` closes them (both replay APIs reject dangles) |
 
 ## Known v1 limitations (stated, accepted)
@@ -304,6 +317,13 @@ price of "no forged results" under the documented hook surface.
   shared block). `tandem doctor` nudges users to move subagent-relevant
   rules into the shared block.
 - Named agents' `skills:` preloads are not forwarded (definition body is).
+- A named agent's `tools:` restriction is silently dropped on reroute: the
+  definition body is inlined into the brief, but the allow-list is not
+  translated into any codex-side constraint, so a read-only Explore-style
+  agent runs its codex worker under codex's own sandbox config — which may
+  be write-capable. v2 direction: map a read-only `tools:` list to `codex
+  exec -s read-only` (and refuse to reroute restrictions that have no codex
+  equivalent).
 - Rerouted workers are not resumable via SendMessage the way Claude
   subagents are; `keep_forks` + `codex exec resume` is the v2 path.
 - Thinking blocks do not cross translation (dropped, as elsewhere in
@@ -377,7 +397,7 @@ price of "no forged results" under the documented hook surface.
 
 ## Testing
 
-- Unit: `hook-route` stdin→stdout fixtures (rewrite, all four passthrough
+- Unit: `hook-route` stdin→stdout fixtures (rewrite, all passthrough
   cases, model-field rewrite, named-agent body inlining, crash→exit-0);
   fork op golden tests (session_meta rewrite, fork never in sync cursors);
   `tandem sub` argv/stdin handling via the existing `_run` seam; config
