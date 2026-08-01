@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import subprocess
 import time
 from contextlib import contextmanager
@@ -254,3 +255,51 @@ def fork_shadow(store: StateStore, session: PairedSession) -> tuple[str, Path]:
     fork_path = day_dir / fname
     append_jsonl_fsync(fork_path, [meta] + entries[1:])
     return fork_id, fork_path
+
+
+def run_sub(
+    store: StateStore,
+    session: PairedSession,
+    task: str,
+    *,
+    model: str = "",
+    context: str = "task",
+    fanout_feature: str = "",
+    keep_forks: bool = False,
+) -> int:
+    """Execute one delegated subagent task on codex. context='task' is a
+    cold `codex exec` in the session cwd (claude wrote a self-contained
+    brief for a cold worker); context='full' forks the shadow and resumes
+    it. The brief is passed through verbatim. Exit code mirrors codex."""
+    adapter = get_adapter("codex")
+    argv = [adapter.binary, "exec", "--skip-git-repo-check"]
+    if model:
+        argv += ["-m", model]
+    if fanout_feature:
+        argv += ["--enable", fanout_feature]
+    fork_path: Path | None = None
+    fork_id = ""
+    if context == "full":
+        with _sub_lock():
+            fork_id, fork_path = fork_shadow(store, session)
+        argv += ["resume", fork_id]
+    argv.append(task)
+
+    sub_root = paths.tandem_home() / "subagents" / session.tandem_id
+    marker = sub_root / "running" / f"{fork_id or uuid7()}.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({
+        "model": model, "context": context, "pid": os.getpid(),
+        "task_preview": task[:120],
+    }))
+    try:
+        code = _run(argv, cwd=session.cwd).returncode
+    finally:
+        marker.unlink(missing_ok=True)
+        if fork_path is not None:
+            if keep_forks:
+                sub_root.mkdir(parents=True, exist_ok=True)
+                fork_path.rename(sub_root / fork_path.name)
+            else:
+                fork_path.unlink(missing_ok=True)
+    return code

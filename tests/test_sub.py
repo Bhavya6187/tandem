@@ -72,3 +72,145 @@ class TestForkShadow:
                         "cwd": env.cwd, "originator": "codex_cli"},
         })
         assert await_codex_rollout(env.cwd, started, timeout=0) == real
+
+
+class _R:
+    def __init__(self, code=0):
+        self.returncode = code
+
+
+class TestRunSub:
+    def test_task_context_is_cold_exec(self, env_factory, monkeypatch):
+        env = env_factory(active="claude")
+        calls = {}
+
+        def fake_run(argv, cwd=None, **kw):
+            calls["argv"], calls["cwd"] = argv, cwd
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        code = ops.run_sub(env.store, env.session, "audit the README",
+                           model="gpt-x-mini", context="task")
+        assert code == 0
+        assert calls["argv"] == [
+            "codex", "exec", "--skip-git-repo-check",
+            "-m", "gpt-x-mini", "audit the README",
+        ]
+        assert calls["cwd"] == env.cwd
+
+    def test_no_model_omits_flag_and_fanout_adds_enable(self, env_factory,
+                                                        monkeypatch):
+        env = env_factory(active="claude")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "_run",
+            lambda argv, cwd=None, **kw: calls.update(argv=argv) or _R(0),
+        )
+        ops.run_sub(env.store, env.session, "t", fanout_feature="collab")
+        assert "-m" not in calls["argv"]
+        assert ["--enable", "collab"] == calls["argv"][3:5]
+
+    def test_full_context_forks_resumes_and_deletes(self, env_factory,
+                                                    monkeypatch):
+        env = env_factory(active="claude")
+        ops.fast_forward(env.store, env.session, "claude")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "_run",
+            lambda argv, cwd=None, **kw: calls.update(argv=argv) or _R(0),
+        )
+        ops.run_sub(env.store, env.session, "deep task", context="full")
+        argv = calls["argv"]
+        assert "resume" in argv
+        fork_id = argv[argv.index("resume") + 1]
+        assert fork_id != env.session.codex_session_id
+        # the fork was cleaned up (keep_forks=False)
+        from tandem import paths
+        assert paths.find_codex_rollout(fork_id) is None
+        kept = list((paths.tandem_home() / "subagents").rglob("*.jsonl"))
+        assert kept == []
+
+    def test_full_context_keep_forks_retains(self, env_factory, monkeypatch):
+        env = env_factory(active="claude")
+        ops.fast_forward(env.store, env.session, "claude")
+        monkeypatch.setattr(ops, "_run", lambda *a, **kw: _R(0))
+        ops.run_sub(env.store, env.session, "deep task", context="full",
+                    keep_forks=True)
+        from tandem import paths
+        kept = list((paths.tandem_home() / "subagents"
+                     / env.session.tandem_id).glob("rollout-*.jsonl"))
+        assert len(kept) == 1
+
+    def test_exit_code_mirrors_codex(self, env_factory, monkeypatch):
+        env = env_factory(active="claude")
+        monkeypatch.setattr(ops, "_run", lambda *a, **kw: _R(3))
+        assert ops.run_sub(env.store, env.session, "t") == 3
+
+    def test_running_marker_lifecycle(self, env_factory, monkeypatch):
+        from tandem import paths
+        env = env_factory(active="claude")
+        seen = {}
+
+        def fake_run(argv, cwd=None, **kw):
+            run_dir = (paths.tandem_home() / "subagents"
+                       / env.session.tandem_id / "running")
+            seen["during"] = list(run_dir.glob("*.json"))
+            # read the marker while the run is in flight; it is gone after
+            seen["payload"] = [json.loads(p.read_text()) for p in seen["during"]]
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_sub(env.store, env.session, "watch me")
+        assert len(seen["during"]) == 1
+        assert seen["payload"][0]["task_preview"] == "watch me"
+        assert seen["during"][0].exists() is False  # removed on completion
+
+
+class TestSubCli:
+    def _cli_env(self, env, monkeypatch):
+        from tandem import cli
+        monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
+        monkeypatch.setattr(
+            cli, "_check_versions",
+            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+        )
+        return cli
+
+    def test_sub_reads_task_from_stdin(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(
+                task=task, kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="line one\nline two\n")
+        assert r.exit_code == 0
+        assert calls["task"] == "line one\nline two"
+        assert calls["kw"]["context"] == "task"   # config default: match->task
+
+    def test_sub_flags_override_config(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "-m", "gpt-x-mini", "--context", "full", "brief"])
+        assert r.exit_code == 0
+        assert calls["kw"]["model"] == "gpt-x-mini"
+        assert calls["kw"]["context"] == "full"
+
+    def test_sub_empty_task_errors(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        r = click.testing.CliRunner().invoke(cli.main, ["sub"], input="  \n")
+        assert r.exit_code == 1
+        assert "empty task" in r.output

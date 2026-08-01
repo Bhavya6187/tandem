@@ -289,6 +289,40 @@ def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
 
 
 @main.command()
+@click.option("-m", "--model", default=None,
+              help="Codex model for this worker (config default otherwise).")
+@click.option("--context", "context_mode",
+              type=click.Choice(["task", "full"]), default=None,
+              help="Worker context: cold task-only, or a full fork of the "
+                   "paired session (config policy decides by default).")
+@click.argument("task", required=False)
+def sub(model: str | None, context_mode: str | None, task: str | None) -> None:
+    """Run one delegated subagent task on codex (task argument or stdin).
+
+    Used by the tandem plugin's codex-worker bridge; also works manually."""
+    from . import ops
+    from .config import load_subagents_config
+
+    if task is None or task == "-":
+        task = sys.stdin.read()
+    task = task.strip()
+    if not task:
+        click.secho("error: empty task brief.", fg="red", err=True)
+        sys.exit(1)
+    cfg = load_subagents_config()
+    with StateStore() as store:
+        session = _require_session(store)
+        code = ops.run_sub(
+            store, session, task,
+            model=model if model is not None else cfg.model,
+            context=context_mode or ("full" if cfg.context == "full" else "task"),
+            fanout_feature=cfg.fanout_feature,
+            keep_forks=cfg.keep_forks,
+        )
+    sys.exit(code)
+
+
+@main.command()
 @click.option(
     "--live",
     is_flag=True,
