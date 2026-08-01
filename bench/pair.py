@@ -24,6 +24,11 @@ Idempotent: a second run verifies the existing pairing instead of creating a
 second one. Exits 0 only when the pairing is present AND hook-route actually
 returns the rewrite decision for that cwd.
 
+Scope of that green light: it proves `tandem hook-route` reroutes when it is
+invoked. It proves NOTHING about whether arm A's claude session will invoke
+it — that needs the tandem plugin registered in whatever CLAUDE_CONFIG_DIR the
+runner launches claude with, which is the runner's job to verify.
+
 stdlib only. Shells out to the `tandem` console script and its interpreter.
 """
 
@@ -99,22 +104,46 @@ print("###JSON###" + json.dumps(out))
 # _pair_session is tandem's real pairing routine: state row + seeded codex
 # shadow rollout + write-ahead cursor (+ memory sync, suppressed by default
 # here — see --memory-sync).
+#
+# `active` is hard-coded to "claude" and NOT exposed as an option: with
+# active="codex", _pair_session sets codex_session_id=None and seeds a CLAUDE
+# shadow transcript under CLAUDE_CONFIG_DIR (i.e. the user's ~/.claude by
+# default). That both violates the bench's "never write to ~/.claude" rule and
+# produces a pairing with no codex rollout, which verify() would reject anyway.
 PAIR_SNIPPET = r"""
-import json, sys
-cwd, active, do_memory_sync = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+import contextlib, io, json, sys
+cwd, do_memory_sync = sys.argv[1], sys.argv[2] == "1"
+# The suppression is the one failure mode that could silently corrupt the
+# experiment (an AGENTS.md appearing in the task tree makes arm A's tree
+# differ from arm B's), so the stub COUNTS its calls: _pair_session imports
+# sync_memory_files lazily inside the function body, and if that import ever
+# moves to module scope this patch would no-op unnoticed. The caller asserts
+# on the count.
+calls = {"n": 0}
 if not do_memory_sync:
-    # _pair_session imports this lazily, inside the function body, so
-    # replacing the attribute now is enough to make it a no-op. Keeps the
-    # bench from writing AGENTS.md into the task working tree.
     import tandem.memory_sync as _m
-    _m.sync_memory_files = lambda _cwd: _m.MemorySyncReport()
+
+    def _stub(_cwd):
+        calls["n"] += 1
+        return _m.MemorySyncReport()
+
+    _m.sync_memory_files = _stub
 from tandem.cli import _pair_session
 from tandem.state import StateStore
 
-with StateStore() as store:
-    s = _pair_session(store, cwd, active)
-print("###JSON###" + json.dumps({"tandem_id": s.tandem_id}))
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    with StateStore() as store:
+        s = _pair_session(store, cwd, "claude")
+print("###JSON###" + json.dumps({
+    "tandem_id": s.tandem_id,
+    "echo": buf.getvalue(),
+    "memory_sync_stub_calls": calls["n"],
+}))
 """
+
+# The two files tandem's memory sync can create or rewrite in the task tree.
+MEMORY_FILES = ("CLAUDE.md", "AGENTS.md")
 
 
 class PairError(Exception):
@@ -296,12 +325,63 @@ def verify(python: Path, tandem_bin: Path, cwd: Path, env: dict) -> dict:
     return info
 
 
-def pair(python: Path, cwd: Path, active: str, memory_sync: bool,
-         env: dict) -> str:
+def memory_file_state(cwd: Path) -> dict[str, str | None]:
+    """Fingerprint of the memory files tandem's sync could touch."""
+    state: dict[str, str | None] = {}
+    for name in MEMORY_FILES:
+        p = cwd / name
+        try:
+            data = p.read_bytes()
+        except OSError:
+            state[name] = None
+        else:
+            state[name] = f"{len(data)}:{hash(data)}"
+    return state
+
+
+def pair(python: Path, cwd: Path, memory_sync: bool, env: dict,
+         tandem_home: Path) -> str:
+    """Create the pairing. Always active='claude' (see PAIR_SNIPPET).
+
+    With memory_sync off, this must leave the task working tree byte-identical.
+    That is checked three ways — the stub's own call count, the echoed
+    "memory: …" action lines, and the files on disk — and any surprise rolls
+    the half-made pairing back before raising, so a failure never leaves a
+    state row that would make a later `--verify-only` look healthy.
+    """
+    before = memory_file_state(cwd)
     res = run_snippet(
-        python, PAIR_SNIPPET, [str(cwd), active, "1" if memory_sync else "0"],
-        env, cwd,
+        python, PAIR_SNIPPET, [str(cwd), "1" if memory_sync else "0"], env, cwd,
     )
+    problem: str | None = None
+    if not memory_sync:
+        calls = res.get("memory_sync_stub_calls")
+        actions = [ln.strip() for ln in (res.get("echo") or "").splitlines()
+                   if ln.strip().startswith("memory:")]
+        if calls != 1:
+            problem = (
+                "memory-sync suppression did not take effect "
+                f"(stub called {calls} times, expected 1).\n"
+                "  tandem.cli._pair_session no longer imports sync_memory_files "
+                "lazily, so bench/pair.py can no longer suppress it. Until this "
+                "is fixed, pairing may write AGENTS.md into the task tree."
+            )
+        elif actions:
+            problem = ("memory sync ran despite suppression: "
+                       + "; ".join(actions))
+    after = memory_file_state(cwd)
+    if problem is None and not memory_sync and after != before:
+        changed = [n for n in MEMORY_FILES if before[n] != after[n]]
+        problem = (
+            f"pairing modified {', '.join(changed)} in the task working tree; "
+            "arm A's tree would no longer match arm B's"
+        )
+    if problem is not None:
+        try:
+            clean(python, cwd, env, tandem_home)
+        except PairError:
+            pass
+        fail(problem + "\n  (the half-made pairing was rolled back)")
     return res["tandem_id"]
 
 
@@ -397,18 +477,16 @@ def main(argv: list[str] | None = None) -> int:
                          "finds the user's existing auth; rollouts then land "
                          "in ~/.codex/sessions (this is what tandem does).")
     ap.add_argument("--claude-home", default=None,
-                    help="override CLAUDE_CONFIG_DIR. Only matters for "
-                         "--active codex (which seeds a claude shadow "
-                         "transcript there) and for agent-definition lookup "
-                         "in hook-route. Default: inherit.")
+                    help="override CLAUDE_CONFIG_DIR for the hook-route probe "
+                         "(it reads <claude-home>/agents/ when inlining an "
+                         "agent definition). Pairing itself never writes "
+                         "there. Default: inherit.")
     ap.add_argument("--tandem-bin", default=None,
                     help="tandem console script (default: <repo>/.venv/bin/"
                          "tandem, else PATH)")
     ap.add_argument("--tandem-python", default=None,
                     help="interpreter that can import tandem (default: read "
                          "from the tandem shebang)")
-    ap.add_argument("--active", choices=["claude", "codex"], default="claude",
-                    help="initially active harness (default: %(default)s)")
     ap.add_argument("--memory-sync", action="store_true",
                     help="also run tandem's CLAUDE.md<->AGENTS.md sync. OFF by "
                          "default: it writes into the task working tree, which "
@@ -459,7 +537,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"(detected {info['codex_version']!r}); hook-route would "
                     "never reroute here anyway."
                 )
-            pair(python, cwd, args.active, args.memory_sync, env)
+            pair(python, cwd, args.memory_sync, env, tandem_home)
             created = True
 
         info = verify(python, tandem_bin, cwd, env)

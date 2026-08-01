@@ -79,9 +79,21 @@ pairing. `--probe-sub` additionally runs a real `tandem sub` (one codex call).
 Arm A then runs claude with `TANDEM_HOME=<bench-home>` in its environment so
 the hook reads the same state.db.
 
+> **Boundary of the green light.** `--verify-only` verifies pairing state and
+> codex availability — that `tandem hook-route` reroutes *when it is invoked*.
+> It does **not** verify hook registration: whether arm A's claude session
+> invokes the hook at all depends on the tandem plugin being installed in
+> whatever `CLAUDE_CONFIG_DIR` the runner launches claude with (the plugin
+> registers `PreToolUse` / matcher `Agent|Task` / `tandem hook-route || true`,
+> see `plugin/hooks/hooks.json`). The runner must ensure and check that
+> separately; pair.py cannot see it.
+
+The initially-active harness is always `claude` and is deliberately not
+configurable — see caveat 11.
+
 ## 3. What lands where
 
-For `--tandem-home H`, `--cwd C`, `--active claude`:
+For `--tandem-home H`, `--cwd C` (active harness is always `claude`):
 
 | Location | Content |
 | --- | --- |
@@ -91,10 +103,11 @@ For `--tandem-home H`, `--cwd C`, `--active claude`:
 | `H/subagents/<tandem_id>/…` | created later, by `tandem sub` (running markers, `-q` logs, retained forks) |
 | `H/warned/<claude-session-id>` | created later, by hook-route's once-per-session "nothing was rerouted" notice |
 
-Nothing is written to `~/.tandem`. Nothing is written to `~/.claude` (with
-`--active claude`, claude's own transcript is created by claude itself when
-it runs; tandem only mints the id). The **codex rollout is the one artifact
-outside the bench home** — see §4.
+Nothing is written to `~/.tandem`, and nothing is written under
+`CLAUDE_CONFIG_DIR`: with the active harness fixed to `claude`, claude's own
+transcript is created by claude itself when it runs, and tandem only mints the
+id (this is exactly why `active = "codex"` is not offered — caveat 11). The
+**codex rollout is the one artifact outside the bench home** — see §4.
 
 Observed shadow header:
 
@@ -133,17 +146,25 @@ Observed shadow header:
    `pair.py --verify-only --probe-sub`.
 
 4. **`_pair_session` is a private function.** The bench is pinned to a tandem
-   internal. If it is renamed, `pair.py` fails loudly with the interpreter's
-   traceback rather than silently producing partial state — which is the
-   behavior we want, but it is a maintenance dependency. Everything else
-   (`StateStore`, adapters, `paths`) is stable module-level API.
+   internal. If it is renamed or moved, the interpreter raises and `pair.py`
+   surfaces the traceback and exits 1 — no partial state. Everything else
+   (`StateStore`, adapters, `paths`) is stable module-level API. The one pin
+   whose drift would *not* raise by itself is the lazy import inside
+   `_pair_session`; caveat 5 covers it.
 
-5. **Memory sync is off by default.** Real `tandem` pairing also runs
-   `sync_memory_files(cwd)`, which can create `AGENTS.md` in the task
-   directory from `CLAUDE.md` (or vice versa). That mutates the working tree
-   under test and would make arm A's tree differ from arm B's, so `pair.py`
-   suppresses it unless `--memory-sync` is passed. It is a no-op anyway in a
-   directory that has neither file.
+5. **Memory sync is off by default, and its suppression is asserted.** Real
+   `tandem` pairing also runs `sync_memory_files(cwd)`, which can create
+   `AGENTS.md` in the task directory from `CLAUDE.md` (or vice versa). That
+   mutates the working tree under test and would make arm A's tree differ from
+   arm B's, so `pair.py` replaces the function unless `--memory-sync` is
+   passed. The replacement works only because `_pair_session` imports it
+   lazily, inside the function body — a pin that would silently no-op if the
+   import ever moved to module scope. So `pair.py` checks three things after
+   pairing and fails loudly (rolling the pairing back) if any of them is off:
+   the stub's own call count is exactly 1, no `memory: …` action lines were
+   echoed, and both `CLAUDE.md` and `AGENTS.md` in the task tree are
+   byte-identical to before. Memory sync is a no-op anyway in a directory that
+   has neither file, but the assertions do not depend on that.
 
 6. **The paired `claude_session_id` is a fiction until claude runs under
    tandem.** Arm A's claude process is launched by the bench, not by
@@ -179,6 +200,24 @@ Observed shadow header:
     never`), and `--context full` serializes across processes on
     `H/sub.lock`. Parallel bench runs sharing one `TANDEM_HOME` are safe for
     the default cold path (no lock, no shared cursor).
+
+11. **`active = "codex"` is not offered, on purpose.** `_pair_session(…,
+    "codex")` leaves `codex_session_id = None` and instead seeds a **claude**
+    shadow transcript at
+    `paths.claude_transcript_path(cwd, claude_session_id)` — i.e. under
+    `CLAUDE_CONFIG_DIR`, which defaults to the user's `~/.claude/projects/`.
+    That writes outside the bench's own directories, and the resulting pairing
+    has no codex rollout, so verification fails and `--clean` (which only
+    knows about codex rollouts) would not remove the stray file. `pair.py`
+    hard-codes `"claude"` and exposes no `--active` flag. The bench never
+    needs the other direction: arm A's active harness is claude by
+    construction.
+
+12. **Verification does not cover hook registration.** Restating the boundary
+    from §2: exit 0 means the pairing is real and `tandem hook-route` reroutes
+    when invoked. Whether claude *invokes* it depends on the tandem plugin
+    being present in the `CLAUDE_CONFIG_DIR` the runner launches claude with.
+    That check belongs to the runner.
 
 ## 5. Alternatives considered and rejected
 
