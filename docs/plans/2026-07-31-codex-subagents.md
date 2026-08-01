@@ -314,41 +314,108 @@ git commit -m "feat: fork_shadow — ephemeral codex rollout copies for subagent
 
 **Files:**
 - Modify: `src/tandem/ops.py` (append after `fork_shadow`)
-- Modify: `src/tandem/cli.py` (new command after `run_cmd`; add `import json` to module imports)
+- Modify: `src/tandem/cli.py` (new command after `run_cmd`)
+- Modify: `src/tandem/harness/codex.py` (extract `session_meta` / `rollout_path` so a rollout can be authored with a different originator)
+- Modify: `src/tandem/constants.py` (`SUB_SEED_NOTE`)
 - Test: `tests/test_sub.py` (extend)
 
 **Interfaces:**
 - Consumes: `fork_shadow`, `_sub_lock`, `_run` seam (Task 2); `load_subagents_config`, `SubagentsConfig` (Task 1); `get_adapter`, `paths.tandem_home`.
-- Produces: `run_sub(store, session, task, *, model: str = "", context: str = "task", fanout_feature: str = "", keep_forks: bool = False) -> int` and the `tandem sub` command (`-m/--model`, `--context task|full`, task from argument or stdin). The bridge agent (Task 5) and status (Task 6) rely on: exit code mirrors codex exec; running-marker files under `$TANDEM_HOME/subagents/<tandem-id>/running/<run-id>.json` with keys `model`, `context`, `task_preview`, `pid`; retained forks moved to `$TANDEM_HOME/subagents/<tandem-id>/`.
+- Produces: `run_sub(store, session, task, *, model: str = "", context: str = "task", fanout_feature: str = "", keep_forks: bool = False) -> int`, `seed_sub_rollout(session) -> tuple[str, Path]`, and the `tandem sub` command (`-m/--model`, `--context task|full`, task from argument or stdin). The bridge agent (Task 5) and status (Task 6) rely on: exit code mirrors codex exec; running-marker files under `$TANDEM_HOME/subagents/<tandem-id>/running/<run-id>.json` with keys `model`, `context`, `task_preview`, `pid`; retained sub rollouts moved to `$TANDEM_HOME/subagents/<tandem-id>/`.
+
+**Both contexts resume a tandem-authored rollout.** A cold `codex exec` would write an ordinary rollout in the session cwd (non-tandem originator, fresh mtime) — exactly what `await_codex_rollout` looks for — so the next codex-id capture would bind the pair's `codex_session_id` to a throwaway worker transcript that `run_sub` then deletes. `context='task'` therefore seeds its own minimal `originator: "tandem-sub"` rollout and resumes that; Task 2's discovery guard then covers every sub rollout, fork or seed.
 
 - [ ] **Step 1: Write the failing op tests**
 
 Append to `tests/test_sub.py`:
 
 ```python
+class TestSeedSubRollout:
+    def test_seed_is_a_resumable_tandem_sub_rollout(self, env_factory):
+        from tandem.doctor import validate_transcript
+
+        env = env_factory(active="claude")
+        seed_id, seed_path = ops.seed_sub_rollout(env.session)
+
+        assert validate_transcript("codex", seed_path, seed_id) == []
+        entries = read_jsonl(seed_path)
+        meta = entries[0]
+        assert meta["payload"]["id"] == seed_id
+        assert meta["payload"]["session_id"] == seed_id
+        assert meta["payload"]["cwd"] == env.cwd
+        assert meta["payload"]["originator"] == "tandem-sub"
+        assert meta["payload"]["model_provider"] == "openai"
+        # minimal: the meta plus one note (response_item + event_msg)
+        assert len(entries) == 3
+
+    def test_seed_carries_no_history_and_drains_nothing(self, env_factory):
+        env = env_factory(active="claude")
+        write_line(env.claude_shadow, claude_user("pair-only context"))
+        before_bytes = env.codex_shadow.read_bytes()
+        before = env.store.get_cursor(env.session.tandem_id, "claude")
+
+        _, seed_path = ops.seed_sub_rollout(env.session)
+
+        assert "pair-only context" not in seed_path.read_text()
+        assert env.codex_shadow.read_bytes() == before_bytes
+        after = env.store.get_cursor(env.session.tandem_id, "claude")
+        assert after.byte_offset == before.byte_offset
+        assert after.line_index == before.line_index
+
+    def test_seed_is_not_adopted_as_a_freshly_minted_codex_session(self, env_factory):
+        env = env_factory(active="claude")
+        started = time.time()
+        ops.seed_sub_rollout(env.session)
+        assert await_codex_rollout(env.cwd, started, timeout=0) is None
+
+
 class _R:
     def __init__(self, code=0):
         self.returncode = code
 
 
 class TestRunSub:
-    def test_task_context_is_cold_exec(self, env_factory, monkeypatch):
+    def test_task_context_resumes_a_tandem_sub_seed(self, env_factory, monkeypatch):
+        """A cold worker resumes its own seeded rollout rather than exec-ing
+        fresh: a plain `codex exec` writes an ordinary rollout in the session
+        cwd, and rollout discovery would then bind the pair's codex id to that
+        throwaway (which run_sub deletes on the way out)."""
         env = env_factory(active="claude")
         calls = {}
+        started = time.time()
 
         def fake_run(argv, cwd=None, **kw):
             calls["argv"], calls["cwd"] = argv, cwd
+            seed = paths.find_codex_rollout(argv[argv.index("resume") + 1])
+            calls["meta"] = read_jsonl(seed)[0]
+            # while the worker runs, the seed must not look like a fresh codex
+            calls["adopted"] = await_codex_rollout(env.cwd, started, timeout=0)
             return _R(0)
 
         monkeypatch.setattr(ops, "_run", fake_run)
         code = ops.run_sub(env.store, env.session, "audit the README",
                            model="gpt-x-mini", context="task")
         assert code == 0
-        assert calls["argv"] == [
-            "codex", "exec", "--skip-git-repo-check",
-            "-m", "gpt-x-mini", "audit the README",
-        ]
+        argv = calls["argv"]
+        assert argv[:5] == ["codex", "exec", "--skip-git-repo-check",
+                            "-m", "gpt-x-mini"]
+        assert argv[5] == "resume"
+        seed_id = argv[6]
+        assert seed_id != env.session.codex_session_id
+        assert argv[7:] == ["audit the README"]
         assert calls["cwd"] == env.cwd
+        assert calls["meta"]["payload"]["originator"] == "tandem-sub"
+        assert calls["meta"]["payload"]["cwd"] == env.cwd
+        assert calls["adopted"] is None
+        assert paths.find_codex_rollout(seed_id) is None  # cleaned up after
+
+    def test_task_context_keep_forks_retains_seed(self, env_factory, monkeypatch):
+        env = env_factory(active="claude")
+        monkeypatch.setattr(ops, "_run", lambda *a, **kw: _R(0))
+        ops.run_sub(env.store, env.session, "t", keep_forks=True)
+        kept = list((paths.tandem_home() / "subagents"
+                     / env.session.tandem_id).glob("rollout-*.jsonl"))
+        assert len(kept) == 1
 
     def test_no_model_omits_flag_and_fanout_adds_enable(self, env_factory,
                                                         monkeypatch):
@@ -377,7 +444,6 @@ class TestRunSub:
         fork_id = argv[argv.index("resume") + 1]
         assert fork_id != env.session.codex_session_id
         # the fork was cleaned up (keep_forks=False)
-        from tandem import paths
         assert paths.find_codex_rollout(fork_id) is None
         kept = list((paths.tandem_home() / "subagents").rglob("*.jsonl"))
         assert kept == []
@@ -388,7 +454,6 @@ class TestRunSub:
         monkeypatch.setattr(ops, "_run", lambda *a, **kw: _R(0))
         ops.run_sub(env.store, env.session, "deep task", context="full",
                     keep_forks=True)
-        from tandem import paths
         kept = list((paths.tandem_home() / "subagents"
                      / env.session.tandem_id).glob("rollout-*.jsonl"))
         assert len(kept) == 1
@@ -399,7 +464,6 @@ class TestRunSub:
         assert ops.run_sub(env.store, env.session, "t") == 3
 
     def test_running_marker_lifecycle(self, env_factory, monkeypatch):
-        from tandem import paths
         env = env_factory(active="claude")
         seen = {}
 
@@ -407,15 +471,18 @@ class TestRunSub:
             run_dir = (paths.tandem_home() / "subagents"
                        / env.session.tandem_id / "running")
             seen["during"] = list(run_dir.glob("*.json"))
+            # read the marker while the run is in flight; it is gone after
+            seen["payload"] = [json.loads(p.read_text()) for p in seen["during"]]
             return _R(0)
 
         monkeypatch.setattr(ops, "_run", fake_run)
         ops.run_sub(env.store, env.session, "watch me")
         assert len(seen["during"]) == 1
-        assert json.loads(seen["during"][0].read_text())["task_preview"] \
-            == "watch me"
+        assert seen["payload"][0]["task_preview"] == "watch me"
         assert seen["during"][0].exists() is False  # removed on completion
 ```
+
+(`tests/test_sub.py` imports `paths` alongside `ops` at module level for these.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -424,9 +491,34 @@ Expected: `TestRunSub` FAILs with `AttributeError: ... no attribute 'run_sub'`; 
 
 - [ ] **Step 3: Implement `run_sub`**
 
-Append to `src/tandem/ops.py` (add `import os` to module imports):
+Append to `src/tandem/ops.py` (add `import os` to module imports). `seed_sub_rollout` builds its rollout from two small pieces factored out of `CodexAdapter.create_shadow_transcript` — `session_meta(cwd, session_id, originator="tandem")` and `rollout_path(session_id)` — so the seed differs from a shadow only in its originator (`fork_shadow` uses `rollout_path` too):
 
 ```python
+def seed_sub_rollout(session: PairedSession) -> tuple[str, Path]:
+    """Author the minimal rollout a cold (`context='task'`) worker resumes:
+    fresh uuid7 identity, originator 'tandem-sub', one seed note and no
+    shared history.
+
+    Cold runs resume this instead of `codex exec`-ing fresh because a plain
+    exec writes an ordinary rollout — non-tandem originator, session cwd,
+    fresh mtime — which `await_codex_rollout` would hand to the next
+    codex-id capture, binding the pair's codex_session_id to a throwaway
+    worker transcript tandem then deletes. Seeding keeps every sub rollout
+    behind the same discovery guard as forks.
+
+    Touches no cursor and no shadow: no drain, no `_sub_lock` needed.
+    Returns (seed_session_id, seed_path)."""
+    from .constants import SUB_SEED_NOTE
+
+    adapter = get_adapter("codex")
+    seed_id = adapter.mint_session_id()
+    seed_path = adapter.rollout_path(seed_id)
+    entries = [adapter.session_meta(session.cwd, seed_id, originator="tandem-sub")]
+    entries += adapter.render_note(SUB_SEED_NOTE)
+    append_jsonl_fsync(seed_path, entries)
+    return seed_id, seed_path
+
+
 def run_sub(
     store: StateStore,
     session: PairedSession,
@@ -437,26 +529,28 @@ def run_sub(
     fanout_feature: str = "",
     keep_forks: bool = False,
 ) -> int:
-    """Execute one delegated subagent task on codex. context='task' is a
-    cold `codex exec` in the session cwd (claude wrote a self-contained
-    brief for a cold worker); context='full' forks the shadow and resumes
-    it. The brief is passed through verbatim. Exit code mirrors codex."""
+    """Execute one delegated subagent task on codex. context='task' resumes
+    a freshly seeded empty rollout in the session cwd (claude wrote a
+    self-contained brief for a cold worker); context='full' forks the shadow
+    and resumes that instead. Either way the worker runs in a tandem-authored
+    'tandem-sub' rollout that is never a sync source and never adoptable as
+    the pair's own codex session, and is disposed of on exit. The brief is
+    passed through verbatim. Exit code mirrors codex."""
     adapter = get_adapter("codex")
     argv = [adapter.binary, "exec", "--skip-git-repo-check"]
     if model:
         argv += ["-m", model]
     if fanout_feature:
         argv += ["--enable", fanout_feature]
-    fork_path: Path | None = None
-    fork_id = ""
     if context == "full":
         with _sub_lock():
-            fork_id, fork_path = fork_shadow(store, session)
-        argv += ["resume", fork_id]
-    argv.append(task)
+            sub_id, sub_path = fork_shadow(store, session)
+    else:
+        sub_id, sub_path = seed_sub_rollout(session)
+    argv += ["resume", sub_id, task]
 
     sub_root = paths.tandem_home() / "subagents" / session.tandem_id
-    marker = sub_root / "running" / f"{fork_id or uuid7()}.json"
+    marker = sub_root / "running" / f"{sub_id}.json"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps({
         "model": model, "context": context, "pid": os.getpid(),
@@ -466,13 +560,18 @@ def run_sub(
         code = _run(argv, cwd=session.cwd).returncode
     finally:
         marker.unlink(missing_ok=True)
-        if fork_path is not None:
-            if keep_forks:
-                sub_root.mkdir(parents=True, exist_ok=True)
-                fork_path.rename(sub_root / fork_path.name)
-            else:
-                fork_path.unlink(missing_ok=True)
+        if keep_forks:
+            sub_root.mkdir(parents=True, exist_ok=True)
+            sub_path.rename(sub_root / sub_path.name)
+        else:
+            sub_path.unlink(missing_ok=True)
     return code
+```
+
+Add `SUB_SEED_NOTE` to `src/tandem/constants.py`:
+
+```python
+SUB_SEED_NOTE = "[tandem] Delegated subagent worker session (no shared history)."
 ```
 
 - [ ] **Step 4: Run op tests to verify they pass**
@@ -540,7 +639,7 @@ Expected: FAIL with `Error: No such command 'sub'`
 
 - [ ] **Step 6: Implement the CLI command**
 
-In `src/tandem/cli.py`, add `import json` to the module imports, and add after `run_cmd`:
+In `src/tandem/cli.py`, add after `run_cmd`:
 
 ```python
 @main.command()
@@ -585,7 +684,8 @@ Expected: all pass
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/tandem/ops.py src/tandem/cli.py tests/test_sub.py
+git add src/tandem/ops.py src/tandem/cli.py src/tandem/harness/codex.py \
+        src/tandem/constants.py tests/test_sub.py
 git commit -m "feat: tandem sub — execute delegated subagent tasks on codex"
 ```
 

@@ -17,7 +17,6 @@ import os
 import subprocess
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 
 from . import paths
@@ -216,7 +215,8 @@ def _file_size(path: Path | None) -> int | None:
 @contextmanager
 def _sub_lock():
     """Serializes drain-then-fork across parallel `tandem sub` processes.
-    The cold task path never takes this lock — it touches no shared state."""
+    The cold task path never takes this lock — seeding its own empty rollout
+    touches no cursor and no shadow."""
     lock_path = paths.tandem_home() / "sub.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "w") as f:
@@ -249,12 +249,34 @@ def fork_shadow(store: StateStore, session: PairedSession) -> tuple[str, Path]:
     meta["payload"]["id"] = fork_id
     meta["payload"]["session_id"] = fork_id
     meta["payload"]["originator"] = "tandem-sub"
-    now = datetime.now(timezone.utc)
-    day_dir = paths.codex_sessions_dir() / now.strftime("%Y/%m/%d")
-    fname = f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{fork_id}.jsonl"
-    fork_path = day_dir / fname
+    fork_path = get_adapter("codex").rollout_path(fork_id)
     append_jsonl_fsync(fork_path, [meta] + entries[1:])
     return fork_id, fork_path
+
+
+def seed_sub_rollout(session: PairedSession) -> tuple[str, Path]:
+    """Author the minimal rollout a cold (`context='task'`) worker resumes:
+    fresh uuid7 identity, originator 'tandem-sub', one seed note and no
+    shared history.
+
+    Cold runs resume this instead of `codex exec`-ing fresh because a plain
+    exec writes an ordinary rollout — non-tandem originator, session cwd,
+    fresh mtime — which `await_codex_rollout` would hand to the next
+    codex-id capture, binding the pair's codex_session_id to a throwaway
+    worker transcript tandem then deletes. Seeding keeps every sub rollout
+    behind the same discovery guard as forks.
+
+    Touches no cursor and no shadow: no drain, no `_sub_lock` needed.
+    Returns (seed_session_id, seed_path)."""
+    from .constants import SUB_SEED_NOTE
+
+    adapter = get_adapter("codex")
+    seed_id = adapter.mint_session_id()
+    seed_path = adapter.rollout_path(seed_id)
+    entries = [adapter.session_meta(session.cwd, seed_id, originator="tandem-sub")]
+    entries += adapter.render_note(SUB_SEED_NOTE)
+    append_jsonl_fsync(seed_path, entries)
+    return seed_id, seed_path
 
 
 def run_sub(
@@ -267,26 +289,28 @@ def run_sub(
     fanout_feature: str = "",
     keep_forks: bool = False,
 ) -> int:
-    """Execute one delegated subagent task on codex. context='task' is a
-    cold `codex exec` in the session cwd (claude wrote a self-contained
-    brief for a cold worker); context='full' forks the shadow and resumes
-    it. The brief is passed through verbatim. Exit code mirrors codex."""
+    """Execute one delegated subagent task on codex. context='task' resumes
+    a freshly seeded empty rollout in the session cwd (claude wrote a
+    self-contained brief for a cold worker); context='full' forks the shadow
+    and resumes that instead. Either way the worker runs in a tandem-authored
+    'tandem-sub' rollout that is never a sync source and never adoptable as
+    the pair's own codex session, and is disposed of on exit. The brief is
+    passed through verbatim. Exit code mirrors codex."""
     adapter = get_adapter("codex")
     argv = [adapter.binary, "exec", "--skip-git-repo-check"]
     if model:
         argv += ["-m", model]
     if fanout_feature:
         argv += ["--enable", fanout_feature]
-    fork_path: Path | None = None
-    fork_id = ""
     if context == "full":
         with _sub_lock():
-            fork_id, fork_path = fork_shadow(store, session)
-        argv += ["resume", fork_id]
-    argv.append(task)
+            sub_id, sub_path = fork_shadow(store, session)
+    else:
+        sub_id, sub_path = seed_sub_rollout(session)
+    argv += ["resume", sub_id, task]
 
     sub_root = paths.tandem_home() / "subagents" / session.tandem_id
-    marker = sub_root / "running" / f"{fork_id or uuid7()}.json"
+    marker = sub_root / "running" / f"{sub_id}.json"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps({
         "model": model, "context": context, "pid": os.getpid(),
@@ -296,10 +320,9 @@ def run_sub(
         code = _run(argv, cwd=session.cwd).returncode
     finally:
         marker.unlink(missing_ok=True)
-        if fork_path is not None:
-            if keep_forks:
-                sub_root.mkdir(parents=True, exist_ok=True)
-                fork_path.rename(sub_root / fork_path.name)
-            else:
-                fork_path.unlink(missing_ok=True)
+        if keep_forks:
+            sub_root.mkdir(parents=True, exist_ok=True)
+            sub_path.rename(sub_root / sub_path.name)
+        else:
+            sub_path.unlink(missing_ok=True)
     return code

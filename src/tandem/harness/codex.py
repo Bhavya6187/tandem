@@ -50,15 +50,14 @@ class CodexAdapter(HarnessAdapter):
     def mint_session_id(self) -> str:
         return uuid7()
 
-    def create_shadow_transcript(
-        self, cwd: str, session_id: str, ctx: SessionContext, note: str
-    ) -> Path:
-        """Create a rollout file shaped like codex's own, headed by a
-        session_meta whose originator marks it as tandem-created."""
-        now = datetime.now(timezone.utc)
-        day_dir = paths.codex_sessions_dir() / now.strftime("%Y/%m/%d")
-        fname = f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{session_id}.jsonl"
-        path = day_dir / fname
+    def session_meta(
+        self, cwd: str, session_id: str, originator: str = "tandem"
+    ) -> dict[str, Any]:
+        """The session_meta first line codex expects for a rollout tandem
+        authored. `originator` must stay one of runner._TANDEM_ORIGINATORS:
+        rollout discovery skips exactly those, which is what keeps a
+        tandem-written rollout from being adopted as a freshly minted codex
+        session ("tandem-sub" marks throwaway subagent rollouts)."""
         version = "0.0.0"
         raw = self.detect_version()
         if raw:
@@ -66,7 +65,7 @@ class CodexAdapter(HarnessAdapter):
             if parsed:
                 version = ".".join(str(x) for x in parsed)
         ts = iso_now_ms()
-        meta = {
+        return {
             "timestamp": ts,
             "type": "session_meta",
             "payload": {
@@ -74,7 +73,7 @@ class CodexAdapter(HarnessAdapter):
                 "id": session_id,
                 "timestamp": ts,
                 "cwd": cwd,
-                "originator": "tandem",
+                "originator": originator,
                 "cli_version": version,
                 "source": "exec",
                 "thread_source": "user",
@@ -84,7 +83,21 @@ class CodexAdapter(HarnessAdapter):
                 "history_mode": "legacy",
             },
         }
-        entries = [meta] + self.render_note(note)
+
+    def rollout_path(self, session_id: str) -> Path:
+        """Where a rollout tandem writes for `session_id` lives — codex's own
+        naming (day directory + timestamped filename embedding the id)."""
+        now = datetime.now(timezone.utc)
+        day_dir = paths.codex_sessions_dir() / now.strftime("%Y/%m/%d")
+        return day_dir / f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{session_id}.jsonl"
+
+    def create_shadow_transcript(
+        self, cwd: str, session_id: str, ctx: SessionContext, note: str
+    ) -> Path:
+        """Create a rollout file shaped like codex's own, headed by a
+        session_meta whose originator marks it as tandem-created."""
+        path = self.rollout_path(session_id)
+        entries = [self.session_meta(cwd, session_id)] + self.render_note(note)
         append_jsonl_fsync(path, entries)
         return path
 

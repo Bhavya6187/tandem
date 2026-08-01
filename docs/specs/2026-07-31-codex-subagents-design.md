@@ -61,7 +61,7 @@ user ──▶ claude (native UI; native Agent dispatch, one call per subagent)
          codex-worker bridge (haiku driver, Bash-only, plugin-shipped)
              │  runs: tandem sub -m <mini>   (brief on stdin)
              ▼
-         tandem: match-mode → cold `codex exec -m <mini>` in cwd
+         tandem: match-mode → seed empty rollout, `codex exec resume` in cwd
                  full-mode  → drain, fork shadow rollout, `codex exec resume`
              ▼
          codex model works in the stock codex harness (may spawn_agent deeper)
@@ -90,9 +90,19 @@ dispatch in v1 is fresh-type (forks pass through natively).
 - **Invariant: the brief is forwarded verbatim — no truncation, no
   summarization, at any step.**
 - `--context task` (what match-mode resolves to for non-fork dispatches):
-  no fork, no drain — run `codex exec -m <model> --skip-git-repo-check`
-  with the brief, in the session cwd. Project rules reach the worker the
-  native way: codex reads the AGENTS.md tandem already keeps synced.
+  no fork, no drain, no lock — seed a minimal rollout (fresh uuid7,
+  `originator: "tandem-sub"`, `model_provider: "openai"`, one note line and
+  no history) and run `codex exec -m <model> --skip-git-repo-check resume
+  <seed-id>` with the brief, in the session cwd. The worker still starts
+  cold; the seed exists so tandem *authors* the rollout rather than letting
+  codex mint one. A plain `codex exec` would write an ordinary rollout in
+  the session cwd — non-tandem originator, fresh mtime — which is exactly
+  what `await_codex_rollout` treats as "codex just minted a session": a
+  concurrent fresh-codex launch or one-off would bind the pair's
+  `codex_session_id` to a throwaway worker transcript that `tandem sub`
+  then deletes. Seeding puts cold runs behind the same originator guard as
+  forks, so no sub rollout is ever adoptable. Project rules reach the worker
+  the native way: codex reads the AGENTS.md tandem already keeps synced.
 - `--context full`: drain the active source with `flush_dangling` (same
   machinery as `run_oneoff`), copy the shadow rollout to a fresh uuid7
   rollout in codex's sessions dir — rewrite `session_meta` id, set
@@ -105,9 +115,10 @@ dispatch in v1 is fresh-type (forks pass through natively).
   `spawn_agent` natively at its own discretion.
 - Output: codex exec's streamed activity passes through to stdout as it
   runs; the final message is printed last. Exit code mirrors codex exec.
-- Cleanup: delete the fork on completion. `keep_forks = true` retains it
-  under `~/.tandem/subagents/<tandem-id>/` for debugging (and as the future
-  resume path for follow-up messages to a finished worker).
+- Cleanup: delete the worker's rollout (fork or seed) on completion.
+  `keep_forks = true` retains it under `~/.tandem/subagents/<tandem-id>/`
+  for debugging (and as the future resume path for follow-up messages to a
+  finished worker).
 - If codex is missing, unsupported, or the cwd has no paired session:
   exit nonzero with a one-line reason (the bridge relays it).
 
