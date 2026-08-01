@@ -35,9 +35,19 @@ run_evaluation.py / reporting.py, live-verified 2026-08-01):
     per-run directory in the result dir. `--report_dir` looks like it would fix
     this; it does not — main() creates the directory and make_run_report()
     ignores it.
-  - it needs docker, and on darwin/arm64 it needs prebuilt arm64 images. All
-    five pinned instances have them (checked against Docker Hub when the task
-    set was pinned).
+  - it needs docker, and it pulls the **x86_64** image whether or not an arm64
+    one exists. `make_test_spec()` defaults `arch="x86_64"` and
+    `run_evaluation` never overrides it (test_spec.py:180, run_evaluation.py:
+    306), and 4.1.0's `USE_X86` set is dead code. So on darwin/arm64 every
+    instance runs emulated. It works — a gold-patch run of
+    django__django-11885 resolved in 123s on this machine — but it is slower
+    than native and it makes `arm64_image = true` in bench/tasks.toml a record
+    of the Docker Hub survey rather than of what actually gets pulled.
+
+    A pull failure (the registry timing out mid-matrix is the realistic one)
+    surfaces as the harness recording the instance in `error_ids` and writing
+    no per-instance report, which parse_report turns into status "error" —
+    retryable, and deliberately not a score of zero.
 
 An empty diff is a FAILED run, not a broken one: the agent finishing without
 editing anything is a result. It is recorded as passed=false with reason
@@ -63,6 +73,14 @@ HARNESS_CMD = ("uvx", "--from", SWEBENCH_PIN, "python", "-m",
 MODEL_NAME = "bench"                 # KEY_MODEL in the predictions row
 EVAL_TIMEOUT_S = 5400                # image pull + build + test run
 INSTANCE_TIMEOUT_S = 1800            # the harness's own per-instance -t
+# The harness's own default. At this level it deletes the ~2GB INSTANCE image
+# after every run and keeps only the environment image, so each arm of each
+# instance re-pulls — ten pulls for the five-instance matrix, and one more
+# chance each for the registry to time out. "instance" trades roughly 10GB of
+# disk for half the pulls. Left at the harness default because that is the
+# configuration these verdicts were validated in; the README documents the
+# knob.
+EVAL_CACHE_LEVEL = "env"
 
 ROW_URL = ("https://datasets-server.huggingface.co/filter"
            "?dataset={dataset}&config=default&split={split}"
@@ -256,6 +274,28 @@ def provision(task: Mapping[str, Any], workdir: str) -> PromptSpec:
     )
 
 
+def _base_commit(task: Mapping[str, Any], rundir: Path | str) -> str:
+    """The commit the agent started from, for the verifying diff.
+
+    From the run's own meta.json first: the runner copies PromptSpec.meta there
+    at provision time, so the answer is already sitting in the directory being
+    verified and scoring needs no network at all. The cached dataset row is the
+    fallback for a result dir written before that was recorded, and HEAD is the
+    last resort — grading a patch that is probably complete beats refusing to
+    grade."""
+    try:
+        meta = json.loads((Path(rundir) / "meta.json").read_text())
+        sha = (meta.get("provision_meta") or {}).get("base_commit")
+        if sha:
+            return str(sha)
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        return str(fetch_row(task).get("base_commit") or "HEAD")
+    except BenchFamilyError:
+        return "HEAD"
+
+
 def verify(task: Mapping[str, Any], rundir: str) -> dict:
     eval_dir = Path(rundir) / "swebench-eval"
     try:
@@ -269,7 +309,10 @@ def verify(task: Mapping[str, Any], rundir: str) -> dict:
             raise BenchFamilyError(
                 f"{repo_dir} is not a git checkout, so there is no patch to "
                 "grade. Was the run provisioned?")
-        patch = worktree_patch(repo_dir)
+        # against the pinned base commit, not HEAD: an agent that committed
+        # its fix (the prompt says not to; that is not a guarantee) would
+        # otherwise diff clean and be scored as having done nothing
+        patch = worktree_patch(repo_dir, since=_base_commit(task, rundir))
         eval_dir.mkdir(parents=True, exist_ok=True)
         (eval_dir / "model_patch.diff").write_text(patch)
         if not patch.strip():
@@ -287,6 +330,7 @@ def verify(task: Mapping[str, Any], rundir: str) -> dict:
                "-i", instance,
                "--run_id", run_id,
                "--max_workers", "1",
+               "--cache_level", EVAL_CACHE_LEVEL,
                "-t", str(INSTANCE_TIMEOUT_S)]
         # cwd, not --report_dir: swebench 4.1.0 writes both the logs tree and
         # the run summary relative to the process cwd (see module docstring)

@@ -9,7 +9,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -184,6 +183,37 @@ def test_worktree_patch_sees_edits_and_new_files_but_not_ignored_ones(tmp_path):
     patch = common.worktree_patch(repo)
     assert "print(99)" in patch and "new.py" in patch
     assert "noise.log" not in patch
+
+
+@needs_git
+def test_worktree_patch_includes_deleted_files(tmp_path):
+    """`git add -A -N` puts a deletion in the INDEX, so a plain `git diff`
+    (worktree vs index) no longer shows it. A fix that removes a file would
+    have been silently dropped from the SWE-bench prediction."""
+    repo = tmp_path / "r"
+    _make_repo(repo)
+    (repo / "b.py").unlink()
+    patch = common.worktree_patch(repo)
+    assert "b.py" in patch
+    assert "deleted file" in patch or "-print(2)" in patch
+
+
+@needs_git
+def test_worktree_patch_survives_an_agent_that_staged_or_committed(tmp_path):
+    """An agent told not to commit may still stage, or commit anyway.
+
+    Neither is visible to `git diff` alone, and the result would be an empty
+    patch scored as "no_patch" — the agent's work reported as no work."""
+    repo = tmp_path / "r"
+    base = _make_repo(repo)
+    (repo / "a.py").write_text("print(42)\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    assert "print(42)" in common.worktree_patch(repo)
+
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@e",
+                    "-c", "user.name=t", "commit", "-qm", "oops"], check=True)
+    assert common.worktree_patch(repo) == ""              # HEAD moved with it
+    assert "print(42)" in common.worktree_patch(repo, since=base)
 
 
 @needs_git
@@ -531,19 +561,56 @@ def test_swebench_parse_report_errors_when_nothing_was_written(tmp_path):
         swebench.parse_report(tmp_path, "r1", "nope__nope-1")
 
 
+def _swebench_rundir(tmp_path, base_commit):
+    """A result dir shaped like the runner's, meta.json included.
+
+    meta.json is where the verifier gets the base commit from, which is what
+    keeps scoring off the network: the runner copies PromptSpec.meta there when
+    the run is provisioned."""
+    rd = tmp_path / "run"
+    rd.mkdir()
+    (rd / "meta.json").write_text(json.dumps({
+        "run_id": "t1", "task": "django__django-11885", "family": "swebench",
+        "provision_meta": {"base_commit": base_commit,
+                           "instance_id": "django__django-11885"}}))
+    return rd
+
+
 @needs_git
 def test_swebench_verify_reports_no_patch_as_a_fail_not_an_error(tmp_path):
-    # a real, untouched checkout: the agent stopped without editing anything
+    """An untouched checkout AT the base commit: the agent edited nothing.
+
+    Nothing here reaches docker — verify() returns before building a
+    predictions file, which is the point: an empty patch is not worth an
+    hour of eval."""
     repo = tmp_path / "clone"
     _make_repo(repo)
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
     task = {"id": "django__django-11885", "family": "swebench",
             "instance_id": "django__django-11885",
             "dataset": "princeton-nlp/SWE-bench_Verified", "_workdir": str(repo)}
-    rd = tmp_path / "run"
-    rd.mkdir()
-    v = swebench.verify(task, str(rd))
+    v = swebench.verify(task, str(_swebench_rundir(tmp_path, head)))
     assert v["status"] == "verified" and v["passed"] is False
     assert v["detail"]["reason"] == "no_patch"
+    assert not (tmp_path / "run" / "swebench-eval" / "predictions.jsonl").exists()
+
+
+@needs_git
+def test_swebench_base_commit_comes_from_the_runs_own_meta_json(tmp_path):
+    """No network in the normal verify path: the runner already recorded it."""
+    repo = tmp_path / "clone"
+    base = _make_repo(repo)
+    rd = _swebench_rundir(tmp_path, base)
+    assert swebench._base_commit({"id": "x", "instance_id": "x"}, str(rd)) == base
+
+
+def test_swebench_base_commit_falls_back_to_head_without_meta_json(tmp_path):
+    """The fallback, and — since fetch_row is tried in between — proof that
+    the fallback survives having no network to fetch the row with."""
+    rd = tmp_path / "run"
+    rd.mkdir()
+    assert swebench._base_commit({"id": "x"}, str(rd)) == "HEAD"
 
 
 def test_swebench_eval_run_id_is_a_stable_filesystem_safe_slug():

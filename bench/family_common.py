@@ -226,16 +226,29 @@ def git(args: Sequence[str], cwd: Path | str | None = None,
     return p
 
 
-def worktree_patch(repo: Path | str) -> str:
-    """Everything the agent changed, as a patch git can apply.
+def worktree_patch(repo: Path | str, since: str = "HEAD") -> str:
+    """Everything the agent changed since `since`, as a patch git can apply.
 
     `add -A -N` records new files as intent-to-add so the diff includes them
     without staging their content; .gitignore still applies, which keeps
-    __pycache__ and stray logs out of a SWE-bench prediction. Returns "" for an
-    untouched tree — an empty patch is a legitimate (failing) answer, not an
-    error."""
+    __pycache__ and stray logs out of a SWE-bench prediction.
+
+    The diff is against a COMMIT, not the index, and each of the three ways
+    that matters is a way an agent's work would otherwise vanish into an empty
+    patch scored as "did nothing":
+
+      - `add -A` records a deletion in the index, so worktree-vs-index no
+        longer shows it. A fix that removes a file would be dropped.
+      - an agent that stages its edits (`git add`) moves them out of
+        worktree-vs-index entirely.
+      - an agent that commits — the prompt says not to, which is not the same
+        as it not happening — moves them past HEAD too. Pass the pinned base
+        commit as `since` and they are still collected.
+
+    Returns "" for an untouched tree: an empty patch is a legitimate failing
+    answer, not an error."""
     git(["add", "-A", "-N"], cwd=repo)
-    p = git(["diff", "--no-color"], cwd=repo)
+    p = git(["diff", "--no-color", since], cwd=repo)
     return p.stdout
 
 
@@ -338,7 +351,11 @@ def cached_fetch(url: str, dest: Path | str,
         data = (fetcher or http_get)(url)
         tmp.write_bytes(data)
         tmp.replace(dest)
-    except BenchFamilyError:
+    except (BenchFamilyError, AssertionError):
+        # AssertionError passes through unwrapped: it is what tests/conftest.py's
+        # network guard raises, and wrapping it in a BenchFamilyError would let
+        # a test that went online land quietly on some caller's offline
+        # fallback instead of failing.
         tmp.unlink(missing_ok=True)
         raise
     except Exception as exc:                        # noqa: BLE001 - fetcher is caller's

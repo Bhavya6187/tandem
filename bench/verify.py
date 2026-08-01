@@ -39,7 +39,6 @@ if sys.version_info < (3, 11):                      # tomllib, and the `X | Y` t
 
 import argparse
 import json
-import os
 import traceback
 from pathlib import Path
 from typing import Any, Iterable, Mapping

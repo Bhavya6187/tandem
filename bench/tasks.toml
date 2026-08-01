@@ -57,10 +57,17 @@ repoqa_release = "2024-06-23"
 
 
 # --- SWE-bench Verified ------------------------------------------------------
-# All five have prebuilt linux/arm64 evaluation images on Docker Hub (verified
-# 2026-08-01), which is what makes them runnable on this machine at all.
 # The provisioner clones `repo` at the dataset row's base_commit; the eval
 # harness — not us — applies the test patch.
+#
+# arm64_image records the Docker Hub survey done when this set was pinned (all
+# five have prebuilt linux/arm64 evaluation images). Nothing reads it, and as
+# of swebench 4.1.0 nothing can usefully act on it either: make_test_spec()
+# defaults arch="x86_64" and run_evaluation never overrides it, so on
+# darwin/arm64 the harness pulls the x86_64 image and runs it emulated. That
+# works — django__django-11885's gold patch resolved in 123s that way on
+# 2026-08-01 — but it is not native, and the flag should not be read as a
+# promise that it is.
 
 [[tasks]]
 id = "django__django-16263"
