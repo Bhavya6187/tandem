@@ -44,3 +44,11 @@ def test_broken_toml_falls_back(tmp_path, monkeypatch):
     (home / "config.toml").write_text("[subagents\nnot toml")
     monkeypatch.setenv("TANDEM_HOME", str(home))
     assert load_subagents_config() == SubagentsConfig()
+
+
+def test_non_utf8_falls_back(tmp_path, monkeypatch):
+    home = tmp_path / ".tandem"
+    home.mkdir()
+    (home / "config.toml").write_bytes(b'[subagents]\nmodel = "caf\xe9"\n')
+    monkeypatch.setenv("TANDEM_HOME", str(home))
+    assert load_subagents_config() == SubagentsConfig()

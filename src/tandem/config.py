@@ -29,7 +29,9 @@ def load_subagents_config() -> SubagentsConfig:
     try:
         with open(paths.tandem_home() / "config.toml", "rb") as f:
             data = tomllib.load(f)
-    except (OSError, tomllib.TOMLDecodeError):
+    # ValueError covers TOMLDecodeError (a subclass), the UnicodeDecodeError
+    # tomllib raises when the file is not UTF-8, and open()'s embedded-NUL path.
+    except (OSError, ValueError):
         return SubagentsConfig()
     raw = data.get("subagents")
     if not isinstance(raw, dict):

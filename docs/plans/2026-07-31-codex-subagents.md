@@ -89,6 +89,14 @@ def test_broken_toml_falls_back(tmp_path, monkeypatch):
     (home / "config.toml").write_text("[subagents\nnot toml")
     monkeypatch.setenv("TANDEM_HOME", str(home))
     assert load_subagents_config() == SubagentsConfig()
+
+
+def test_non_utf8_falls_back(tmp_path, monkeypatch):
+    home = tmp_path / ".tandem"
+    home.mkdir()
+    (home / "config.toml").write_bytes(b'[subagents]\nmodel = "caf\xe9"\n')
+    monkeypatch.setenv("TANDEM_HOME", str(home))
+    assert load_subagents_config() == SubagentsConfig()
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -131,7 +139,9 @@ def load_subagents_config() -> SubagentsConfig:
     try:
         with open(paths.tandem_home() / "config.toml", "rb") as f:
             data = tomllib.load(f)
-    except (OSError, tomllib.TOMLDecodeError):
+    # ValueError covers TOMLDecodeError (a subclass), the UnicodeDecodeError
+    # tomllib raises when the file is not UTF-8, and open()'s embedded-NUL path.
+    except (OSError, ValueError):
         return SubagentsConfig()
     raw = data.get("subagents")
     if not isinstance(raw, dict):
@@ -156,7 +166,7 @@ def load_subagents_config() -> SubagentsConfig:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_config.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 5: Commit**
 
