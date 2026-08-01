@@ -327,9 +327,15 @@ def sub(model: str | None, context_mode: str | None, task: str | None) -> None:
 def hook_route_cmd() -> None:
     """Claude Code PreToolUse hook: reroute subagent dispatches to codex.
 
-    Reads hook JSON on stdin; prints a decision or nothing. ALWAYS exits 0
-    — exit 2 would block the dispatch, and any failure here must degrade
-    to native behavior."""
+    Reads hook JSON on stdin; prints a decision or nothing. This function
+    ALWAYS exits 0 — exit 2 would block the dispatch, and any failure here
+    must degrade to native behavior.
+
+    The function body is not the whole story: click's usage-error path exits
+    2 before this ever runs (version skew — plugin installed, an older
+    tandem on PATH without this subcommand — or a stray argument). So the
+    hook MUST be registered as `tandem hook-route || true`; that shell guard
+    is what makes exit 2 unreachable in practice."""
     try:
         from .config import load_subagents_config
         from .hookroute import route

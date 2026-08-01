@@ -757,6 +757,12 @@ class TestRewrite:
         assert ui["description"] == "short label"   # untouched
         assert ui["run_in_background"] is True      # unknown fields carried
 
+    def test_task_alias_is_rerouted(self):
+        payload = _payload()
+        payload["tool_name"] = "Task"  # the documented alias of Agent
+        ui = _route(payload)["hookSpecificOutput"]["updatedInput"]
+        assert ui["subagent_type"] == BRIDGE_AGENT
+
     def test_named_agent_body_is_inlined(self, tmp_path):
         agents = tmp_path / "proj" / ".claude" / "agents"
         agents.mkdir(parents=True)
@@ -785,8 +791,15 @@ class TestPassthrough:
         assert _route(_payload(), has_session=False) is None
         assert _route(_payload(), codex_ok=False) is None
 
+    def test_other_tool_names_pass_through(self):
+        payload = _payload()          # otherwise fully rewritable
+        payload["tool_name"] = "Bash"
+        assert _route(payload) is None
+        del payload["tool_name"]
+        assert _route(payload) is None
+
     def test_malformed_input(self):
-        assert _route({"tool_input": "not a dict"}) is None
+        assert _route({"tool_name": "Agent", "tool_input": "not a dict"}) is None
         assert _route(_payload(prompt="")) is None
 
 
@@ -876,6 +889,10 @@ def route(
     has_session: bool,
     codex_ok: bool,
 ) -> dict | None:
+    # defense in depth: the plugin's matcher is `Agent|Task`, but a matcher is
+    # config we do not control at call time — never rewrite another tool's input
+    if payload.get("tool_name") not in ("Agent", "Task"):
+        return None
     if cfg.route != "all" or not has_session or not codex_ok:
         return None
     tool_input = payload.get("tool_input")
@@ -961,9 +978,15 @@ In `src/tandem/cli.py`, after `sub`:
 def hook_route_cmd() -> None:
     """Claude Code PreToolUse hook: reroute subagent dispatches to codex.
 
-    Reads hook JSON on stdin; prints a decision or nothing. ALWAYS exits 0
-    — exit 2 would block the dispatch, and any failure here must degrade
-    to native behavior."""
+    Reads hook JSON on stdin; prints a decision or nothing. This function
+    ALWAYS exits 0 — exit 2 would block the dispatch, and any failure here
+    must degrade to native behavior.
+
+    The function body is not the whole story: click's usage-error path exits
+    2 before this ever runs (version skew — plugin installed, an older
+    tandem on PATH without this subcommand — or a stray argument). So the
+    hook MUST be registered as `tandem hook-route || true`; that shell guard
+    is what makes exit 2 unreachable in practice."""
     try:
         from .config import load_subagents_config
         from .hookroute import route
@@ -1037,7 +1060,9 @@ def test_hooks_register_hook_route():
     entries = h["hooks"]["PreToolUse"]
     assert entries[0]["matcher"] == "Agent|Task"
     cmds = [hk["command"] for hk in entries[0]["hooks"]]
-    assert cmds == ["tandem hook-route"]
+    # `|| true` is load-bearing: click exits 2 on a usage error (older
+    # tandem on PATH without the subcommand), and exit 2 blocks dispatches
+    assert cmds == ["tandem hook-route || true"]
 
 
 def test_bridge_agent_definition():
@@ -1079,7 +1104,7 @@ Expected: FAIL with `FileNotFoundError`
       {
         "matcher": "Agent|Task",
         "hooks": [
-          {"type": "command", "command": "tandem hook-route"}
+          {"type": "command", "command": "tandem hook-route || true"}
         ]
       }
     ]

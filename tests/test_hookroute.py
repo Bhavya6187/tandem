@@ -38,6 +38,12 @@ class TestRewrite:
         assert ui["description"] == "short label"   # untouched
         assert ui["run_in_background"] is True      # unknown fields carried
 
+    def test_task_alias_is_rerouted(self):
+        payload = _payload()
+        payload["tool_name"] = "Task"  # the documented alias of Agent
+        ui = _route(payload)["hookSpecificOutput"]["updatedInput"]
+        assert ui["subagent_type"] == BRIDGE_AGENT
+
     def test_named_agent_body_is_inlined(self, tmp_path):
         agents = tmp_path / "proj" / ".claude" / "agents"
         agents.mkdir(parents=True)
@@ -66,8 +72,17 @@ class TestPassthrough:
         assert _route(_payload(), has_session=False) is None
         assert _route(_payload(), codex_ok=False) is None
 
+    def test_other_tool_names_pass_through(self):
+        # the plugin matcher should never send these here; if it ever does,
+        # rewriting an unrelated tool's input would corrupt the call
+        payload = _payload()          # otherwise fully rewritable
+        payload["tool_name"] = "Bash"
+        assert _route(payload) is None
+        del payload["tool_name"]
+        assert _route(payload) is None
+
     def test_malformed_input(self):
-        assert _route({"tool_input": "not a dict"}) is None
+        assert _route({"tool_name": "Agent", "tool_input": "not a dict"}) is None
         assert _route(_payload(prompt="")) is None
 
 

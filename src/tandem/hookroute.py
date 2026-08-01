@@ -23,6 +23,10 @@ def route(
     has_session: bool,
     codex_ok: bool,
 ) -> dict | None:
+    # defense in depth: the plugin's matcher is `Agent|Task`, but a matcher is
+    # config we do not control at call time — never rewrite another tool's input
+    if payload.get("tool_name") not in ("Agent", "Task"):
+        return None
     if cfg.route != "all" or not has_session or not codex_ok:
         return None
     tool_input = payload.get("tool_input")

@@ -127,6 +127,8 @@ dispatch in v1 is fresh-type (forks pass through natively).
 Reads the PreToolUse JSON from stdin. Emits nothing (exit 0) — meaning
 "dispatch proceeds natively" — when any of these hold:
 
+- `tool_name` is not `Agent`/`Task` (defense in depth: the hook matcher is
+  config we do not control at call time);
 - no paired tandem session for the cwd, or codex missing/unsupported
   (the plugin is installed globally in Claude; outside tandem sessions the
   hook must be an invisible no-op);
@@ -157,6 +159,15 @@ the dispatch). Any internal failure → exit 0 with no output, i.e. native
 dispatch. The failure mode of this whole feature is "no savings", never
 "broken subagents".
 
+The command body cannot enforce this alone: click's usage-error path exits
+2 *before* the body runs — the realistic case is version skew, where the
+plugin is installed but an older `tandem` on PATH has no `hook-route`
+subcommand, which would then block every dispatch in that session. The hook
+is therefore registered as `tandem hook-route || true`; the shell-level
+guard is what makes exit 2 unreachable. `route()` additionally re-checks
+`tool_name ∈ {Agent, Task}` itself, so a mis-scoped matcher can never make
+it rewrite an unrelated tool's input.
+
 ### The plugin (`plugin/` in this repo)
 
 - `agents/codex-worker.md` — frontmatter: `model: haiku`,
@@ -167,7 +178,10 @@ dispatch. The failure mode of this whole feature is "no savings", never
   output prefixed `[tandem-sub failed]` and stop.
 - `hooks/hooks.json` — PreToolUse, matcher `Agent|Task` (defensive: the
   alias guarantee covers settings/agent definitions, not hook matchers
-  explicitly), command `tandem hook-route`.
+  explicitly), command `tandem hook-route || true`. The `|| true` is
+  load-bearing, not cosmetic: click's usage-error path exits 2 outside the
+  command body (version skew — plugin installed, older tandem on PATH
+  lacking the subcommand), and exit 2 blocks the dispatch.
 - Install: local plugin from the repo for v1 (marketplace later).
   Registration is the plugin's entire job; policy lives in tandem config.
 
