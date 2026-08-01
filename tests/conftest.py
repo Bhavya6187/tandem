@@ -1,7 +1,9 @@
 """Shared fixtures: a paired session under tmp homes with both shadow files
 seeded the way a fresh `tandem` launch does, plus fake native entry builders."""
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,26 @@ import pytest
 from tandem.events import SessionContext
 from tandem.state import StateStore
 from tandem.util import read_jsonl
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BENCH_DIR = REPO_ROOT / "bench"
+BENCH_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "bench"
+
+
+def load_bench_module(name):
+    """Import a `bench/` module by file path, under a `bench_` alias.
+
+    bench/ is deliberately not a package and never importable from src/tandem
+    (see the plan's global constraints), so the bench tests load its modules
+    the same way the runner loads a family provisioner: by explicit path."""
+    alias = f"bench_{name}"
+    if alias in sys.modules:
+        return sys.modules[alias]
+    spec = importlib.util.spec_from_file_location(alias, BENCH_DIR / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[alias] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def write_line(path, obj=None, text=None):

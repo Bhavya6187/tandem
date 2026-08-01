@@ -1,0 +1,167 @@
+# The A/B bench's pinned task set. Ten tasks, three families, two arms.
+#
+# This file pins IDENTITY and family metadata only. The heavy dataset rows
+# (SWE-bench's base_commit / environment_setup_commit / FAIL_TO_PASS, RepoQA's
+# needle line ranges and description text, ...) are fetched and cached by the
+# per-family provisioners in bench/families/ — pinning them here would mean
+# maintaining a second copy of somebody else's dataset. What must not drift is
+# WHICH rows we run, and that is exactly what is written down below.
+#
+# Every id is used as a directory name under bench/work/, so keep them free of
+# path separators.
+
+[run]
+repeats = 1
+# "" -> whatever model the claude session defaults to. The bench compares
+# subagent routing, not main-agent models, so both arms always get the same
+# value. `--model` on the command line overrides this.
+model = ""
+arms = ["a", "b"]
+# Extra flags handed to `claude -p`. The stream flags (--output-format,
+# --verbose, --include-hook-events, --model) are the runner's business and are
+# NOT configurable here: the extraction depends on them.
+#
+# bypassPermissions is required, not a convenience: in `-p` mode a task that
+# has to edit files would otherwise stall on a permission prompt that has no
+# user to answer it. Each run gets its own throwaway workdir under
+# bench/work/workdirs/.
+claude_flags = ["--permission-mode", "bypassPermissions"]
+# `runner.py smoke` runs this one on both arms — the cheapest family, no docker.
+smoke_task = "repoqa-python-black"
+
+# Wall-clock ceiling per family, in seconds. Hitting it kills the claude
+# process and marks the run FAILED — a real measurement, not an invalid run.
+[run.timeout_s]
+swebench = 3600
+repoqa = 900
+lca = 900
+
+
+# --- SWE-bench Verified ------------------------------------------------------
+# All five have prebuilt linux/arm64 evaluation images on Docker Hub (verified
+# 2026-08-01), which is what makes them runnable on this machine at all.
+# The provisioner clones `repo` at the dataset row's base_commit; the eval
+# harness — not us — applies the test patch.
+
+[[tasks]]
+id = "django__django-16263"
+family = "swebench"
+instance_id = "django__django-16263"
+repo = "django/django"
+dataset = "princeton-nlp/SWE-bench_Verified"
+arm64_image = true
+
+[[tasks]]
+id = "django__django-11885"
+family = "swebench"
+instance_id = "django__django-11885"
+repo = "django/django"
+dataset = "princeton-nlp/SWE-bench_Verified"
+arm64_image = true
+
+[[tasks]]
+id = "astropy__astropy-13398"
+family = "swebench"
+instance_id = "astropy__astropy-13398"
+repo = "astropy/astropy"
+dataset = "princeton-nlp/SWE-bench_Verified"
+arm64_image = true
+
+[[tasks]]
+id = "sympy__sympy-16597"
+family = "swebench"
+instance_id = "sympy__sympy-16597"
+repo = "sympy/sympy"
+dataset = "princeton-nlp/SWE-bench_Verified"
+arm64_image = true
+
+[[tasks]]
+id = "scikit-learn__scikit-learn-25102"
+family = "swebench"
+instance_id = "scikit-learn__scikit-learn-25102"
+repo = "scikit-learn/scikit-learn"
+dataset = "princeton-nlp/SWE-bench_Verified"
+arm64_image = true
+
+
+# --- RepoQA (searching-needle-in-a-haystack) ---------------------------------
+# Release: evalplus/repoqa_release @ 2024-06-23. A task is identified by
+# (language, repo, needle_name); commit_sha, needle path, line span and the
+# description all come from the release json and are cached by the provisioner.
+#
+# 28 of the 600 descriptions leak the needle's own name, which would make the
+# task trivial. The provisioner screens these three and, if one leaks, swaps in
+# its recorded alternate and records the swap here.
+
+[[tasks]]
+id = "repoqa-python-black"
+family = "repoqa"
+language = "python"
+repo = "psf/black"
+needle_name = "_merge_string_group"
+commit_sha = ""                       # filled from the release row
+needle_path = ""                      # filled from the release row
+alternate_repo = "openai/openai-python"
+alternate_needle_name = "to_custom_raw_response_wrapper"
+alternate_language = "python"
+
+[[tasks]]
+id = "repoqa-typescript-express"
+family = "repoqa"
+language = "typescript"
+repo = "expressjs/express"
+needle_name = "sendfile"
+commit_sha = ""
+needle_path = ""
+alternate_repo = "seanmonstar/warp"
+alternate_needle_name = "reject"
+alternate_language = "rust"
+
+[[tasks]]
+id = "repoqa-go-fzf"
+family = "repoqa"
+language = "go"
+repo = "junegunn/fzf"
+needle_name = "newRange"
+commit_sha = ""
+needle_path = ""
+alternate_repo = "seanmonstar/warp"
+alternate_needle_name = "reject"
+alternate_language = "rust"
+
+
+# --- LCA bug localization ----------------------------------------------------
+# PLACEHOLDER, by design. Task 3 picks two mid-sized rows from
+# JetBrains-Research/lca-bug-localization via the HF datasets-server REST API
+# and fills the fields below in place. Until it does, `runner.py` refuses to
+# run these two and says so — the schema is here so that the pin, when it
+# happens, is a diff to this file and nothing else.
+#
+#   hub_row_index  int    row offset in the dataset split, the reproducible pin
+#   repo           str    "owner/name" on GitHub
+#   base_sha       str    commit the agent starts from (bug present)
+#   head_sha       str    the fixing commit; ground truth = its changed files
+#   expected_files [str]  ground-truth changed-file paths, repo-relative
+#   f1_threshold   float  pass when set-F1(predicted, expected) >= this
+
+[[tasks]]
+id = "lca-1"
+family = "lca"
+dataset = "JetBrains-Research/lca-bug-localization"
+hub_row_index = -1
+repo = ""
+base_sha = ""
+head_sha = ""
+expected_files = []
+f1_threshold = 0.5
+
+[[tasks]]
+id = "lca-2"
+family = "lca"
+dataset = "JetBrains-Research/lca-bug-localization"
+hub_row_index = -1
+repo = ""
+base_sha = ""
+head_sha = ""
+expected_files = []
+f1_threshold = 0.5
