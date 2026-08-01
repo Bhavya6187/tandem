@@ -98,9 +98,10 @@ that one is not, and routing is on as soon as the plugin loads, so
 Fork dispatches stay on Claude, each worker's full codex log is kept under
 `~/.tandem/subagents/`, and `tandem status` lists the workers running right
 now. The plugin is installed for every Claude session, so in a directory
-with no paired tandem session dispatches simply run natively — the first
+with no paired tandem session, dispatches simply run natively — the first
 one says so once, then the session stays quiet. `claude plugin uninstall
-tandem@tandem` and Claude is byte-for-byte stock again.
+tandem@tandem` and Claude is stock again — add `claude plugin marketplace
+remove tandem` to also unregister the marketplace.
 
 Hacking on the plugin itself? Skip the marketplace and point Claude at your
 clone: `claude --plugin-dir /path/to/tandem/plugin`.

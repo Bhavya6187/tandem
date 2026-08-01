@@ -1,5 +1,6 @@
 {
   "name": "tandem",
+  "description": "tandem's plugin marketplace: run Claude Code subagents on cheap codex models.",
   "owner": {
     "name": "Bhavya Agarwal",
     "url": "https://github.com/Bhavya6187"

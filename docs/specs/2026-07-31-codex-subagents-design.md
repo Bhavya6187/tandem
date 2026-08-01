@@ -462,6 +462,12 @@ price of "no forged results" under the documented hook surface.
   interactive task-panel view of running workers, and the background
   (`run_in_background: true`) return path — the foreground path was the one
   exercised.
+- Where a hook's user-visible line actually surfaces, verified live on
+  claude 2.1.220 (2026-08-01): a decision-free `systemMessage` from a
+  PreToolUse hook appears nowhere in `claude -p --output-format stream-json`
+  output (no stream event at all), because claude classifies it into a
+  `hook_system_message` attachment record in the session transcript JSONL —
+  that record, not stdout, is what the TUI renders.
 
 ## Later
 
