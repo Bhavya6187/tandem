@@ -14,6 +14,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -297,7 +298,8 @@ def run_sub(
     and resumes that instead. Either way the worker runs in a tandem-authored
     'tandem-sub' rollout that is never a sync source and never adoptable as
     the pair's own codex session, and is disposed of on exit. The brief is
-    passed through verbatim. Exit code mirrors codex.
+    passed through verbatim, on codex's stdin (`resume <id> -`), never as
+    argv. Exit code mirrors codex.
 
     quiet=True is the bridge-agent mode: codex's raw transcript goes to a log
     file and this command's ENTIRE stdout becomes the worker's final message
@@ -326,30 +328,43 @@ def run_sub(
         last_path, log_path = logs / f"{sub_id}.last", logs / f"{sub_id}.log"
         # exec-level flag: must precede the `resume` subcommand, like -m
         argv += ["-o", str(last_path)]
-    argv += ["resume", sub_id, task]
+    # `-` is codex's documented "read the prompt from stdin" marker. The brief
+    # must never be a trailing positional: it is untrusted text, so codex's own
+    # parser reads a leading `-` as a flag — "- review …" dies with `unexpected
+    # argument` before the model runs, and "-m gpt-9 …" is silently honored as
+    # a flag. stdin keeps it opaque, and drops the argv length limit too.
+    argv += ["resume", sub_id, "-"]
 
     marker = sub_root / "running" / f"{sub_id}.json"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps({
         "model": model, "context": context, "pid": os.getpid(),
-        "task_preview": task[:120],
+        # collapsed: `tandem status` prints this on one line, and briefs are
+        # multi-paragraph
+        "task_preview": " ".join(task.split())[:120],
     }))
+    brief = task.encode()
     try:
         if quiet:
             with open(log_path, "wb") as fh:
-                code = _run(argv, cwd=session.cwd, stdout=fh,
+                code = _run(argv, cwd=session.cwd, input=brief, stdout=fh,
                             stderr=subprocess.STDOUT).returncode
         else:
-            code = _run(argv, cwd=session.cwd).returncode
+            code = _run(argv, cwd=session.cwd, input=brief).returncode
     finally:
+        # The worker's answer is what this run exists to produce; disposal is
+        # bookkeeping. Relay first so a raising cleanup cannot swallow a result
+        # codex already produced and billed for.
+        if quiet:
+            _relay_last_message(last_path, log_path)
         marker.unlink(missing_ok=True)
         if keep_forks:
             sub_root.mkdir(parents=True, exist_ok=True)
-            sub_path.rename(sub_root / sub_path.name)
+            # move, not rename: codex's sessions dir and TANDEM_HOME can sit on
+            # different filesystems, and rename() across devices raises
+            shutil.move(sub_path, sub_root / sub_path.name)
         else:
             sub_path.unlink(missing_ok=True)
-        if quiet:
-            _relay_last_message(last_path, log_path)
     return code
 
 

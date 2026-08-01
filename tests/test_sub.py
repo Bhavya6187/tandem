@@ -1,11 +1,14 @@
 """tandem sub: shadow forking and the subagent execution op."""
 
+import contextlib
 import json
 import subprocess
 import time
 from pathlib import Path
 
-from tandem import ops, paths
+import pytest
+
+from tandem import ops, paths, runner
 from tandem.runner import await_codex_rollout
 from tandem.util import read_jsonl
 
@@ -131,7 +134,7 @@ class TestRunSub:
         started = time.time()
 
         def fake_run(argv, cwd=None, **kw):
-            calls["argv"], calls["cwd"] = argv, cwd
+            calls["argv"], calls["cwd"], calls["kw"] = argv, cwd, kw
             seed = paths.find_codex_rollout(argv[argv.index("resume") + 1])
             calls["meta"] = read_jsonl(seed)[0]
             # while the worker runs, the seed must not look like a fresh codex
@@ -148,12 +151,47 @@ class TestRunSub:
         assert argv[5] == "resume"
         seed_id = argv[6]
         assert seed_id != env.session.codex_session_id
-        assert argv[7:] == ["audit the README"]
+        # the brief travels on stdin; argv ends at codex's `-` stdin marker
+        assert argv[7:] == ["-"]
+        assert calls["kw"]["input"] == b"audit the README"
         assert calls["cwd"] == env.cwd
         assert calls["meta"]["payload"]["originator"] == "tandem-sub"
         assert calls["meta"]["payload"]["cwd"] == env.cwd
         assert calls["adopted"] is None
         assert paths.find_codex_rollout(seed_id) is None  # cleaned up after
+
+    def test_brief_never_reaches_argv(self, env_factory, monkeypatch):
+        """A brief is untrusted text, not argv. As a trailing positional,
+        anything starting with `-` is parsed by codex's own CLI: `- review …`
+        dies with `unexpected argument '- ' found` before the model runs, and
+        `-m gpt-9 …` is silently accepted as a flag — argv injection. codex
+        documents `-` as "read the prompt from stdin"; that is the transport."""
+        env = env_factory(active="claude")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "_run",
+            lambda argv, cwd=None, **kw: calls.update(argv=argv, kw=kw) or _R(0),
+        )
+        task = "- review the diff\n-m gpt-9 --dangerously-bypass\n"
+        ops.run_sub(env.store, env.session, task)
+        argv = calls["argv"]
+        assert argv[-3:-2] == ["resume"] and argv[-1] == "-"
+        # not one fragment of the brief is on the command line
+        assert not any(a.startswith("- ") or a == "-m gpt-9" for a in argv[:-1])
+        assert calls["kw"]["input"] == task.encode()
+
+    def test_full_context_brief_also_goes_over_stdin(self, env_factory,
+                                                     monkeypatch):
+        env = env_factory(active="claude")
+        ops.fast_forward(env.store, env.session, "claude")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "_run",
+            lambda argv, cwd=None, **kw: calls.update(argv=argv, kw=kw) or _R(0),
+        )
+        ops.run_sub(env.store, env.session, "-m sneaky", context="full")
+        assert calls["argv"][-1] == "-"
+        assert calls["kw"]["input"] == b"-m sneaky"
 
     def test_task_context_keep_forks_retains_seed(self, env_factory, monkeypatch):
         env = env_factory(active="claude")
@@ -227,6 +265,40 @@ class TestRunSub:
         assert seen["payload"][0]["task_preview"] == "watch me"
         assert seen["during"][0].exists() is False  # removed on completion
 
+    def test_marker_preview_is_single_line(self, env_factory, monkeypatch):
+        """`tandem status` prints the preview on its own line. A raw slice of a
+        multi-paragraph Claude brief drags newlines into that line and the
+        listing becomes multi-line garbage."""
+        env = env_factory(active="claude")
+        seen = {}
+
+        def fake_run(argv, cwd=None, **kw):
+            run_dir = (paths.tandem_home() / "subagents"
+                       / env.session.tandem_id / "running")
+            seen["payload"] = json.loads(next(run_dir.glob("*.json")).read_text())
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_sub(env.store, env.session,
+                    "Audit the README.\n\n  Then\treport back.\n")
+        preview = seen["payload"]["task_preview"]
+        assert preview == "Audit the README. Then report back."
+        assert len(preview.splitlines()) == 1
+
+    def test_marker_preview_is_capped(self, env_factory, monkeypatch):
+        env = env_factory(active="claude")
+        seen = {}
+
+        def fake_run(argv, cwd=None, **kw):
+            run_dir = (paths.tandem_home() / "subagents"
+                       / env.session.tandem_id / "running")
+            seen["payload"] = json.loads(next(run_dir.glob("*.json")).read_text())
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_sub(env.store, env.session, "word " * 200)
+        assert len(seen["payload"]["task_preview"]) == 120
+
 
 class TestQuietRelay:
     """Quiet mode exists for the bridge agent: with inherited stdio the Bash
@@ -282,6 +354,27 @@ class TestQuietRelay:
         assert "boom: auth failed" in out
         assert "stack line" in out
 
+    def test_relay_precedes_fork_disposal(self, env_factory, monkeypatch,
+                                          capsys):
+        """The worker's answer is the whole point of the run; cleanup is
+        bookkeeping. With the relay last in `finally`, a raising disposal
+        (cross-device rename, unwritable home) destroys a result codex already
+        produced and paid for. Relay first, then clean up."""
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text("FINAL ANSWER")
+            return _R(0)
+
+        def boom(*a, **kw):
+            raise OSError("cross-device link")
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        monkeypatch.setattr(ops.shutil, "move", boom)
+        with pytest.raises(OSError):
+            ops.run_sub(env.store, env.session, "t", quiet=True, keep_forks=True)
+        assert capsys.readouterr().out == "FINAL ANSWER\n"
+
     def test_non_quiet_streams_with_inherited_stdio(self, env_factory,
                                                     monkeypatch, capsys):
         """Manual `tandem sub` keeps streaming: no -o, no redirection."""
@@ -293,8 +386,54 @@ class TestQuietRelay:
         )
         ops.run_sub(env.store, env.session, "t")
         assert "-o" not in calls["argv"]
-        assert calls["kw"] == {}
+        # stdin carries the brief; stdout/stderr stay inherited
+        assert set(calls["kw"]) == {"input"}
         assert capsys.readouterr().out == ""
+
+
+class TestSubLockCoverage:
+    """`--context full` drains the active source from a *second* process while
+    the session's own tail thread is draining the same cursor row in the
+    first. `fork_shadow` holds `_sub_lock`; until the tail thread took it too,
+    the lock guarded only one side of the race and two concurrent drains could
+    translate the same lines twice (duplicate turns and call ids in the fork).
+    Both sides now serialize on the same flock."""
+
+    def test_tail_thread_drains_under_the_sub_lock(self, env_factory,
+                                                   monkeypatch):
+        env = env_factory(active="claude")
+        depth = [0]
+        seen: list[int] = []
+
+        @contextlib.contextmanager
+        def recording_lock():
+            depth[0] += 1
+            try:
+                yield
+            finally:
+                depth[0] -= 1
+
+        real_drain = runner.TailLoop.drain
+
+        def drain(self):
+            seen.append(depth[0])
+            return real_drain(self)
+
+        monkeypatch.setattr(ops, "_sub_lock", recording_lock)
+        monkeypatch.setattr(runner.TailLoop, "drain", drain)
+        monkeypatch.setattr(runner, "run_in_pty", lambda argv, cwd=None: 0)
+
+        class _Sink:
+            def handle(self, line, ctx, cursor): ...
+            def close(self): ...
+
+        code = runner.InteractiveRunner(
+            env.session, lambda store, session, source: _Sink()).run()
+
+        assert code == 0
+        assert seen, "the tail thread never drained"
+        assert all(d == 1 for d in seen), f"drain ran outside the lock: {seen}"
+        assert depth[0] == 0  # released every time
 
 
 class TestSubCli:
