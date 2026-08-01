@@ -125,9 +125,18 @@ class TailLoop:
         return len(lines)
 
 
+# Rollouts tandem wrote itself: "tandem" heads a seeded shadow (codex
+# adapter), "tandem-sub" heads a subagent fork (ops.fork_shadow). Both live
+# in codex's sessions dir with a fresh mtime and the session cwd, so
+# discovery must skip them or a live fork gets adopted as the pair's real
+# codex session.
+_TANDEM_ORIGINATORS = ("tandem", "tandem-sub")
+
+
 def await_codex_rollout(cwd: str, after: float, timeout: float | None = None) -> Path | None:
     """Find the rollout file codex just created for this cwd (codex mints its
-    own session id; tandem discovers it from the filesystem)."""
+    own session id; tandem discovers it from the filesystem). Rollouts tandem
+    authored are never candidates."""
     deadline = None if timeout is None else time.time() + timeout
     while True:
         for p in paths.iter_codex_rollouts_newest_first():
@@ -140,7 +149,8 @@ def await_codex_rollout(cwd: str, after: float, timeout: float | None = None) ->
                 if (
                     meta.get("type") == "session_meta"
                     and meta.get("payload", {}).get("cwd") == cwd
-                    and meta.get("payload", {}).get("originator") != "tandem"
+                    and meta.get("payload", {}).get("originator")
+                    not in _TANDEM_ORIGINATORS
                 ):
                     return p
             except (OSError, json.JSONDecodeError):

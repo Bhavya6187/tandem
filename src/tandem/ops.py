@@ -229,8 +229,10 @@ def _sub_lock():
 def fork_shadow(store: StateStore, session: PairedSession) -> tuple[str, Path]:
     """Copy the codex shadow rollout into a fresh ephemeral rollout for one
     subagent worker: same history, new uuid7 identity, originator
-    'tandem-sub'. The fork is NEVER registered as a sync source. Returns
-    (fork_session_id, fork_path)."""
+    'tandem-sub'. The fork is NEVER registered as a sync source. Callers MUST
+    hold `_sub_lock()` across this call: it drains the active source first,
+    and concurrent drains against the same cursor row corrupt sync state.
+    Returns (fork_session_id, fork_path)."""
     if not session.codex_session_id:
         _create_codex_shadow_late(store, session)
         session = store.get_session(session.tandem_id) or session
