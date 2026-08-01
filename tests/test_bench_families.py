@@ -69,6 +69,77 @@ def test_final_answer_on_the_live_fixture_transcript():
     assert common.final_answer(evs) == "**First line of README.md:** Widget Toolkit"
 
 
+def test_final_answer_fallback_never_returns_a_subagents_message():
+    """A subagent's report is not the agent's answer.
+
+    Subagent output is streamed into the same transcript, tagged with
+    parent_tool_use_id. A run killed before any result event would otherwise be
+    scored on whatever a worker happened to say last."""
+    evs = _events(
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "mine"}]}},
+        {"type": "assistant", "parent_tool_use_id": "toolu_1",
+         "message": {"content": [{"type": "text", "text": "the worker's report"}]}},
+    )
+    assert common.final_answer(evs) == "mine"
+
+
+def _async_tail(*texts):
+    """Result events shaped like a real async-dispatch tail: the answer, then
+    one turn per background agent that finished afterwards."""
+    evs = [{"type": "result", "subtype": "success", "result": texts[0]}]
+    evs += [{"type": "result", "subtype": "success", "result": t,
+             "origin": {"kind": "task-notification"}} for t in texts[1:]]
+    return evs
+
+
+def test_final_answer_with_block_skips_a_post_completion_summary():
+    evs = _async_tail("here it is:\n```\ndef f(): pass\n```",
+                      "Task complete. The investigation confirmed my finding.",
+                      "Both agents have now completed.")
+    assert common.final_answer(evs) == "Both agents have now completed."
+    assert common.final_answer_with_block(evs) == "here it is:\n```\ndef f(): pass\n```"
+
+
+def test_final_answer_with_block_takes_the_newest_block_of_several():
+    evs = _async_tail("draft:\n```\nwrong\n```", "correction:\n```\nright\n```")
+    assert common.final_answer_with_block(evs) == "correction:\n```\nright\n```"
+
+
+def test_final_answer_with_block_falls_back_when_no_turn_had_one():
+    evs = _async_tail("no code here", "still none")
+    assert common.final_answer_with_block(evs) == "still none"
+
+
+def test_final_answer_with_block_never_returns_a_subagents_block():
+    evs = [
+        {"type": "assistant", "parent_tool_use_id": "toolu_1",
+         "message": {"content": [{"type": "text", "text": "```\nworker code\n```"}]}},
+        *_async_tail("I dispatched the agents.", "They are done."),
+    ]
+    assert "worker code" not in common.final_answer_with_block(evs)
+    assert common.final_answer_with_block(evs) == "They are done."
+
+
+def test_final_answer_with_block_on_the_live_async_arm_a_transcript():
+    """The bug the smoke found, held down.
+
+    Captured from bench run SMOKE1, arm A (rerouted subagents dispatch
+    ASYNC, so each completion adds a turn): the answer — the whole
+    `_merge_string_group` function in a fenced block — is in the FIRST result
+    event, and the last two results are notification-driven summaries with no
+    code in them. Scoring the last one is how a correct answer became a
+    0.010."""
+    evs = [json.loads(ln) for ln in
+           (BENCH_FIXTURES / "stream-async-tail.jsonl").read_text().splitlines()
+           if ln.strip()]
+    assert "```" not in common.final_answer(evs)          # the trap
+    answer = common.final_answer_with_block(evs)
+    assert "def _merge_string_group(" in answer
+    # ... and it is the MAIN agent's block, not either worker's report
+    assert "All relevant matches are in" not in answer
+    assert "Found two matching functions" not in answer
+
+
 # --- fenced blocks ------------------------------------------------------------
 
 
@@ -121,6 +192,19 @@ def test_fenced_blocks_accepts_a_deeply_indented_fence():
 def test_fenced_blocks_dedents_the_body_by_the_fence_indent_only():
     text = "  ```python\n  def f():\n      return 1\n  ```"
     assert common.fenced_blocks(text) == [("python", "def f():\n    return 1")]
+
+
+def test_fenced_blocks_never_eats_a_tab_that_is_the_codes_own_indent():
+    """RepoQA's go needles are tab-indented, and a model that indents the
+    fence by a space or two used to have every tab of the function's own
+    indentation stripped — a flattened body, scored as a wrong answer."""
+    text = "  ```go\n\tfunc f() {\n\t\treturn\n\t}\n  ```"
+    assert common.fenced_blocks(text) == [("go", "\tfunc f() {\n\t\treturn\n\t}")]
+
+
+def test_fenced_blocks_dedents_a_tab_indented_fence_by_its_own_tab():
+    text = "\t```go\n\t\tfunc f() {}\n\t```"
+    assert common.fenced_blocks(text) == [("go", "\tfunc f() {}")]
 
 
 def test_refence_round_trips_blocks_the_scorer_can_read_back():
@@ -417,6 +501,20 @@ def test_lca_verify_records_no_answer_rather_than_erroring(tmp_path):
     assert v["detail"]["reason"] == "no_answer"
 
 
+def test_lca_verify_scores_the_turn_that_carried_the_answer(tmp_path):
+    """An async dispatch's trailing summary must not erase the file list."""
+    rd = tmp_path / "run"
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "transcript.jsonl").write_text("\n".join(json.dumps(e) for e in _async_tail(
+        "The fix has to touch:\n```\na.py\nb.py\n```",
+        "Both agents have finished; the analysis above stands.")) + "\n")
+    task = {"id": "lca-1", "family": "lca", "expected_files": ["a.py", "b.py"],
+            "f1_threshold": 0.5, "_workdir": str(tmp_path)}
+    v = lca.verify(task, str(rd))
+    assert v["status"] == "verified" and v["passed"] is True
+    assert v["detail"]["predicted_files"] == ["a.py", "b.py"]
+
+
 def test_lca_verify_errors_when_the_pin_is_empty(tmp_path):
     task = {"id": "lca-1", "family": "lca", "expected_files": [],
             "f1_threshold": 0.5, "_workdir": str(tmp_path)}
@@ -549,6 +647,37 @@ def test_repoqa_parse_scores_fails_below_the_bleu_threshold():
 def test_repoqa_parse_scores_errors_on_an_empty_result_set():
     with pytest.raises(common.BenchFamilyError):
         repoqa.parse_scores({"bench": {"results": {}}}, "_merge_string_group")
+
+
+def test_repoqa_verify_scores_the_turn_that_carried_the_block(tmp_path, monkeypatch):
+    """The whole chain, minus the network and uvx: an async tail must not cost
+    the run the answer it already gave."""
+    monkeypatch.setattr(repoqa, "load_release", _dataset)
+    monkeypatch.setattr(repoqa, "release_paths",
+                        lambda: (tmp_path / "r.json.gz", tmp_path / "r.json"))
+    seen = {}
+
+    def fake_run_cmd(cmd, cwd=None, timeout=None):
+        results = Path(cmd[cmd.index("--model-output-path") + 1])
+        seen["row"] = json.loads(results.read_text())
+        (Path(cwd) / "bench-SCORES.json").write_text(json.dumps({"bench": {
+            "results": {"python": [{"name": "_merge_string_group",
+                                    "is_best_similar": True,
+                                    "best_similar_score": 1.0,
+                                    "best_target": "_merge_string_group"}]}}}))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(repoqa, "run_cmd", fake_run_cmd)
+    rd = tmp_path / "run"
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "transcript.jsonl").write_text("\n".join(json.dumps(e) for e in _async_tail(
+        "found it:\n```python\ndef _merge_string_group(self): pass\n```",
+        "Task complete. The agents confirmed the finding above.")) + "\n")
+
+    v = repoqa.verify(BLACK_TASK, str(rd))
+    assert v["status"] == "verified" and v["passed"] is True
+    assert v["detail"]["answer_had_code_block"] is True
+    assert "def _merge_string_group" in seen["row"]["output"][0]
 
 
 def test_repoqa_prompt_asks_for_a_fenced_code_block():

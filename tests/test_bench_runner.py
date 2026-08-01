@@ -315,7 +315,7 @@ def test_run_pairs_the_workdir_and_verifies_before_launch(rig):
     calls = rig.pair_calls()
     assert len(calls) == 2, calls
     # exactly one workdir, paired then verified, and it is arm A's
-    workdir = rp(rig.work / "workdirs" / "t1" / "fake-1" / "a" / "0")
+    workdir = rp(rig.work / runner.WORKDIRS_DIR / "t1" / "fake-1" / "a" / "0")
     assert all(workdir in c for c in calls)
     assert "--verify-only" not in calls[0]
     assert "--verify-only" in calls[1]
@@ -399,7 +399,7 @@ def test_verdict_skeleton_is_unverified_but_carries_the_metrics(rig):
 
 def test_provisioner_ran_in_the_workdir(rig):
     runner.main(["run", *rig.argv("--run-id", "t1", "--arms", "b")])
-    assert (rig.work / "workdirs" / "t1" / "fake-1" / "b" / "0"
+    assert (rig.work / runner.WORKDIRS_DIR / "t1" / "fake-1" / "b" / "0"
             / "README.md").is_file()
 
 
@@ -439,6 +439,48 @@ def test_tandem_home_config_keeps_operator_keys_but_not_a_wrong_route(tmp_path):
     runner.ensure_tandem_homes(work)
     assert 'route = "all"' in cfg.read_text()
     assert "gpt-5-codex-mini" not in cfg.read_text()
+
+
+def test_clones_land_where_pytest_will_not_look(rig):
+    """A provisioned workdir is somebody else's repository, tests and all.
+
+    `bench/work/` sits under the repo root, so a plain `uv run pytest` walks
+    into every clone the bench has made. Live, after the first smoke run: two
+    checkouts of psf/black, two files both claiming to be `tests.conftest`,
+    and collection died before a single tandem test ran."""
+    runner.main(["run", *rig.argv("--run-id", "t1", "--arms", "b")])
+    v = json.loads((rundir(rig, arm="b") / "verdict.json").read_text())
+    assert runner.WORKDIRS_DIR.startswith(".")
+    assert f"/{runner.WORKDIRS_DIR}/" in v["workdir"]
+
+
+def test_pytest_really_does_not_descend_into_the_clone_tree(tmp_path):
+    """The assertion above is about a name; this one is about pytest."""
+    root = tmp_path / "root"
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_real.py").write_text("def test_ok():\n    assert True\n")
+    clone = (root / "bench" / "work" / runner.WORKDIRS_DIR / "run" / "repo"
+             / "tests")
+    clone.mkdir(parents=True)
+    (clone / "conftest.py").write_text("raise SystemExit('collected the clone')\n")
+    (clone / "test_theirs.py").write_text("def test_theirs():\n    assert False\n")
+
+    p = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p",
+                        "no:cacheprovider", str(root)],
+                       capture_output=True, text=True, cwd=str(root))
+    assert "collected the clone" not in p.stdout + p.stderr
+    assert "test_theirs" not in p.stdout
+    assert p.returncode == 0, p.stdout[-2000:]
+
+
+def test_ensure_work_dir_removes_the_conftest_seal_an_older_runner_wrote(tmp_path):
+    """tests/ has no __init__.py, so a stray conftest.py under the rootdir
+    wins the module name `conftest` and every bench test's import breaks."""
+    work = tmp_path / "w"
+    work.mkdir()
+    (work / "conftest.py").write_text('collect_ignore_glob = ["*"]\n')
+    runner.ensure_work_dir(work)
+    assert not (work / "conftest.py").exists()
 
 
 def test_nonzero_claude_exit_is_recorded_not_fatal(rig, monkeypatch):

@@ -37,7 +37,8 @@ from typing import Any, Mapping
 
 from family_api import PromptSpec
 from family_common import (BenchFamilyError, cache_dir, cached_json, clone_at,
-                           error_verdict, fenced_blocks, final_answer,
+                           error_verdict, fenced_blocks,
+                           final_answer_with_block,
                            github_url, read_events, set_scores, slug, verdict)
 
 ROWS_URL = ("https://datasets-server.huggingface.co/rows"
@@ -186,7 +187,8 @@ def verify(task: Mapping[str, Any], rundir: str) -> dict:
                 f"task {task.get('id')!r} has no expected_files, so there is "
                 "nothing to score against. Pin it in bench/tasks.toml.")
         threshold = float(task.get("f1_threshold", 0.5))
-        answer = final_answer(read_events(Path(rundir) / "transcript.jsonl"))
+        answer = final_answer_with_block(
+            read_events(Path(rundir) / "transcript.jsonl"))
         predicted = parse_file_list(answer)
         scores = set_scores(predicted, expected)
         detail = dict(scores, expected_files=expected, predicted_files=predicted,

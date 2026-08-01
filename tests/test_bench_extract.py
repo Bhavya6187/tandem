@@ -64,6 +64,24 @@ def test_result_is_the_last_one_not_the_first(native):
     assert native["result_is_error"] is False
 
 
+def test_num_turns_counts_the_whole_session_not_the_last_turn():
+    """claude's `num_turns` is PER RESULT EVENT, and with an async dispatch
+    there are several. Live in bench run SMOKE1, arm A: turns 11, 1, 1 — the
+    last result is a notification-driven turn, so reading num_turns off it
+    reported a 13-turn session as a 1-turn one. (`modelUsage` and
+    `total_cost_usd` on the same event ARE cumulative; this one is not.)"""
+    ex = runner.extract_transcript([
+        {"type": "result", "subtype": "success", "num_turns": 11,
+         "total_cost_usd": 0.10},
+        {"type": "result", "subtype": "success", "num_turns": 1,
+         "origin": {"kind": "task-notification"}, "total_cost_usd": 0.13},
+        {"type": "result", "subtype": "success", "num_turns": 1,
+         "origin": {"kind": "task-notification"}, "total_cost_usd": 0.13},
+    ])
+    assert ex["num_turns"] == 13
+    assert ex["cost_usd"] == 0.13          # cumulative: still the last one
+
+
 # --- dispatch counting -------------------------------------------------------
 
 

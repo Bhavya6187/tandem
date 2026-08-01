@@ -97,29 +97,72 @@ def _assistant_text(event: Mapping[str, Any]) -> str:
     return "\n".join(p for p in parts if p).strip()
 
 
-def final_answer(events: Iterable[Mapping[str, Any]]) -> str:
-    """The agent's final message — the text every family verifies against.
+def _is_main_agent(event: Mapping[str, Any]) -> bool:
+    """False for anything a SUBAGENT said.
 
-    The LAST `result` event wins. That is claude's own final answer string, and
-    it is the last one for a reason: an async Agent dispatch makes claude emit
-    one `result` per turn, and the first of them is only "Agent dispatched.
-    Waiting for it to complete." (live-verified in the Task 2 fixtures). A run
-    that was killed before any result event still has assistant messages, so
-    the fallback is the last assistant message that carried text — tool_use and
-    thinking blocks are not an answer."""
+    Subagent output is streamed into the same transcript, tagged with
+    `parent_tool_use_id`. A worker's report is evidence the main agent used;
+    it is not the main agent's answer, and scoring it would credit (or blame)
+    the wrong process — in arm A, literally a different model."""
+    return not event.get("parent_tool_use_id")
+
+
+def answer_turns(events: Iterable[Mapping[str, Any]]) -> list[str]:
+    """Everything the MAIN agent offered as a finished answer, oldest first.
+
+    One string per `result` event: claude emits one per turn, and with an
+    async Agent dispatch there are several — see `final_answer_with_block` for
+    what that does to scoring. A run killed before any result event has none,
+    so the fallback is the last main-agent assistant message that carried text
+    (tool_use and thinking blocks are not an answer)."""
     events = list(events)
+    out = [ev["result"].strip() for ev in events
+           if ev.get("type") == "result" and _is_main_agent(ev)
+           and isinstance(ev.get("result"), str) and ev["result"].strip()]
+    if out:
+        return out
     for ev in reversed(events):
-        if ev.get("type") == "result":
-            text = ev.get("result")
-            if isinstance(text, str) and text.strip():
-                return text.strip()
-            break                      # a blank final result: fall through
-    for ev in reversed(events):
-        if ev.get("type") == "assistant":
+        if ev.get("type") == "assistant" and _is_main_agent(ev):
             text = _assistant_text(ev)
             if text:
-                return text
-    return ""
+                return [text]
+    return []
+
+
+def final_answer(events: Iterable[Mapping[str, Any]]) -> str:
+    """The agent's last word. Families that want a specific answer SHAPE
+    should use `final_answer_with_block` instead — see why there."""
+    turns = answer_turns(events)
+    return turns[-1] if turns else ""
+
+
+def final_answer_with_block(events: Iterable[Mapping[str, Any]]) -> str:
+    """The newest turn that actually contains a fenced block; the newest turn
+    of any kind if none does.
+
+    "The last result event is the answer" is wrong whenever subagents run
+    ASYNC, and that is not a corner case — it is arm A's normal shape. A
+    rerouted `tandem:codex-worker` dispatch returns "Async agent launched
+    successfully" immediately, so the main agent answers in full, and THEN
+    each worker's completion notification drives another turn whose result is
+    a bare acknowledgement ("Task complete. The investigation confirmed my
+    finding."). Live, in bench run SMOKE1: arm A's answer — the complete
+    `_merge_string_group` function, correctly found, correctly fenced — sat in
+    result #1 while results #2 and #3 were summaries, and scoring the last one
+    gave BLEU 0.010 against arm B's 1.000 on the same task. That is the A/B
+    comparison being decided by transcript shape rather than by routing, which
+    is the one failure this bench cannot afford.
+
+    So: the answer is the most recent turn that answered in the requested
+    form. Not "the turn with the best block" — the LAST one, so a model that
+    corrects itself is still taken at its latest word — and never a
+    subagent's block (`answer_turns` filters those out), which would score a
+    worker's report as the agent's answer."""
+    turns = answer_turns(events)
+    for text in reversed(turns):
+        if fenced_blocks(text):
+            return text
+    return turns[-1] if turns else ""
 
 
 # --- fenced code blocks -------------------------------------------------------
@@ -142,10 +185,23 @@ _OPEN_FENCE = re.compile(r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})[ \t]*"
                          r"(?P<info>[^`]*)$")
 
 
-def _strip_indent(line: str, width: int) -> str:
-    """Drop up to `width` leading blanks — CommonMark's fenced-block rule."""
+def _strip_indent(line: str, indent: str) -> str:
+    """Remove the opening fence's indentation from one body line.
+
+    A tab is never split. CommonMark expands tabs to four-column stops and
+    will happily consume part of one, but doing that here means rewriting a
+    tab as spaces — and for a tab-indented language (every Go needle in
+    RepoQA) that is the difference between BLEU 1.0 and a fail. Worse, the
+    naive "drop up to N leading blanks" version counted a tab as ONE blank, so
+    a fence indented two spaces around tab-indented Go ate the code's own
+    indentation entirely and flattened the body.
+
+    So: strip the fence's own indent when the line actually starts with it,
+    and otherwise strip leading SPACES only, stopping at the first tab."""
+    if indent and line.startswith(indent):
+        return line[len(indent):]
     n = 0
-    while n < width and n < len(line) and line[n] in " \t":
+    while n < len(indent) and n < len(line) and line[n] == " ":
         n += 1
     return line[n:]
 
@@ -172,7 +228,7 @@ def fenced_blocks(text: str) -> list[tuple[str, str]]:
             i += 1
             continue
         fence, info = m.group("fence"), m.group("info")
-        width = len(m.group("indent"))
+        indent = m.group("indent")
         lang = (info.split() or [""])[0]
         char, size = fence[0], len(fence)
         body: list[str] = []
@@ -184,7 +240,7 @@ def fenced_blocks(text: str) -> list[tuple[str, str]]:
                 closed = True
                 i += 1
                 break
-            body.append(_strip_indent(lines[i], width))
+            body.append(_strip_indent(lines[i], indent))
             i += 1
         out.append((lang, "\n".join(body).strip("\n")))
         if not closed:
@@ -282,7 +338,7 @@ def require_workdir(task: Mapping[str, Any]) -> Path:
     if not path.is_dir():
         raise BenchFamilyError(
             f"the workdir for run {task.get('id')!r} is gone: {path}. "
-            "bench/work/workdirs/ was probably cleaned between the run and "
+            "bench/work/.workdirs/ was probably cleaned between the run and "
             "the verify.")
     return path
 

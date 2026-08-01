@@ -17,11 +17,15 @@ A verifier that raises is recorded as `"status": "error"` on that one run and
 the walk continues. One instance with no arm64 image, or a docker daemon that
 died halfway, should not cost a whole matrix its scores.
 
-`--force` re-runs a family's verify() on runs already marked verified. For
-repoqa that genuinely re-scores; for swebench the harness short-circuits on an
-existing report.json for the same run id, so a forced re-verify replays the
-previous grading rather than repeating an hour of docker. Delete the run's
-swebench-eval/ directory if you want the eval done again for real.
+`--force` re-runs a family's verify() on runs already marked verified, and it
+means it: swebench.verify() deletes the run's swebench-eval/ before it does
+anything else, so a forced re-verify is a FULL docker evaluation again —
+minutes per instance, emulated on Apple Silicon, and one more ~2GB image pull
+at the harness's default --cache_level env. That deletion is not an
+optimisation to be tuned away: swebench's run_instance() short-circuits on an
+existing report.json for the same run id, so without it a retry would silently
+replay the PREVIOUS attempt's grade against the new agent's patch. Force one
+run at a time (--tasks/--arms) rather than a whole matrix.
 
 stdlib only.
 """

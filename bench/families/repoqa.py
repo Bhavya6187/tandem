@@ -60,7 +60,8 @@ from typing import Any, Mapping
 
 from family_api import PromptSpec
 from family_common import (BenchFamilyError, cache_dir, cached_fetch, clone_at,
-                           error_verdict, fenced_blocks, final_answer,
+                           error_verdict, fenced_blocks,
+                           final_answer_with_block,
                            github_url, read_events, refence, run_cmd, verdict)
 
 RELEASE_VERSION = "2024-06-23"
@@ -333,7 +334,8 @@ def verify(task: Mapping[str, Any], rundir: str) -> dict:
     try:
         require_pins(task)
         sel = select_needle(load_release(), task)
-        answer = final_answer(read_events(Path(rundir) / "transcript.jsonl"))
+        answer = final_answer_with_block(
+            read_events(Path(rundir) / "transcript.jsonl"))
         row = scorer_row(sel, answer)
         blocks = fenced_blocks(answer)
 

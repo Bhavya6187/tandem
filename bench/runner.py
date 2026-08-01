@@ -72,6 +72,18 @@ REQUIRED_FIELDS = {
 LCA_SCHEMA = ("hub_row_index", "repo", "base_sha", "head_sha",
               "expected_files", "f1_threshold")
 
+# Where the provisioners clone. The leading dot is load-bearing, not style:
+# bench/work/ sits under the repo root and fills up with checkouts of other
+# people's repositories, tests and conftest.py files included, so a plain
+# `uv run pytest` walks straight into them. Live, after the first smoke run,
+# two checkouts of psf/black gave pytest two files both claiming to be
+# `tests.conftest` and collection died before a single tandem test ran.
+# pytest's default norecursedirs skips `.*`, which fixes it with no config
+# change (bench/ must not touch pyproject.toml) and no extra conftest.py —
+# and an extra conftest.py is itself a trap here, because tests/ has no
+# __init__.py and a second one would win the module name `conftest`.
+WORKDIRS_DIR = ".workdirs"
+
 DEFAULT_TIMEOUT_S = 900
 # claude flags the extraction depends on; not configurable from tasks.toml.
 STREAM_FLAGS = ("--output-format", "stream-json", "--verbose",
@@ -412,7 +424,11 @@ def extract_transcript(events: Iterable[dict]) -> dict:
         "tokens": _tokens(last, events),
         "cost_usd": float(last.get("total_cost_usd") or 0.0),
         "duration_ms": int(last.get("duration_ms") or 0),
-        "num_turns": int(last.get("num_turns") or 0),
+        # SUMMED, unlike cost and modelUsage on the same event: claude reports
+        # num_turns per result event, and an async dispatch emits one result
+        # per turn. Live in SMOKE1 arm A that was 11, 1, 1 — reading the last
+        # one filed a 13-turn session as a 1-turn one.
+        "num_turns": sum(int(r.get("num_turns") or 0) for r in results),
         "result_events": len(results),
         "result_subtype": last.get("subtype") or "",
         "result_is_error": bool(last.get("is_error")),
@@ -682,6 +698,27 @@ def docker_ok() -> tuple[bool, str]:
     return True, f"docker {p.stdout.strip()}"
 
 
+def ensure_work_dir(work: Path | str) -> Path:
+    """Create --work-dir, and clear a seal an older runner used to write.
+
+    bench/work/ used to be sealed against pytest with a `collect_ignore_glob`
+    conftest.py. That cure was worse than the disease: tests/ has no
+    __init__.py, so `from conftest import ...` resolves through sys.path, and a
+    second conftest.py anywhere under the rootdir wins the name `conftest` and
+    breaks every bench test's import. The clones now live in a dot-directory
+    instead (WORKDIRS_DIR), which pytest's default norecursedirs skips without
+    any config at all."""
+    work = Path(work)
+    work.mkdir(parents=True, exist_ok=True)
+    stale = work / "conftest.py"
+    try:
+        if stale.is_file() and "collect_ignore_glob" in stale.read_text():
+            stale.unlink()
+    except OSError:
+        pass
+    return work
+
+
 def ensure_tandem_homes(work: Path) -> dict[str, Path]:
     """Create (and re-assert) the two bench-owned TANDEM_HOMEs.
 
@@ -892,7 +929,7 @@ class RunContext:
 def run_one(ctx: RunContext, task: dict, arm: str, repeat: int) -> dict:
     a = ctx.args
     rel = Path(ctx.run_id) / task["id"] / arm / str(repeat)
-    workdir = ctx.work / "workdirs" / rel
+    workdir = ctx.work / WORKDIRS_DIR / rel
     resultdir = ctx.work / "results" / rel
     workdir.mkdir(parents=True, exist_ok=True)
     resultdir.mkdir(parents=True, exist_ok=True)
@@ -997,8 +1034,7 @@ def do_run(args, tasks: list[dict], arms: list[str], cfg: BenchConfig) -> int:
         if not ok:
             raise BenchError(why)
 
-    work = Path(os.path.realpath(args.work_dir))
-    work.mkdir(parents=True, exist_ok=True)
+    work = ensure_work_dir(os.path.realpath(args.work_dir))
     homes = ensure_tandem_homes(work)
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     repeats = int(args.repeats or cfg.run.get("repeats") or 1)
@@ -1110,7 +1146,7 @@ def main(argv: list[str] | None = None) -> int:
         # realpath once, here, so the pairing, the TANDEM_HOME the hook reads
         # and the cwd claude is handed are all the same string (PAIRING.md #1)
         try:
-            Path(args.work_dir).mkdir(parents=True, exist_ok=True)
+            ensure_work_dir(args.work_dir)
         except OSError as exc:
             raise BenchError(f"cannot create --work-dir {args.work_dir}: {exc}")
         args.work_dir = os.path.realpath(args.work_dir)

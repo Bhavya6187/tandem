@@ -293,6 +293,9 @@ Dependencies are deliberately small: `click` (CLI), `pydantic` v2 (event
 schema), `watchdog` (transcript tailing), `pexpect`/ptyprocess (PTY
 passthrough); state is stdlib `sqlite3`.
 
+[`bench/README.md`](bench/README.md) — the A/B harness that runs a task twice,
+with subagent reroute on and off, and scores both.
+
 ## License
 
 [MIT](https://github.com/Bhavya6187/tandem/blob/main/LICENSE)

@@ -191,3 +191,36 @@ evidence — the controller decides between a pty driver and a manual step.
 Branch + squash-merge PR to main per repo conventions. The PR body includes
 the smoke-run table as evidence. Running the full 10-task matrix is NOT part
 of this plan (cost is the operator's call); the README documents it.
+
+## Deviations (recorded during Task 4's live smoke, 2026-08-01)
+
+The smoke was the arbiter and it forced two design changes. Recorded here
+rather than edited into the tasks above.
+
+1. **"The agent's answer is the last `result` event" was wrong for arm A.**
+   Task 3 resolved it that way from a fixture where the FIRST result was only
+   "Agent dispatched. Waiting for it to complete." Live, a rerouted
+   `tandem:codex-worker` dispatch launches ASYNC, so the main agent answers in
+   full and *then* each worker's completion notification drives another turn
+   whose result is a bare acknowledgement. In smoke run SMOKE1 arm A the
+   correct, correctly fenced answer sat in result #1 and was scored 0.010
+   against arm B's 1.000 — the A/B decided by transcript shape rather than by
+   routing. The rule is now: the newest turn that contains a fenced block
+   (`family_common.final_answer_with_block`), main-agent turns only —
+   subagent output is streamed into the same transcript with
+   `parent_tool_use_id` and must never be scored as the agent's answer.
+   Re-verifying the same SMOKE1 transcripts under the new rule: 0.010 → 1.000.
+
+2. **Clones moved to `bench/work/.workdirs/`.** `bench/work/` sits under the
+   repo root, so `uv run pytest` walked into every provisioned checkout; two
+   clones of psf/black gave pytest two files both claiming to be
+   `tests.conftest` and collection died before a single tandem test ran. A
+   dot-directory is skipped by pytest's default `norecursedirs` with no config
+   change (the plan forbids touching pyproject.toml) and no extra conftest.py
+   (which would itself break `from conftest import ...` in tests/).
+
+One authorized exception to the global constraints: Task 4's brief authorized
+installing the tandem plugin into the operator's claude config so the smoke
+could run, and it is left installed. No harness code installs, enables or
+mutates anything in the user's claude config — `claude plugin list` is still
+read-only and `runner.py check` still refuses to run rather than fixing it.
