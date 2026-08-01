@@ -390,13 +390,16 @@ def _mark_warned(stamp: Path | None) -> None:
         stamp.parent.mkdir(parents=True, exist_ok=True)
         stamp.touch()
         cutoff = time.time() - _WARN_STAMP_TTL
-        stale = [p for p in stamp.parent.iterdir()
-                 if p.stat().st_mtime < cutoff]
+        entries = list(stamp.parent.iterdir())
     except OSError:
         return
-    for p in stale:
+    for p in entries:
+        # per entry: one unreadable stamp (dangling symlink, vanished
+        # mid-pass) must not abort the prune and strand every other one.
+        # lstat, since a dangling link has no stat to follow.
         try:
-            p.unlink()
+            if p.lstat().st_mtime < cutoff:
+                p.unlink()
         except OSError:
             pass
 
@@ -447,6 +450,10 @@ def hook_route_cmd() -> None:
                 payload, cfg,
                 has_session=session is not None, codex_ok=codex_ok,
                 already_warned=_already_warned(stamp))
+            # Accepted race: check and stamp are not atomic, so concurrent
+            # first dispatches in one session can each print. Claiming the
+            # stamp first (O_EXCL) would instead spend the session's single
+            # notice on a caller that never got to print it.
             if notice is not None:
                 click.echo(json.dumps(notice))
                 _mark_warned(stamp)     # only ever stamp what we printed

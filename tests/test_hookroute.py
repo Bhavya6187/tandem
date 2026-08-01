@@ -4,6 +4,8 @@ Failure discipline: any problem -> None (native dispatch), CLI always exit 0."""
 import json
 from pathlib import Path
 
+import pytest
+
 from tandem import paths
 from tandem.config import SubagentsConfig
 from tandem.hookroute import (
@@ -290,6 +292,29 @@ class TestCliNotice:
             assert json.loads(r.output) == {"systemMessage": NOTICE_NO_SESSION}
         assert not (tmp_path / ".tandem" / "warned").exists()
 
+    @pytest.mark.parametrize("bad_id", ["../../evil", "..", "a/b"])
+    def test_hostile_session_id_never_becomes_a_path(
+            self, tmp_path, monkeypatch, bad_id):
+        """`session_id` is untrusted payload text that names a file, so the
+        id filter is the whole security boundary here. A rejected id must
+        degrade like a missing one: warn (every time — nothing suppresses
+        it), exit 0, and write nothing inside or outside TANDEM_HOME."""
+        home = tmp_path / "home"            # `warned/../../x` escapes to here
+        monkeypatch.setenv("TANDEM_HOME", str(home / ".tandem"))
+        payload = _payload()
+        payload["cwd"] = str(tmp_path)      # no paired session here
+        payload["session_id"] = bad_id
+        for _ in range(2):  # unstampable => no suppression, warns again
+            r = _run_hook(payload)
+            assert r.exit_code == 0
+            assert json.loads(r.output) == {"systemMessage": NOTICE_NO_SESSION}
+        warned = home / ".tandem" / "warned"
+        assert not warned.exists() or not list(warned.iterdir())
+        # nothing was created at the traversal target, or anywhere else
+        # outside the tandem home the stamp path was supposed to stay in
+        assert not (home / "evil").exists()
+        assert [p.name for p in home.iterdir()] == [".tandem"]
+
     def test_stamps_are_pruned_after_a_week(self, tmp_path, monkeypatch):
         import os
         payload = self._unpaired(tmp_path, monkeypatch)
@@ -301,3 +326,19 @@ class TestCliNotice:
         _run_hook(payload)
         assert not stale.exists()
         assert (warned / "s-1").exists()
+
+    def test_one_broken_stamp_does_not_stop_the_prune(
+            self, tmp_path, monkeypatch):
+        # a dangling symlink has no stat() to follow; pruning it must stay a
+        # per-entry failure rather than stranding every other stale stamp
+        import os
+        payload = self._unpaired(tmp_path, monkeypatch)
+        warned = tmp_path / ".tandem" / "warned"
+        warned.mkdir(parents=True)
+        (warned / "dangling").symlink_to(tmp_path / "does-not-exist")
+        stale = warned / "s-old"
+        stale.touch()
+        os.utime(stale, (0, 0))
+        r = _run_hook(payload)
+        assert r.exit_code == 0
+        assert not stale.exists()
