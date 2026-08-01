@@ -250,11 +250,21 @@ explains otherwise-invisible behavior. Exit 0 on every path.
   load-bearing, not cosmetic: click's usage-error path exits 2 outside the
   command body (version skew — plugin installed, older tandem on PATH
   lacking the subcommand), and exit 2 blocks the dispatch.
-- Install: local plugin from a clone of this repo for v1 —
-  `claude --plugin-dir /path/to/tandem/plugin` (marketplace later). The
-  wheel packages `src/tandem` only, so `pip install tandem-cli` alone never
-  reroutes anything; the README says so explicitly. Registration is the
-  plugin's entire job; policy lives in tandem config.
+- Install: this repo doubles as its own plugin marketplace
+  (`.claude-plugin/marketplace.json` at the root, marketplace name
+  `tandem`, source `./plugin`), so the user story is two steps —
+  `uv tool install tandem-cli` for the binary, then
+  `claude plugin marketplace add Bhavya6187/tandem` +
+  `claude plugin install tandem@tandem`. The marketplace tracks the repo's
+  default branch, but third-party marketplaces do not auto-update: new
+  versions land only when the user runs `claude plugin marketplace update`
+  (and only if `plugin.json`'s `version` moved — a matching resolved
+  version skips the update). `claude --plugin-dir /path/to/tandem/plugin`
+  from a clone remains the local-development path. The wheel packages
+  `src/tandem` only, so `pip install tandem-cli` alone never reroutes
+  anything, and the plugin without `tandem` on PATH is inert; the README
+  says both explicitly. Registration is the plugin's entire job; policy
+  lives in tandem config.
 
 ### Config (`~/.tandem/config.toml`, new file; `TANDEM_HOME` honored)
 

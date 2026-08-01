@@ -65,13 +65,19 @@ Load tandem's Claude Code plugin and Claude's subagent dispatches run on
 the codex model you choose instead — automatically, with the task brief
 forwarded verbatim and the result returned through Claude's own machinery.
 Claude orchestrates; codex does the legwork; your Claude quota stays on the
-main thread. The plugin lives in this repo (not in the wheel), so point
-Claude at a clone:
+main thread. Two pieces: the `tandem` binary the hook shells out to, and
+the plugin that registers the hook — the plugin lives in this repo, not in
+the wheel, and without the binary on PATH it is inert.
 
 ```bash
-git clone https://github.com/Bhavya6187/tandem
-claude --plugin-dir /path/to/tandem/plugin
+uv tool install tandem-cli                        # the binary the hook drives
+claude plugin marketplace add Bhavya6187/tandem   # this repo, as a marketplace
+claude plugin install tandem@tandem
 ```
+
+The marketplace tracks this repo's default branch, but nothing updates
+behind your back: you pull new versions when you run `claude plugin
+marketplace update` (or `/plugin marketplace update` inside Claude).
 
 Then create `~/.tandem/config.toml` and pick your plan's cheap model (ids
 are listed in `~/.codex/models_cache.json`):
@@ -91,7 +97,13 @@ that one is not, and routing is on as soon as the plugin loads, so
 
 Fork dispatches stay on Claude, each worker's full codex log is kept under
 `~/.tandem/subagents/`, and `tandem status` lists the workers running right
-now. Drop the `--plugin-dir` flag and Claude is byte-for-byte stock again.
+now. The plugin is installed for every Claude session, so in a directory
+with no paired tandem session dispatches simply run natively — the first
+one says so once, then the session stays quiet. `claude plugin uninstall
+tandem@tandem` and Claude is byte-for-byte stock again.
+
+Hacking on the plugin itself? Skip the marketplace and point Claude at your
+clone: `claude --plugin-dir /path/to/tandem/plugin`.
 
 ### 🏠 Every model in its native harness.
 
