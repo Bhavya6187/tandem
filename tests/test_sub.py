@@ -395,5 +395,43 @@ class TestDoctorAndStatus:
              "task_preview": "audit the README", "pid": 1}))
         (sub_root / "rollout-x-1.jsonl").write_text("{}\n")
         r = click.testing.CliRunner().invoke(cli.main, ["status"])
+        assert r.exit_code == 0
         assert "subagent running: gpt-x-mini (task) audit the README" in r.output
         assert "retained forks: 1" in r.output
+
+    def test_doctor_survives_non_object_auth_json(self, env_factory, monkeypatch):
+        """auth.json that is valid JSON but not an object must not crash
+        doctor: `.get` on a list raises AttributeError, not ValueError."""
+        from tandem import paths
+        from tandem.doctor import run_doctor
+        env = env_factory(active="claude")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        auth = paths.codex_home() / "auth.json"
+        auth.parent.mkdir(parents=True, exist_ok=True)
+        auth.write_text("[]")
+        report = run_doctor(env.store, env.session, live=False)
+        assert not any("API-key" in c.message for c in report.checks)
+        assert not any("OPENAI_API_KEY" in c.message for c in report.checks)
+
+    def test_status_skips_non_object_marker(self, env_factory, monkeypatch):
+        """A marker holding valid-but-non-object JSON is skipped, not fatal."""
+        import click.testing
+        from tandem import cli, paths
+        env = env_factory(active="claude")
+        monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
+        monkeypatch.setattr(
+            cli, "_check_versions",
+            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+        )
+        run_dir = (paths.tandem_home() / "subagents" / env.session.tandem_id
+                   / "running")
+        run_dir.mkdir(parents=True)
+        # sorts first, so it would crash before the good marker is reached
+        (run_dir / "bad.json").write_text('"3"')
+        (run_dir / "good.json").write_text(json.dumps(
+            {"model": "gpt-x-mini", "context": "task",
+             "task_preview": "audit the README", "pid": 1}))
+        r = click.testing.CliRunner().invoke(cli.main, ["status"])
+        assert r.exit_code == 0
+        assert "subagent running: gpt-x-mini (task) audit the README" in r.output
+        assert r.output.count("subagent running:") == 1

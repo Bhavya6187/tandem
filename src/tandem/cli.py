@@ -178,6 +178,8 @@ def status() -> None:
                     d = json.loads(m.read_text())
                 except (OSError, ValueError):
                     continue
+                if not isinstance(d, dict):
+                    continue  # non-object marker: skip it, never traceback
                 click.echo(
                     f"  subagent running: {d.get('model') or 'default-model'} "
                     f"({d.get('context')}) {d.get('task_preview', '')}"

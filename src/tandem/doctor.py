@@ -249,13 +249,16 @@ def _subagent_checks(report: DoctorReport, session) -> None:
     auth_path = paths.codex_home() / "auth.json"
     try:
         auth = json.loads(auth_path.read_text())
-        if auth.get("OPENAI_API_KEY") and not auth.get("tokens"):
-            report.warn(
-                "subagents: codex auth is API-key based — subagent runs "
-                "will bill the API, not the subscription"
-            )
     except (OSError, ValueError):
-        pass
+        auth = None
+    # valid JSON that is not an object would make .get raise AttributeError,
+    # which no doctor check may do: an unreadable auth.json is a skipped
+    # check, never a traceback.
+    if isinstance(auth, dict) and auth.get("OPENAI_API_KEY") and not auth.get("tokens"):
+        report.warn(
+            "subagents: codex auth is API-key based — subagent runs "
+            "will bill the API, not the subscription"
+        )
     claude_md = Path(session.cwd) / "CLAUDE.md"
     try:
         if "tandem:shared:begin" not in claude_md.read_text():

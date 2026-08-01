@@ -1367,8 +1367,46 @@ class TestDoctorAndStatus:
              "task_preview": "audit the README", "pid": 1}))
         (sub_root / "rollout-x-1.jsonl").write_text("{}\n")
         r = click.testing.CliRunner().invoke(cli.main, ["status"])
+        assert r.exit_code == 0
         assert "subagent running: gpt-x-mini (task) audit the README" in r.output
         assert "retained forks: 1" in r.output
+
+    def test_doctor_survives_non_object_auth_json(self, env_factory, monkeypatch):
+        """auth.json that is valid JSON but not an object must not crash
+        doctor: `.get` on a list raises AttributeError, not ValueError."""
+        from tandem import paths
+        from tandem.doctor import run_doctor
+        env = env_factory(active="claude")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        auth = paths.codex_home() / "auth.json"
+        auth.parent.mkdir(parents=True, exist_ok=True)
+        auth.write_text("[]")
+        report = run_doctor(env.store, env.session, live=False)
+        assert not any("API-key" in c.message for c in report.checks)
+        assert not any("OPENAI_API_KEY" in c.message for c in report.checks)
+
+    def test_status_skips_non_object_marker(self, env_factory, monkeypatch):
+        """A marker holding valid-but-non-object JSON is skipped, not fatal."""
+        import click.testing
+        from tandem import cli, paths
+        env = env_factory(active="claude")
+        monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
+        monkeypatch.setattr(
+            cli, "_check_versions",
+            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+        )
+        run_dir = (paths.tandem_home() / "subagents" / env.session.tandem_id
+                   / "running")
+        run_dir.mkdir(parents=True)
+        # sorts first, so it would crash before the good marker is reached
+        (run_dir / "bad.json").write_text('"3"')
+        (run_dir / "good.json").write_text(json.dumps(
+            {"model": "gpt-x-mini", "context": "task",
+             "task_preview": "audit the README", "pid": 1}))
+        r = click.testing.CliRunner().invoke(cli.main, ["status"])
+        assert r.exit_code == 0
+        assert "subagent running: gpt-x-mini (task) audit the README" in r.output
+        assert r.output.count("subagent running:") == 1
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1397,13 +1435,16 @@ def _subagent_checks(report: DoctorReport, session) -> None:
     auth_path = paths.codex_home() / "auth.json"
     try:
         auth = json.loads(auth_path.read_text())
-        if auth.get("OPENAI_API_KEY") and not auth.get("tokens"):
-            report.warn(
-                "subagents: codex auth is API-key based — subagent runs "
-                "will bill the API, not the subscription"
-            )
     except (OSError, ValueError):
-        pass
+        auth = None
+    # valid JSON that is not an object would make .get raise AttributeError,
+    # which no doctor check may do: an unreadable auth.json is a skipped
+    # check, never a traceback.
+    if isinstance(auth, dict) and auth.get("OPENAI_API_KEY") and not auth.get("tokens"):
+        report.warn(
+            "subagents: codex auth is API-key based — subagent runs "
+            "will bill the API, not the subscription"
+        )
     claude_md = Path(session.cwd) / "CLAUDE.md"
     try:
         if "tandem:shared:begin" not in claude_md.read_text():
@@ -1424,13 +1465,13 @@ In `src/tandem/cli.py` `status()`, after the quarantine block:
         sub_root = paths.tandem_home() / "subagents" / session.tandem_id
         run_dir = sub_root / "running"
         if run_dir.is_dir():
-            import json as _json
-
             for m in sorted(run_dir.glob("*.json")):
                 try:
-                    d = _json.loads(m.read_text())
+                    d = json.loads(m.read_text())
                 except (OSError, ValueError):
                     continue
+                if not isinstance(d, dict):
+                    continue  # non-object marker: skip it, never traceback
                 click.echo(
                     f"  subagent running: {d.get('model') or 'default-model'} "
                     f"({d.get('context')}) {d.get('task_preview', '')}"
