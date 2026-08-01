@@ -33,6 +33,30 @@ def load_bench_module(name):
     return mod
 
 
+def load_bench_shared(name):
+    """Import a bench/ module under its REAL name, the way a family does.
+
+    `load_bench_module` aliases modules as `bench_<name>` so the runner and the
+    tests cannot collide. For family_api/family_common that aliasing is wrong:
+    the family modules do a plain `from family_common import ...`, so an
+    aliased copy would be a second, distinct module — and a test asserting
+    `pytest.raises(common.BenchFamilyError)` would then be asserting on a class
+    the family never raises."""
+    if str(BENCH_DIR) not in sys.path:
+        sys.path.insert(0, str(BENCH_DIR))
+    return importlib.import_module(name)
+
+
+def load_bench_family(name):
+    """Import bench/families/<name>.py the way runner.load_family does.
+
+    Goes through the runner rather than reimplementing the path dance so that
+    the tests exercise the same loader the bench uses — including the sys.path
+    entry the family modules need for `from family_api import ...`."""
+    runner = load_bench_module("runner")
+    return runner.load_family(name, runner.DEFAULT_FAMILY_DIR)
+
+
 def bench_stream(name):
     """One of the live-captured stream-json fixtures, as a list of events."""
     with open(BENCH_FIXTURES / f"stream-{name}.jsonl") as fh:
@@ -187,6 +211,32 @@ class Env:
                      transcript or self.source_file, engine),
             engine,
         )
+
+
+@pytest.fixture(autouse=True)
+def _no_network_and_a_scratch_bench_cache(tmp_path, monkeypatch):
+    """Every test runs offline, with a throwaway bench cache.
+
+    The bench provisioners download dataset rows and clone repos, so it is one
+    careless fixture away from a unit test that quietly pulls 25MB off GitHub
+    and passes only on a machine with a network — which is exactly what
+    happened the first time bench/tasks.toml's lca rows were pinned and two
+    Task 2 tests kept using them as their "unrunnable task" example.
+
+    urlopen is the chokepoint (bench/family_common.http_get is the only thing
+    in the repo that opens a URL, and nothing under src/tandem does), so
+    failing it loudly here turns "accidentally online" from a silent pass into
+    a named error. BENCH_CACHE_DIR keeps anything a test does provision out of
+    the developer's real bench/work/cache."""
+    monkeypatch.setenv("BENCH_CACHE_DIR", str(tmp_path / "bench-cache"))
+
+    def blocked(*a, **kw):
+        raise AssertionError(
+            "a unit test tried to open a URL. Network access belongs in the "
+            "live-validation scripts, not in tests/ — use a fixture or inject "
+            "a fake fetcher (see family_common.cached_fetch's `fetcher` arg).")
+
+    monkeypatch.setattr("urllib.request.urlopen", blocked)
 
 
 @pytest.fixture

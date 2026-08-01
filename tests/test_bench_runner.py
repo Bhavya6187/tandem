@@ -227,9 +227,37 @@ def test_check_needs_docker_for_swebench_tasks(rig, monkeypatch, capsys):
     assert "docker" in capsys.readouterr().out.lower()
 
 
-def test_check_reports_unrunnable_lca_tasks(rig, capsys):
+UNPINNED_LCA = """\
+[run]
+[[tasks]]
+id = "lca-1"
+family = "lca"
+dataset = "JetBrains-Research/lca-bug-localization"
+hub_row_index = -1
+repo = ""
+base_sha = ""
+head_sha = ""
+expected_files = []
+f1_threshold = 0.5
+"""
+
+
+@pytest.fixture
+def unpinned_tasks(tmp_path):
+    """A tasks.toml whose lca row is still a placeholder.
+
+    The shipped bench/tasks.toml used to be this, and these tests used it
+    directly. Task 3 pinned the real rows, which made "run the shipped lca-2"
+    mean "clone tweepy over the network from inside a unit test" — so the
+    unrunnable example is now built here instead of borrowed."""
+    p = tmp_path / "unpinned.toml"
+    p.write_text(UNPINNED_LCA)
+    return p
+
+
+def test_check_reports_unrunnable_lca_tasks(rig, unpinned_tasks, capsys):
     rc = runner.main(["check", *rig.argv(
-        "--tasks-file", str(BENCH_DIR / "tasks.toml"),
+        "--tasks-file", str(unpinned_tasks),
         "--tasks", "lca-1", "--family-dir", str(runner.DEFAULT_FAMILY_DIR))])
     assert rc != 0
     assert "lca-1" in capsys.readouterr().out
@@ -440,13 +468,13 @@ def test_dry_run_plans_without_launching(rig, capsys):
     assert "fake-1" in capsys.readouterr().out
 
 
-def test_run_refuses_an_unrunnable_task(rig, capsys):
+def test_run_refuses_an_unrunnable_task(rig, unpinned_tasks, capsys):
     rc = runner.main(["run", *rig.argv(
         "--run-id", "t1", "--arms", "b",
-        "--tasks-file", str(BENCH_DIR / "tasks.toml"),
-        "--family-dir", str(runner.DEFAULT_FAMILY_DIR), "--tasks", "lca-2")])
+        "--tasks-file", str(unpinned_tasks),
+        "--family-dir", str(runner.DEFAULT_FAMILY_DIR), "--tasks", "lca-1")])
     assert rc != 0
-    assert "lca-2" in both(capsys)
+    assert "lca-1" in both(capsys)
 
 
 def test_run_id_defaults_to_a_timestamp(rig):
@@ -527,12 +555,22 @@ def test_kill_group_still_tries_sigkill_after_a_failed_sigterm(monkeypatch):
 
 
 @pytest.mark.parametrize("family", ["swebench", "repoqa", "lca"])
-def test_real_family_stubs_are_declared_but_not_implemented(family):
+def test_real_families_refuse_an_unpinned_task_without_touching_the_network(family):
+    """Every family checks its pins before it downloads anything.
+
+    This was "the stubs raise NotImplementedError" until Task 3 implemented
+    them. What has to stay true is the shape it was really protecting: an
+    unpinned task fails loudly and cheaply, rather than fetching a dataset and
+    then discovering there is nothing to run. No network here — if one of these
+    ever reached out, this test would be the thing that hangs."""
     mod = runner.load_family(family, runner.DEFAULT_FAMILY_DIR)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(Exception) as exc:
         mod.provision({"id": "x", "family": family}, "/tmp/nope")
-    with pytest.raises(NotImplementedError):
-        mod.verify({"id": "x", "family": family}, "/tmp/nope")
+    assert "x" in str(exc.value)
+    # verify() never raises: an unscoreable run is a verdict, not a crash
+    v = mod.verify({"id": "x", "family": family, "_workdir": "/tmp/nope"},
+                   "/tmp/nope")
+    assert v["status"] == "error" and v["passed"] is None
 
 
 def test_known_families_matches_the_canonical_tuple():

@@ -65,14 +65,30 @@ def test_repoqa_fields(cfg):
     ]
 
 
-def test_lca_placeholder_schema(cfg):
+def test_lca_rows_are_pinned(cfg):
+    """The pin Task 3 made, live, against the datasets-server.
+
+    Was "these are still empty placeholders" until Task 3 filled them. The
+    shas and the ground-truth file lists are the whole reproducibility story
+    for this family — an edit here silently changes what is being measured, so
+    it has to be a deliberate change to this test too."""
     tasks = [t for t in cfg.tasks if t["family"] == "lca"]
     for t in tasks:
         assert set(runner.LCA_SCHEMA) <= set(t)
         assert t["f1_threshold"] == 0.5
-        # unfilled by construction: Task 3 pins the real rows
-        assert t["repo"] == ""
-        assert t["expected_files"] == []
+        assert t["hub_config"] == "py" and t["hub_split"] == "test"
+        assert len(t["base_sha"]) == 40 and len(t["head_sha"]) == 40
+        assert len(t["expected_files"]) >= 2
+        assert all("/" in f and not f.startswith("/") for f in t["expected_files"])
+    assert [(t["hub_row_index"], t["repo"]) for t in tasks] == [
+        (42, "pre-commit/pre-commit"),
+        (44, "tweepy/tweepy"),
+    ]
+    assert tasks[0]["expected_files"] == [
+        "pre_commit/languages/helpers.py", "pre_commit/languages/node.py",
+        "pre_commit/languages/ruby.py", "tests/languages/helpers_test.py"]
+    assert tasks[1]["expected_files"] == [
+        "tweepy/binder.py", "tweepy/cursor.py", "tweepy/parsers.py"]
 
 
 def test_run_defaults(cfg):
@@ -87,6 +103,27 @@ def test_run_defaults(cfg):
 def test_timeout_for_every_family(cfg):
     for fam in runner.FAMILIES:
         assert runner.timeout_for(cfg, fam) > 0
+
+
+def test_pinned_tool_versions_match_the_verifiers_that_run_them(cfg):
+    """[tools] is the operator-facing record of what the verifiers shell out to.
+
+    A record kept by hand next to the code it describes is a record that goes
+    stale, so it is asserted against the constants the verifiers actually use.
+    Bump one, and this fails until the other is bumped too."""
+    import tomllib
+
+    with open(BENCH_DIR / "tasks.toml", "rb") as fh:
+        tools = tomllib.load(fh)["tools"]
+    swebench = runner.load_family("swebench", runner.DEFAULT_FAMILY_DIR)
+    repoqa = runner.load_family("repoqa", runner.DEFAULT_FAMILY_DIR)
+    assert tools["swebench"] == swebench.SWEBENCH_PIN
+    assert tools["repoqa"] == repoqa.REPOQA_PIN
+    assert tools["repoqa_tree_sitter"] == repoqa.TREE_SITTER_PIN
+    assert tools["repoqa_release"] == repoqa.RELEASE_VERSION
+    # and they are what the commands actually carry
+    assert tools["swebench"] in swebench.HARNESS_CMD
+    assert tools["repoqa_tree_sitter"] in repoqa.SCORER_CMD
 
 
 # --- selection ---------------------------------------------------------------
@@ -110,25 +147,22 @@ def test_select_unknown_task_names_it(cfg):
 # --- runnability -------------------------------------------------------------
 
 
-def test_swebench_and_repoqa_are_runnable(cfg):
+def test_every_pinned_task_is_runnable(cfg):
     for t in cfg.tasks:
-        if t["family"] != "lca":
-            assert runner.task_runnable(t) == (True, "")
+        assert runner.task_runnable(t) == (True, ""), t["id"]
 
 
-def test_unfilled_lca_is_not_runnable_with_a_clear_message(cfg):
-    t = next(t for t in cfg.tasks if t["family"] == "lca")
+def test_an_unfilled_lca_pin_is_still_refused_with_a_clear_message(cfg):
+    """The shipped rows are pinned now, so blank one out to check the guard.
+
+    It is the message a future re-pin lands on, and the only thing standing
+    between an empty expected_files and a run that scores everything zero."""
+    t = dict(next(t for t in cfg.tasks if t["family"] == "lca"),
+             repo="", expected_files=[], hub_row_index=-1)
     ok, why = runner.task_runnable(t)
     assert ok is False
     assert "lca-1" in why and "repo" in why
     assert "Task 3" in why or "not pinned" in why
-
-
-def test_filled_lca_becomes_runnable(cfg):
-    t = dict(next(t for t in cfg.tasks if t["family"] == "lca"))
-    t.update(hub_row_index=17, repo="a/b", base_sha="a" * 40, head_sha="b" * 40,
-             expected_files=["src/x.py"])
-    assert runner.task_runnable(t) == (True, "")
 
 
 def test_load_tasks_rejects_unknown_family(tmp_path):

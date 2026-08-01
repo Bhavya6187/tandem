@@ -37,6 +37,25 @@ repoqa = 900
 lca = 900
 
 
+# --- pinned external scorers -------------------------------------------------
+# The two benchmarks with their own scoring code are run as subprocesses in
+# throwaway uv environments (bench/ is stdlib-only and imports neither). These
+# are the versions the verifiers actually invoke; tests/test_bench_config.py
+# asserts this table still matches bench/families/*.py, so the record here can
+# never drift from what runs.
+#
+#   tree_sitter is pinned BECAUSE repoqa 0.1.2 needs it to be: its dependency
+#   tree_sitter_languages 1.10.2 is a C extension built against the
+#   tree-sitter 0.21 API, and a free resolve picks 0.26, where every scoring
+#   run dies in get_parser() with "TypeError: __init__() takes exactly 1
+#   argument (2 given)". Live-verified 2026-08-01.
+[tools]
+swebench = "swebench==4.1.0"
+repoqa = "repoqa"
+repoqa_tree_sitter = "tree-sitter==0.21.3"
+repoqa_release = "2024-06-23"
+
+
 # --- SWE-bench Verified ------------------------------------------------------
 # All five have prebuilt linux/arm64 evaluation images on Docker Hub (verified
 # 2026-08-01), which is what makes them runnable on this machine at all.
@@ -89,9 +108,18 @@ arm64_image = true
 # (language, repo, needle_name); commit_sha, needle path, line span and the
 # description all come from the release json and are cached by the provisioner.
 #
-# 28 of the 600 descriptions leak the needle's own name, which would make the
-# task trivial. The provisioner screens these three and, if one leaks, swaps in
-# its recorded alternate and records the swap here.
+# 28 of the 600 descriptions leak the needle's own name (case-sensitively; 33
+# case-insensitively, which is how the provisioner screens), which would make
+# the task trivial. All three needles below were live-screened against the
+# 2024-06-23 release on 2026-08-01 and are CLEAN, so no swap is active and the
+# alternate_* fields below have never fired.
+#
+# If one ever does leak, the provisioner prefers another clean needle from the
+# SAME repo and language and only then falls back to the alternate_* pin. That
+# order matters here: the typescript and go tasks share one rust alternate, so
+# taking the alternate first could collapse two languages into one. A swap is
+# reported in PromptSpec.meta (needle_swapped / swap_reason) and lands in the
+# run's meta.json; record it here when it happens.
 
 [[tasks]]
 id = "repoqa-python-black"
@@ -131,37 +159,66 @@ alternate_language = "rust"
 
 
 # --- LCA bug localization ----------------------------------------------------
-# PLACEHOLDER, by design. Task 3 picks two mid-sized rows from
-# JetBrains-Research/lca-bug-localization via the HF datasets-server REST API
-# and fills the fields below in place. Until it does, `runner.py` refuses to
-# run these two and says so — the schema is here so that the pin, when it
-# happens, is a diff to this file and nothing else.
+# Two rows of JetBrains-Research/lca-bug-localization, config `py`, split
+# `test` (the 50-row curated split), pinned live on 2026-08-01.
 #
 #   hub_row_index  int    row offset in the dataset split, the reproducible pin
+#   hub_config     str    dataset config (language family)
+#   hub_split      str    dataset split
 #   repo           str    "owner/name" on GitHub
 #   base_sha       str    commit the agent starts from (bug present)
-#   head_sha       str    the fixing commit; ground truth = its changed files
-#   expected_files [str]  ground-truth changed-file paths, repo-relative
+#   head_sha       str    the fixing PR's head; recorded for provenance only —
+#                         the agent never sees it and scoring never needs it
+#   expected_files [str]  ground truth, repo-relative. Verified on a real clone
+#                         as `git diff --name-only base...head` — THREE dots.
+#                         The dataset's own changed_files is the PR's file list
+#                         (the merge-base diff); two-dot base..head also drags
+#                         in whatever landed on master in between, which for
+#                         tweepy is 13 files instead of 3.
 #   f1_threshold   float  pass when set-F1(predicted, expected) >= this
+#
+# Why these two, out of the 25 candidates with >=2 changed files: both clone in
+# under 30MB (pre-commit 6.5MB, tweepy 25MB — the plan's ceiling is ~200MB),
+# both issues are self-contained (a full traceback plus reproduction, no
+# follow-up comments needed), and for both the dataset's changed_files matches
+# the real three-dot diff exactly. Rows where it did not — sanic-org/sanic
+# #1327, whose fix renames a module, so the dataset names the old path and git
+# names the new one — were rejected rather than fudged. Full rationale and the
+# rejected candidates are in the Task 3 report.
 
 [[tasks]]
 id = "lca-1"
 family = "lca"
 dataset = "JetBrains-Research/lca-bug-localization"
-hub_row_index = -1
-repo = ""
-base_sha = ""
-head_sha = ""
-expected_files = []
+hub_config = "py"
+hub_split = "test"
+hub_row_index = 42
+repo = "pre-commit/pre-commit"
+# https://github.com/pre-commit/pre-commit/issues/1658 -> pull/1668
+base_sha = "0c339e0647cd42d80e2cd0e80b0a86cf6571e9a3"
+head_sha = "7f9f66e542395ba743e243bdcd92df4e5500d57d"
+expected_files = [
+    "pre_commit/languages/helpers.py",
+    "pre_commit/languages/node.py",
+    "pre_commit/languages/ruby.py",
+    "tests/languages/helpers_test.py",
+]
 f1_threshold = 0.5
 
 [[tasks]]
 id = "lca-2"
 family = "lca"
 dataset = "JetBrains-Research/lca-bug-localization"
-hub_row_index = -1
-repo = ""
-base_sha = ""
-head_sha = ""
-expected_files = []
+hub_config = "py"
+hub_split = "test"
+hub_row_index = 44
+repo = "tweepy/tweepy"
+# https://github.com/tweepy/tweepy/issues/1261 -> pull/1262
+base_sha = "7d17d6c54ff2a9e4bdef927d19c993a08c7c8b8c"
+head_sha = "3c4512993cc5c57fa444d17e5603b0177aeee3ef"
+expected_files = [
+    "tweepy/binder.py",
+    "tweepy/cursor.py",
+    "tweepy/parsers.py",
+]
 f1_threshold = 0.5
