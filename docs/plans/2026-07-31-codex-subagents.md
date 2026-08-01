@@ -1334,6 +1334,24 @@ Append to `tests/test_sub.py`:
 
 ```python
 class TestDoctorAndStatus:
+    def test_doctor_warns_when_no_model_is_configured(self, env_factory,
+                                                      monkeypatch):
+        """The shipped defaults are route="all" + model="" — everything is
+        rerouted, but with no `-m` the worker runs on the codex account's
+        default, which is the frontier tier (S1: gpt-5.6-sol)."""
+        from tandem import paths
+        from tandem.doctor import run_doctor
+        env = env_factory(active="claude")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        report = run_doctor(env.store, env.session, live=False)
+        assert any("no model configured" in c.message for c in report.checks
+                   if c.status == "warn")
+        (paths.tandem_home() / "config.toml").write_text(
+            '[subagents]\nmodel = "gpt-5.6-luna"\n')
+        report = run_doctor(env.store, env.session, live=False)
+        assert not any("no model configured" in c.message
+                       for c in report.checks)
+
     def test_doctor_warns_on_api_key_env(self, env_factory, monkeypatch):
         from tandem.doctor import run_doctor
         env = env_factory(active="claude")
@@ -1420,13 +1438,26 @@ Append to `src/tandem/doctor.py` (add `import os` to module imports), and call `
 
 ```python
 def _subagent_checks(report: DoctorReport, session) -> None:
-    """Subagent routing hygiene: billing follows codex auth, and codex
-    workers only see CLAUDE.md content inside the tandem:shared block."""
+    """Subagent routing hygiene: routing is on by default but the model is
+    not chosen for you, billing follows codex auth, and codex workers only
+    see CLAUDE.md content inside the tandem:shared block."""
     from . import paths
     from .config import load_subagents_config
 
-    if load_subagents_config().route == "off":
+    cfg = load_subagents_config()
+    if cfg.route == "off":
         return
+    # model="" means no `-m`, i.e. the codex account default — the frontier
+    # tier on every plan seen so far. Combined with the route="all" default
+    # that silently sends every dispatch to the most expensive model, so it
+    # is a warning, not a note. The dataclass default stays empty on
+    # purpose: a baked-in id would 400 on accounts that lack it.
+    if not cfg.model:
+        report.warn(
+            "subagents: no model configured — workers will use your codex "
+            "account's default (set [subagents] model in "
+            "~/.tandem/config.toml to a cheap tier)"
+        )
     if os.environ.get("OPENAI_API_KEY"):
         report.warn(
             "subagents: OPENAI_API_KEY is set — codex may bill the API "

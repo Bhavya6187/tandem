@@ -61,27 +61,33 @@ tandem run --on codex "second opinion: why is this test flaky?"
 
 ### 🐣 Subagents on the cheap model.
 
-Load tandem's Claude Code plugin and Claude's subagent dispatches run on a
-cheap codex model instead — automatically, with the task brief forwarded
-verbatim and the result returned through Claude's own machinery. Claude
-orchestrates; codex does the legwork; your Claude quota stays on the main
-thread. The plugin lives in this repo (not in the wheel), so point Claude
-at a clone:
+Load tandem's Claude Code plugin and Claude's subagent dispatches run on
+the codex model you choose instead — automatically, with the task brief
+forwarded verbatim and the result returned through Claude's own machinery.
+Claude orchestrates; codex does the legwork; your Claude quota stays on the
+main thread. The plugin lives in this repo (not in the wheel), so point
+Claude at a clone:
 
 ```bash
 git clone https://github.com/Bhavya6187/tandem
 claude --plugin-dir /path/to/tandem/plugin
 ```
 
-Routing policy lives in `~/.tandem/config.toml`, never in prompts:
+Then create `~/.tandem/config.toml` and pick your plan's cheap model (ids
+are listed in `~/.codex/models_cache.json`):
 
 ```toml
 [subagents]
+model = "gpt-5.6-luna"  # ← the whole point: set this
 route = "all"           # all | off
-model = "gpt-5.6-luna"  # any codex model id ("" = codex's own default)
 context = "match"       # match | task | full
 keep_forks = false      # keep each worker's rollout for debugging
 ```
+
+**Without `model`, workers run on your codex account's default model —
+probably not the cheap one.** Every other key above is already the default;
+that one is not, and routing is on as soon as the plugin loads, so
+`tandem doctor` warns until you set it.
 
 Fork dispatches stay on Claude, each worker's full codex log is kept under
 `~/.tandem/subagents/`, and `tandem status` lists the workers running right

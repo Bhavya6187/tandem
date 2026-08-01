@@ -234,13 +234,26 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
 
 
 def _subagent_checks(report: DoctorReport, session) -> None:
-    """Subagent routing hygiene: billing follows codex auth, and codex
-    workers only see CLAUDE.md content inside the tandem:shared block."""
+    """Subagent routing hygiene: routing is on by default but the model is
+    not chosen for you, billing follows codex auth, and codex workers only
+    see CLAUDE.md content inside the tandem:shared block."""
     from . import paths
     from .config import load_subagents_config
 
-    if load_subagents_config().route == "off":
+    cfg = load_subagents_config()
+    if cfg.route == "off":
         return
+    # model="" means no `-m`, i.e. the codex account default — the frontier
+    # tier on every plan seen so far. Combined with the route="all" default
+    # that silently sends every dispatch to the most expensive model, so it
+    # is a warning, not a note. The dataclass default stays empty on
+    # purpose: a baked-in id would 400 on accounts that lack it.
+    if not cfg.model:
+        report.warn(
+            "subagents: no model configured — workers will use your codex "
+            "account's default (set [subagents] model in "
+            "~/.tandem/config.toml to a cheap tier)"
+        )
     if os.environ.get("OPENAI_API_KEY"):
         report.warn(
             "subagents: OPENAI_API_KEY is set — codex may bill the API "

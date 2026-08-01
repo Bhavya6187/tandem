@@ -325,7 +325,12 @@ price of "no forged results" under the documented hook surface.
   "gpt-5.6-luna"` and `thread_settings_applied.model = "gpt-5.6-luna"` in
   the retained rollout, while the account default stayed `gpt-5.6-sol` — no
   per-thread model cache interference. Shipped guidance: `model =
-  "gpt-5.6-luna"` (`gpt-5.4-mini` for the cheapest tier).
+  "gpt-5.6-luna"` (`gpt-5.4-mini` for the cheapest tier). **Setting it is
+  required for the cheap-model promise: without `model`, workers run on
+  your codex account's default model — probably not the cheap one** (here,
+  the frontier `gpt-5.6-sol`). The dataclass default stays `""` on purpose
+  — a baked-in id would 400 on an account that lacks it — so the honesty
+  lives in the docs and in a `tandem doctor` warning instead.
 - **S2** — *fanout feature flag; do spawned workers start cold?* **There is
   no flag to pass on 0.145.** `codex features list` reports `multi_agent`
   as stage `stable`, effective `true` by default; `multi_agent_v2` is

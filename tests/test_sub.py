@@ -370,6 +370,26 @@ class TestDoctorAndStatus:
         assert any("OPENAI_API_KEY" in c.message for c in report.checks
                    if c.status == "warn")
 
+    def test_doctor_warns_when_no_model_is_configured(self, env_factory,
+                                                      monkeypatch):
+        """The shipped defaults are route="all" + model="" — everything is
+        rerouted, but with no `-m` the worker runs on the codex account's
+        default, which is the frontier tier (S1: gpt-5.6-sol). Silently
+        spending frontier money is the one surprise doctor must call out."""
+        from tandem import paths
+        from tandem.doctor import run_doctor
+        env = env_factory(active="claude")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        report = run_doctor(env.store, env.session, live=False)
+        assert any("no model configured" in c.message for c in report.checks
+                   if c.status == "warn")
+        # configuring one silences it
+        (paths.tandem_home() / "config.toml").write_text(
+            '[subagents]\nmodel = "gpt-5.6-luna"\n')
+        report = run_doctor(env.store, env.session, live=False)
+        assert not any("no model configured" in c.message
+                       for c in report.checks)
+
     def test_doctor_nudges_shared_block(self, env_factory, monkeypatch):
         from pathlib import Path
         from tandem.doctor import run_doctor
