@@ -1,0 +1,35 @@
+"""The plugin is static registration only — validate the three files."""
+
+import json
+import re
+from pathlib import Path
+
+PLUGIN = Path(__file__).parent.parent / "plugin"
+
+
+def test_manifest_parses():
+    m = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
+    assert m["name"] == "tandem"
+    assert m["version"]
+
+
+def test_hooks_register_hook_route():
+    h = json.loads((PLUGIN / "hooks" / "hooks.json").read_text())
+    entries = h["hooks"]["PreToolUse"]
+    assert entries[0]["matcher"] == "Agent|Task"
+    cmds = [hk["command"] for hk in entries[0]["hooks"]]
+    # `|| true` is load-bearing: click exits 2 on a usage error (older
+    # tandem on PATH without the subcommand), and exit 2 blocks dispatches
+    assert cmds == ["tandem hook-route || true"]
+
+
+def test_bridge_agent_definition():
+    text = (PLUGIN / "agents" / "codex-worker.md").read_text()
+    front = text.split("---")[1]
+    assert re.search(r"^name:\s*codex-worker\s*$", front, re.M)
+    assert re.search(r"^model:\s*haiku\s*$", front, re.M)
+    assert re.search(r"^tools:\s*Bash\(tandem sub:\*\)\s*$", front, re.M)
+    body = text.split("---", 2)[2]
+    assert "tandem sub" in body
+    assert "verbatim" in body
+    assert "[tandem-sub failed]" in body

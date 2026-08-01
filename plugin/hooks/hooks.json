@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {"type": "command", "command": "tandem hook-route || true"}
+        ]
+      }
+    ]
+  }
+}
