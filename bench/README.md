@@ -119,10 +119,12 @@ bench/work/tandem-home-b/config.toml     [subagents] route = "off"
 ```
 
 Each arm's claude process is launched with `TANDEM_HOME` pointed at its own
-home, so the two arms share no state, no pairings and no subagent logs. The
-runner **rewrites** a home's `config.toml` whenever it finds the wrong `route`
-there (other `[subagents]` keys you add are preserved) — a hand-edit that
-turned the A/B into an A/A would otherwise be invisible in the results.
+home, so the two arms share no state, no pairings and no subagent logs. A
+hand-edit that turned the A/B into an A/A would otherwise be invisible in the
+results, so on every `check`/`run` the runner re-asserts the route: a file with
+the right `route` is left completely alone (any other `[subagents]` keys you
+added survive), and a file with the wrong one is **overwritten whole** — those
+other keys go with it.
 
 ### 2.2 What `pair.py` does — and the boundary of its green light
 
