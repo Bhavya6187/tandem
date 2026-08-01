@@ -124,8 +124,30 @@ def final_answer(events: Iterable[Mapping[str, Any]]) -> str:
 
 # --- fenced code blocks -------------------------------------------------------
 
-_OPEN_FENCE = re.compile(r"^(?P<indent>\s{0,3})(?P<fence>`{3,}|~{3,})[ \t]*"
-                         r"(?P<lang>[^\s`~]*)[ \t]*$")
+# The whole info string is allowed and all but its first token discarded.
+# ```python title=trans.py and ```js {highlight:[1,2]} are both legal openers
+# that models really emit, and a stricter pattern does not merely miss them: the
+# opener is skipped, the CLOSING fence is then read as an opener, and the prose
+# after the block becomes "the answer". A correct answer scored as a wrong one.
+#
+# This cannot misfire on a closing fence, because closings are matched by the
+# state machine below and never by this pattern. Backticks are excluded from the
+# info string (CommonMark forbids them there for backtick fences), which is what
+# keeps a prose line containing `inline code` from opening a block.
+#
+# Indentation is unbounded rather than CommonMark's 3 spaces: a fence nested in
+# a numbered list is indented 4, and reading that as "not a fence" produced an
+# empty extraction and a false no_code_block.
+_OPEN_FENCE = re.compile(r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})[ \t]*"
+                         r"(?P<info>[^`]*)$")
+
+
+def _strip_indent(line: str, width: int) -> str:
+    """Drop up to `width` leading blanks — CommonMark's fenced-block rule."""
+    n = 0
+    while n < width and n < len(line) and line[n] in " \t":
+        n += 1
+    return line[n:]
 
 
 def fenced_blocks(text: str) -> list[tuple[str, str]]:
@@ -135,7 +157,12 @@ def fenced_blocks(text: str) -> list[tuple[str, str]]:
     structural: a longer opening fence legally contains shorter ones, and a
     model that runs out of tokens mid-answer leaves the last block unterminated
     — dropping that block would silently score a truncated-but-correct answer
-    as "no code block"."""
+    as "no code block".
+
+    The body is de-indented by the opening fence's own indent, so a block
+    written inside a list item yields the code as it is in the file rather than
+    the code plus four spaces on every line — which for RepoQA is the
+    difference between a BLEU of 1.0 and a fail."""
     lines = (text or "").splitlines()
     out: list[tuple[str, str]] = []
     i = 0
@@ -144,7 +171,9 @@ def fenced_blocks(text: str) -> list[tuple[str, str]]:
         if not m:
             i += 1
             continue
-        fence, lang = m.group("fence"), m.group("lang")
+        fence, info = m.group("fence"), m.group("info")
+        width = len(m.group("indent"))
+        lang = (info.split() or [""])[0]
         char, size = fence[0], len(fence)
         body: list[str] = []
         i += 1
@@ -155,7 +184,7 @@ def fenced_blocks(text: str) -> list[tuple[str, str]]:
                 closed = True
                 i += 1
                 break
-            body.append(lines[i])
+            body.append(_strip_indent(lines[i], width))
             i += 1
         out.append((lang, "\n".join(body).strip("\n")))
         if not closed:
@@ -226,6 +255,38 @@ def git(args: Sequence[str], cwd: Path | str | None = None,
     return p
 
 
+def require_workdir(task: Mapping[str, Any]) -> Path:
+    """`task["_workdir"]`, or an error — never a relative path.
+
+    `Path("")` is `Path(".")`. A verdict.json with no workdir (an aborted run,
+    a hand-edited file, an older schema) therefore used to resolve to the
+    verifier's OWN CURRENT DIRECTORY — which, when bench/verify.py is run from
+    the repo root, is a git checkout that passes every "is this a clone?" test.
+    `git add -A -N` then runs in the user's own repository, staging their
+    working tree, from a bench that is not supposed to write anything outside
+    bench/work/.
+
+    An unusable workdir is a broken run record, so it is an error verdict, not
+    a best effort."""
+    raw = task.get("_workdir")
+    if not raw or not str(raw).strip():
+        raise BenchFamilyError(
+            f"run {task.get('id')!r} has no _workdir; there is no tree to grade. "
+            "Its verdict.json has no `workdir` — re-run the task rather than "
+            "verifying against whatever directory this happens to be.")
+    path = Path(str(raw))
+    if not path.is_absolute():
+        raise BenchFamilyError(
+            f"run {task.get('id')!r} has a relative _workdir {str(raw)!r}; the "
+            "runner records an absolute realpath, so this record is corrupt.")
+    if not path.is_dir():
+        raise BenchFamilyError(
+            f"the workdir for run {task.get('id')!r} is gone: {path}. "
+            "bench/work/workdirs/ was probably cleaned between the run and "
+            "the verify.")
+    return path
+
+
 def worktree_patch(repo: Path | str, since: str = "HEAD") -> str:
     """Everything the agent changed since `since`, as a patch git can apply.
 
@@ -293,7 +354,43 @@ def clone_at(url: str, dest: Path | str, sha: str, blobless: bool = True) -> Pat
     git(["checkout", "--quiet", "--force", "--detach", sha], cwd=dest)
     git(["reset", "--hard", "--quiet", sha], cwd=dest)
     git(["clean", "-qfdx"], cwd=dest)
+    _hide_the_answer(dest)
     return dest
+
+
+def _hide_the_answer(repo: Path) -> None:
+    """Delete every ref, so nothing in the clone reaches past the pinned sha.
+
+    Detaching at the base commit hides the future from `git status` and from
+    nobody else. `git log origin/master`, `git branch -a`, `git log --all
+    --grep=<issue number>`, `git show v2.1` — all still walk the fixing commit,
+    and for these benchmarks that commit IS the answer: lca's expected_files is
+    literally `git show <head_sha> --name-only`, and swebench's gold patch is
+    one `git log -p` away. An agent with a Bash tool does not have to be
+    devious to find it; `git log` is the first thing you run in an unfamiliar
+    repository.
+
+    So: no refs at all. HEAD stays detached at the pinned commit, `git log`
+    still shows the history the agent legitimately needs, and `--all` degrades
+    to exactly that. Reflogs go too — a fresh clone's HEAD reflog names the
+    branch tip it was cloned from.
+
+    What is deliberately KEPT is `remote.origin.url`: a blobless clone fetches
+    file contents from the promisor on demand, and clone_at's `git fetch origin
+    <sha>` fallback needs it too. The objects for later commits may still sit
+    in the pack — this makes them unreachable by name, not unguessable by sha.
+    The shas are never shown to the agent (head_sha stays in tasks.toml and is
+    not in the prompt or the workdir), which is what makes that the right line
+    to draw: a full `git gc --prune=now` on a partial clone is slow and buys
+    only defence against a sha nobody has."""
+    listed = git(["for-each-ref", "--format=%(refname)"], cwd=repo, check=False)
+    for ref in listed.stdout.split():
+        git(["update-ref", "-d", ref], cwd=repo, check=False)
+    git(["reflog", "expire", "--expire=now", "--all"], cwd=repo, check=False)
+    try:
+        (repo / ".git" / "FETCH_HEAD").unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _is_clone_of(dest: Path, url: str) -> bool:

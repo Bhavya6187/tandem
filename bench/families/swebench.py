@@ -58,13 +58,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from family_api import PromptSpec
 from family_common import (BenchFamilyError, cache_dir, cached_json, clone_at,
-                           error_verdict, github_url, run_cmd, slug, verdict,
-                           worktree_patch)
+                           error_verdict, github_url, require_workdir, run_cmd,
+                           slug, verdict, worktree_patch)
 
 SWEBENCH_PIN = "swebench==4.1.0"
 HARNESS_CMD = ("uvx", "--from", SWEBENCH_PIN, "python", "-m",
@@ -304,11 +305,17 @@ def verify(task: Mapping[str, Any], rundir: str) -> dict:
             raise BenchFamilyError(
                 f"task {task.get('id')!r} has no instance_id; pin it in "
                 "bench/tasks.toml")
-        repo_dir = Path(task.get("_workdir") or "")
+        repo_dir = require_workdir(task)
         if not (repo_dir / ".git").is_dir():
             raise BenchFamilyError(
                 f"{repo_dir} is not a git checkout, so there is no patch to "
                 "grade. Was the run provisioned?")
+        # A retried --run-id lands on the same result path, so eval_run_id()
+        # returns the same id, and run_instance() SHORT-CIRCUITS on an existing
+        # report.json for that id: it would hand back the previous attempt's
+        # `resolved` without ever looking at the new agent's patch. Nothing
+        # from a previous attempt may survive into this one.
+        shutil.rmtree(eval_dir, ignore_errors=True)
         # against the pinned base commit, not HEAD: an agent that committed
         # its fix (the prompt says not to; that is not a guarantee) would
         # otherwise diff clean and be scored as having done nothing

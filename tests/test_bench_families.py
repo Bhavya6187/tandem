@@ -100,6 +100,29 @@ def test_fenced_blocks_empty_block():
     assert common.fenced_blocks("```\n```") == [("", "")]
 
 
+def test_fenced_blocks_accepts_a_multi_token_info_string():
+    """```python title=x is a legal opener and models emit it.
+
+    Unrecognised, the opener is skipped, the CLOSING fence is read as an opener
+    instead, and whatever prose followed the block gets submitted to the scorer
+    as the agent's answer — a correct answer recorded as a wrong one."""
+    text = "```python title=trans.py\ndef f(): pass\n```\nand that is it"
+    assert common.fenced_blocks(text) == [("python", "def f(): pass")]
+    text = "```js {highlight: [1,2]}\nlet a = 1\n```"
+    assert common.fenced_blocks(text) == [("js", "let a = 1")]
+
+
+def test_fenced_blocks_accepts_a_deeply_indented_fence():
+    """Four spaces or more used to yield [] -> a false "no_code_block"."""
+    text = "1. like so:\n\n    ```go\n    func f() {}\n    ```\n"
+    assert common.fenced_blocks(text) == [("go", "func f() {}")]
+
+
+def test_fenced_blocks_dedents_the_body_by_the_fence_indent_only():
+    text = "  ```python\n  def f():\n      return 1\n  ```"
+    assert common.fenced_blocks(text) == [("python", "def f():\n    return 1")]
+
+
 def test_refence_round_trips_blocks_the_scorer_can_read_back():
     text = "prose\n```python\ndef f(): pass\n```\nmore prose\n```\nx\n```"
     refenced = common.refence(common.fenced_blocks(text))
@@ -239,6 +262,52 @@ def test_clone_at_is_idempotent_and_resets_a_dirty_workdir(tmp_path):
     assert (dest / "a.py").read_text() == "print(1)\n"
     assert not (dest / "junk.py").exists()
     assert common.worktree_patch(dest) == ""
+
+
+@needs_git
+def test_clone_at_leaves_no_ref_that_reaches_the_answer(tmp_path):
+    """The provisioned tree must not contain the fix.
+
+    A clone brings the whole default branch, and detaching at base_sha hides
+    nothing: `git log origin/master`, `git branch -a`, `git log --all
+    --grep=<issue>` all still reach the fixing commit. For lca that commit IS
+    the answer (`git show <head_sha> --name-only` is the expected file list);
+    for swebench it is the gold patch. One `git log` and the benchmark is
+    void."""
+    origin = tmp_path / "origin"
+    base = _make_repo(origin)
+    # the "fix" — everything after base that the agent must not be able to read
+    (origin / "fix.py").write_text("the answer\n")
+    subprocess.run(["git", "-C", str(origin), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(origin), "-c", "user.email=t@e",
+                    "-c", "user.name=t", "commit", "-qm", "fix the bug"],
+                   check=True)
+    subprocess.run(["git", "-C", str(origin), "tag", "v2"], check=True)
+    head = subprocess.run(["git", "-C", str(origin), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+    dest = tmp_path / "work" / "repo"
+    common.clone_at(origin.as_uri(), dest, base)
+
+    def g(*args):
+        return subprocess.run(["git", "-C", str(dest), *args],
+                              capture_output=True, text=True).stdout
+
+    assert head not in g("rev-list", "--all")
+    assert "fix the bug" not in g("log", "--all", "--oneline")
+    assert g("log", "--all", "--grep=fix", "--oneline").strip() == ""
+    # only the detached-HEAD pseudo entry; no branch, local or remote, survives
+    assert g("branch", "-a").split() == ["*", "(no", "branch)"]
+    assert g("for-each-ref").strip() == ""
+    assert g("tag").strip() == ""
+    assert g("log", "-g", "--oneline").strip() == ""      # nor the reflog
+    assert not (dest / "fix.py").exists()
+    # the base history the agent legitimately needs is still there
+    assert base in g("rev-list", "HEAD")
+    assert "one" in g("log", "--oneline")
+    # ... and the remote is kept: the blobless clone's promisor fetch and the
+    # `git fetch origin <sha>` fallback both need it
+    assert g("remote", "get-url", "origin").strip() == origin.as_uri()
 
 
 @needs_git
@@ -603,6 +672,63 @@ def test_swebench_base_commit_comes_from_the_runs_own_meta_json(tmp_path):
     base = _make_repo(repo)
     rd = _swebench_rundir(tmp_path, base)
     assert swebench._base_commit({"id": "x", "instance_id": "x"}, str(rd)) == base
+
+
+@needs_git
+def test_swebench_verify_discards_a_previous_attempts_eval(tmp_path):
+    """A retried --run-id must not inherit the last attempt's verdict.
+
+    eval_run_id() is derived from the result path, so a retry reuses it — and
+    the harness SHORT-CIRCUITS on an existing report.json for that run id,
+    returning the old `resolved` and never looking at the new patch. The
+    eval directory has to go before anything is written into it."""
+    repo = tmp_path / "clone"
+    _make_repo(repo)
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    rd = _swebench_rundir(tmp_path, head)
+    inst = "django__django-11885"
+    stale = _report(rd / "swebench-eval", swebench.eval_run_id(str(rd)), inst,
+                    {inst: {"resolved": True, "patch_exists": True,
+                            "patch_successfully_applied": True}})
+    stale_report = (stale / "logs" / "run_evaluation" /
+                    swebench.eval_run_id(str(rd)) / "bench" / inst / "report.json")
+    assert stale_report.is_file()
+
+    task = {"id": inst, "family": "swebench", "instance_id": inst,
+            "dataset": "princeton-nlp/SWE-bench_Verified", "_workdir": str(repo)}
+    v = swebench.verify(task, str(rd))
+    assert not stale_report.exists()
+    # the new attempt's own answer, not the stale resolved=true
+    assert v["status"] == "verified" and v["passed"] is False
+    assert v["detail"]["reason"] == "no_patch"
+
+
+@pytest.mark.parametrize("workdir", ["", None])
+def test_swebench_verify_refuses_an_empty_workdir(tmp_path, workdir, monkeypatch):
+    """Path("") is Path("."), which passes a `.git` check when the verifier
+    runs from a git repo — and `git add -A -N` would then stage the USER'S
+    OWN checkout, outside bench/work/ entirely."""
+    monkeypatch.chdir(Path(__file__).resolve().parent.parent)   # the tandem repo
+    task = {"id": "django__django-11885", "family": "swebench",
+            "instance_id": "django__django-11885", "dataset": "d",
+            "_workdir": workdir}
+    v = swebench.verify(task, str(tmp_path))
+    assert v["status"] == "error" and v["passed"] is None
+    assert "workdir" in json.dumps(v["detail"]).lower()
+
+
+@pytest.mark.parametrize("workdir", ["", None, "/nonexistent/nope"])
+def test_require_workdir_rejects_anything_that_is_not_a_real_tree(workdir):
+    with pytest.raises(common.BenchFamilyError) as exc:
+        common.require_workdir({"id": "t", "_workdir": workdir})
+    assert "workdir" in str(exc.value).lower()
+
+
+@needs_git
+def test_require_workdir_returns_a_real_tree(tmp_path):
+    _make_repo(tmp_path / "r")
+    assert common.require_workdir({"_workdir": str(tmp_path / "r")}) == tmp_path / "r"
 
 
 def test_swebench_base_commit_falls_back_to_head_without_meta_json(tmp_path):
