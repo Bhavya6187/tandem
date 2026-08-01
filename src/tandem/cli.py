@@ -170,6 +170,21 @@ def status() -> None:
         qdir = paths.quarantine_dir(session.tandem_id)
         if qdir.is_dir() and any(qdir.iterdir()):
             click.echo(f"  quarantine: {qdir} (has entries)")
+        sub_root = paths.tandem_home() / "subagents" / session.tandem_id
+        run_dir = sub_root / "running"
+        if run_dir.is_dir():
+            for m in sorted(run_dir.glob("*.json")):
+                try:
+                    d = json.loads(m.read_text())
+                except (OSError, ValueError):
+                    continue
+                click.echo(
+                    f"  subagent running: {d.get('model') or 'default-model'} "
+                    f"({d.get('context')}) {d.get('task_preview', '')}"
+                )
+        kept = sorted(sub_root.glob("rollout-*.jsonl")) if sub_root.is_dir() else []
+        if kept:
+            click.echo(f"  retained forks: {len(kept)} under {sub_root}")
 
 
 @main.command()

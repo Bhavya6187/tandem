@@ -359,3 +359,41 @@ class TestSubCli:
         r = click.testing.CliRunner().invoke(cli.main, ["sub"], input="  \n")
         assert r.exit_code == 1
         assert "empty task" in r.output
+
+
+class TestDoctorAndStatus:
+    def test_doctor_warns_on_api_key_env(self, env_factory, monkeypatch):
+        from tandem.doctor import run_doctor
+        env = env_factory(active="claude")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        report = run_doctor(env.store, env.session, live=False)
+        assert any("OPENAI_API_KEY" in c.message for c in report.checks
+                   if c.status == "warn")
+
+    def test_doctor_nudges_shared_block(self, env_factory, monkeypatch):
+        from pathlib import Path
+        from tandem.doctor import run_doctor
+        env = env_factory(active="claude")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        Path(env.cwd, "CLAUDE.md").write_text("# rules, no markers\n")
+        report = run_doctor(env.store, env.session, live=False)
+        assert any("tandem:shared" in c.message for c in report.checks)
+
+    def test_status_lists_running_and_retained(self, env_factory, monkeypatch):
+        import click.testing
+        from tandem import cli, paths
+        env = env_factory(active="claude")
+        monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
+        monkeypatch.setattr(
+            cli, "_check_versions",
+            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+        )
+        sub_root = paths.tandem_home() / "subagents" / env.session.tandem_id
+        (sub_root / "running").mkdir(parents=True)
+        (sub_root / "running" / "r1.json").write_text(json.dumps(
+            {"model": "gpt-x-mini", "context": "task",
+             "task_preview": "audit the README", "pid": 1}))
+        (sub_root / "rollout-x-1.jsonl").write_text("{}\n")
+        r = click.testing.CliRunner().invoke(cli.main, ["status"])
+        assert "subagent running: gpt-x-mini (task) audit the README" in r.output
+        assert "retained forks: 1" in r.output
