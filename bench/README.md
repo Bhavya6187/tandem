@@ -314,15 +314,17 @@ towards each other, which is precisely the effect being measured.
 | --- | --- |
 | `valid` | the run measured its arm |
 | `invalid_no_reroute` (arm A) | nothing rerouted, or `tandem hook-route` printed its "nothing was rerouted" notice. The hook fired and declined — no pairing, or codex outside the compat range. This run measured arm B a second time. |
-| `invalid_partial_reroute` (arm A) | some dispatches rerouted and some ran natively, silently. `route()` passes through `fork` subagents, dispatches already aimed at the bridge, and blank prompts, and the notice stays silent for exactly those. The scaffold asks for ≥2 parallel dispatches, so one-of-each is entirely reachable — and averaging it in would blend the arms. |
+| `invalid_partial_reroute` (arm A) | some dispatches rerouted and some ran natively, silently. `route()` passes through `fork` subagents, dispatches already aimed at the bridge, and blank prompts, and the notice stays silent for exactly those. The scaffold asks for ≥2 parallel dispatches, so one-of-each is entirely reachable — and averaging it in would blend the arms. Only dispatches claude actually spawned (`task_started`) count: a dispatch still in flight when a run is killed is neither native nor rerouted, so a timeout cannot flip an arm-A run into this state and out of the aggregate. |
 | `invalid_leak` (arm B) | something rerouted in the arm that must not reroute. Contaminated. |
 
 Warnings do **not** exclude a run, but the table lists which rows have them and
 you should open those `verdict.json` files before trusting the row. They fire
 for: no dispatches at all (the scaffold did not take), the hook's decline
-notice, a partial reroute, more hook rewrites than spawned bridge agents, a run
-with **no result event** (killed or died — its token totals fall back to
-per-message usage and are not session-wide), and an error final result.
+notice, a partial reroute, more hook rewrites than spawned bridge agents,
+dispatches that never reached `task_started` (named by `tool_use_id`, and
+counted in `unspawned_dispatches`), a run with **no result event** (killed or
+died — its token totals fall back to per-message usage, deduped per assistant
+message, and are not session-wide), and an error final result.
 
 Degenerate means to watch for: a `mean` over one valid run is that run;
 `pass rate` over zero verified runs prints `-`, not 0%; timeouts are counted,
@@ -399,11 +401,14 @@ counting reroutes there reports zero every time. The hook's own stdout
     not "newest turn with the answer": when the trailing summary re-quotes
     even one line of the function, that summary outranks the complete earlier
     answer and is what gets scored. `answer_had_code_block` is `true` for the
-    fragment and `true` for the full answer, so no field in `verdict.json`
-    separates *the re-quoting summary* from *the answer it displaced* — only
-    the transcript does. For **lca** there is not even that: it scores through
-    the same rule and its verdict carries no `answer_had_code_block` field at
-    all, so a displaced file list shows up only as a low `recall`. Arm A
+    fragment and `true` for the full answer, so no *content* field separates
+    *the re-quoting summary* from *the answer it displaced* — but both
+    repoqa's and lca's `detail` now carry **`answer_turn_index`** (0-based)
+    and **`answer_turns_total`**, which say which of the candidate turns was
+    scored. `answer_turn_index == answer_turns_total - 1` with a total above
+    1 is the shape a displacement takes and the row to open
+    `transcript.jsonl` for; a lower index is the rescue working. They narrow
+    the search, they do not detect the displacement. Arm A
     structurally produces more of those trailing turns than arm B, and how
     many is not deterministic (the same task gave arm A three result events in
     one smoke run and one in the next), so a smaller, same-signed version of

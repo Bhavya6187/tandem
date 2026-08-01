@@ -61,7 +61,7 @@ from typing import Any, Mapping
 from family_api import PromptSpec
 from family_common import (BenchFamilyError, cache_dir, cached_fetch, clone_at,
                            error_verdict, fenced_blocks,
-                           final_answer_with_block,
+                           final_answer_selection,
                            github_url, read_events, refence, run_cmd, verdict)
 
 RELEASE_VERSION = "2024-06-23"
@@ -334,7 +334,7 @@ def verify(task: Mapping[str, Any], rundir: str) -> dict:
     try:
         require_pins(task)
         sel = select_needle(load_release(), task)
-        answer = final_answer_with_block(
+        answer, turn_index, turns_total = final_answer_selection(
             read_events(Path(rundir) / "transcript.jsonl"))
         row = scorer_row(sel, answer)
         blocks = fenced_blocks(answer)
@@ -365,6 +365,10 @@ def verify(task: Mapping[str, Any], rundir: str) -> dict:
             best_target=got["best_target"], is_best_similar=got["is_best_similar"],
             bleu=got["score"], bleu_threshold=BLEU_THRESHOLD,
             answer_had_code_block=bool(blocks), answer_chars=len(answer),
+            # answer_had_code_block is true for a re-quoting trailing summary
+            # exactly as it is for the answer it displaced; these two say which
+            # turn was scored, which is what tells them apart (README caveat 11)
+            answer_turn_index=turn_index, answer_turns_total=turns_total,
             needle_swapped=sel["swapped"], swap_reason=sel["swap_reason"],
             scorer_cmd=cmd, report_path=str(report),
             token_positions_are_placeholders=True,

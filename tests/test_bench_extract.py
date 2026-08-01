@@ -119,6 +119,48 @@ def test_mixed_run_counts_both_kinds(mixed):
     assert mixed["agent_types"] == {"tandem:codex-worker": 1, "Explore": 1}
 
 
+# the Agent dispatch spliced in from the native fixture; dropping its
+# task_started is what "killed with a dispatch still in flight" looks like
+NATIVE_DISPATCH_ID = "toolu_01Ta5ZnQ6dKqcisAWWRj85ie"
+
+
+def _mixed_killed_mid_dispatch():
+    """The mixed run as a TIMEOUT leaves it: the second dispatch was requested
+    and never got a `task_started`, because claude was killed with it in
+    flight."""
+    return [e for e in bench_mixed_stream()
+            if not (e.get("subtype") == "task_started"
+                    and e.get("tool_use_id") == NATIVE_DISPATCH_ID)]
+
+
+def test_a_requested_dispatch_that_never_started_is_not_a_dispatch():
+    """A dangling tool_use is not evidence of anything claude spawned.
+
+    It used to be counted as native (the resolved type fell back to the
+    REQUESTED one), which in arm A turned any timeout with a dispatch in
+    flight into `invalid_partial_reroute` — excluded from the aggregate —
+    while the identical arm-B timeout stayed valid and counted as a failure.
+    That is an arm-correlated exclusion of failures in the direction of the
+    conclusion under test; timeouts are measurements (tasks.toml)."""
+    ex = runner.extract_transcript(_mixed_killed_mid_dispatch())
+    assert ex["dispatches"] == 1
+    assert ex["reroutes"] == 1
+    assert ex["native_dispatches"] == 0
+    assert ex["unspawned_dispatches"] == 1
+    assert ex["unspawned_dispatch_ids"] == [NATIVE_DISPATCH_ID]
+    # the dangling dispatch is still visible as something the model asked for
+    assert ex["requested_agent_types"] == {"Explore": 2}
+    assert ex["agent_types"] == {"tandem:codex-worker": 1}
+
+
+def test_an_unspawned_dispatch_does_not_flip_arm_a_to_partial_reroute():
+    ex = runner.mark_validity("a", runner.extract_transcript(
+        _mixed_killed_mid_dispatch()))
+    assert ex["validity"] == "valid"
+    assert any(NATIVE_DISPATCH_ID in w and "task_started" in w
+               for w in ex["warnings"]), ex["warnings"]
+
+
 def test_hook_decisions_are_counted(reroute, native):
     assert reroute["hook_reroute_decisions"] == 1
     assert native["hook_reroute_decisions"] == 0
@@ -167,9 +209,38 @@ def test_killed_run_with_no_result_event_still_reports_tokens(native):
     assert ex["result_events"] == 0
     assert ex["tokens"]["output"] > 0
     assert ex["tokens"]["total"] > 0
-    # the fallback is per-message usage, so it is a different (smaller) number
-    # than the session-wide modelUsage the result event carries
-    assert ex["tokens"]["total"] != native["tokens"]["total"]
+    # This fixture has 10 assistant events and 5 message ids — claude emits one
+    # event per CONTENT BLOCK, each repeating the same usage snapshot — so the
+    # sum is over the 5 messages, not the 10 events: 10+8+10+8+10 input.
+    assert ex["tokens"]["input"] == 46
+    # per-message usage, so it is a SMALLER number than the session-wide
+    # modelUsage the result event carries (undeduped it was the larger one,
+    # which is how the double count hid)
+    assert ex["tokens"]["total"] < native["tokens"]["total"]
+
+
+def test_the_no_result_token_fallback_dedupes_on_message_id():
+    """One assistant event per content block, one usage snapshot per message.
+
+    Live in the fixtures: 10 assistant events, 5 distinct `message.id`s, and
+    the usage repeated verbatim on both events of a pair. Summing per event
+    doubles every timed-out run's token total — and a run only reaches this
+    fallback when it was killed, which is not guaranteed to happen equally
+    often in both arms."""
+    usage = {"input_tokens": 10, "output_tokens": 4,
+             "cache_read_input_tokens": 100, "cache_creation_input_tokens": 7}
+
+    def ev(mid, block):
+        return {"type": "assistant",
+                "message": {"id": mid, "usage": usage, "content": [block]}}
+
+    ex = runner.extract_transcript([
+        ev("msg_1", {"type": "thinking", "thinking": "hmm"}),
+        ev("msg_1", {"type": "text", "text": "hello"}),
+        ev("msg_2", {"type": "text", "text": "again"}),
+    ])
+    assert ex["tokens"] == {"input": 20, "output": 8, "cache_read": 200,
+                            "cache_creation": 14, "total": 242}
 
 
 def test_a_missing_result_event_is_warned_about():

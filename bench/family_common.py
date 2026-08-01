@@ -136,9 +136,16 @@ def final_answer(events: Iterable[Mapping[str, Any]]) -> str:
     return turns[-1] if turns else ""
 
 
-def final_answer_with_block(events: Iterable[Mapping[str, Any]]) -> str:
-    """The newest turn that actually contains a fenced block; the newest turn
-    of any kind if none does.
+def final_answer_selection(
+        events: Iterable[Mapping[str, Any]]) -> tuple[str, int, int]:
+    """The answer, WHICH turn it came from, and how many turns there were.
+
+    `(text, index, total)`: `index` is 0-based into `answer_turns` (oldest
+    first) and `total` is `len(answer_turns)`, so `index == total - 1` means
+    the newest turn was the one scored. An empty transcript is `("", -1, 0)`.
+    Families put the two numbers in their verdict detail as
+    `answer_turn_index` / `answer_turns_total` — the RESIDUAL paragraph below
+    is what they are for.
 
     "The last result event is the answer" is wrong whenever subagents run
     ASYNC, and that is not a corner case — it is arm A's normal shape. A
@@ -165,19 +172,32 @@ def final_answer_with_block(events: Iterable[Mapping[str, Any]]) -> str:
     re-quotes one line of the function — or any fenced fragment at all —
     outranks the complete earlier answer and gets scored instead, and
     `answer_had_code_block` is true for the fragment exactly as it is for the
-    answer, so nothing downstream separates the re-quoting summary from the
-    answer it displaced. lca does not even carry that field, so there a
-    displaced answer surfaces only as a low recall. Arm A produces more of
-    those trailing turns than arm B (SMOKE1 arm A: 3 result events; SMOKE2
-    arm A: 1 — the tail is not even deterministic), so what is left is a
-    smaller, same-signed version of the shape-bias this function exists to
-    remove. Nothing here detects it; a suspiciously partial arm-A answer is a
-    reason to open transcript.jsonl, not a reason to trust the number."""
+    answer, so no CONTENT field separates the re-quoting summary from the
+    answer it displaced. Arm A produces more of those trailing turns than arm
+    B (SMOKE1 arm A: 3 result events; SMOKE2 arm A: 1 — the tail is not even
+    deterministic), so what is left is a smaller, same-signed version of the
+    shape-bias this function exists to remove.
+
+    The index is what makes it inspectable without the transcript: a verdict
+    with `answer_turn_index == answer_turns_total - 1` and a total above 1 is
+    a run where a trailing turn was scored, which is the shape a displacement
+    takes; `answer_turn_index < answer_turns_total - 1` is the rescue working.
+    Neither is a verdict on its own — the field narrows which transcripts are
+    worth opening, it does not detect the displacement."""
     turns = answer_turns(events)
-    for text in reversed(turns):
-        if fenced_blocks(text):
-            return text
-    return turns[-1] if turns else ""
+    for i in range(len(turns) - 1, -1, -1):
+        if fenced_blocks(turns[i]):
+            return turns[i], i, len(turns)
+    if turns:
+        return turns[-1], len(turns) - 1, len(turns)
+    return "", -1, 0
+
+
+def final_answer_with_block(events: Iterable[Mapping[str, Any]]) -> str:
+    """The newest turn that actually contains a fenced block; the newest turn
+    of any kind if none does. `final_answer_selection` is the same rule with
+    its provenance attached, and documents why the rule is what it is."""
+    return final_answer_selection(events)[0]
 
 
 # --- fenced code blocks -------------------------------------------------------

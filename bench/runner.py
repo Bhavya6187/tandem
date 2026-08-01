@@ -404,9 +404,19 @@ def extract_transcript(events: Iterable[dict]) -> dict:
         elif etype == "result":
             results.append(ev)
 
-    ids = list(dict.fromkeys([*requested, *effective]))
-    resolved = {i: effective.get(i, requested.get(i, "")) for i in ids}
-    reroutes = sum(1 for v in resolved.values() if _bare_agent(v) == BRIDGE_NAME)
+    # A dispatch counts only once claude SPAWNED it. The requested type is a
+    # fallback for nothing: a tool_use with no task_started is a dispatch that
+    # never started, which is the normal shape of a run killed on the timeout
+    # with a dispatch in flight. Counting it as native (its requested type is
+    # "Explore") made a timed-out arm-A run with any earlier reroute
+    # `invalid_partial_reroute` — EXCLUDED from the aggregate — while the same
+    # timeout in arm B stayed valid and counted as a failure. That is an
+    # arm-correlated exclusion of failures, in the direction of the conclusion
+    # under test, and timeouts are measurements (tasks.toml [run.timeout_s]).
+    # So they are counted separately and warned about instead.
+    spawned = list(effective)
+    unspawned = [i for i in requested if i not in effective]
+    reroutes = sum(1 for v in effective.values() if _bare_agent(v) == BRIDGE_NAME)
     last = results[-1] if results else {}
 
     return {
@@ -414,12 +424,15 @@ def extract_transcript(events: Iterable[dict]) -> dict:
         "session_id": session_id,
         "claude_version": claude_version,
         "model": model,
-        "dispatches": len(ids),
+        "dispatches": len(spawned),
         "reroutes": reroutes,
-        "native_dispatches": len(ids) - reroutes,
+        "native_dispatches": len(spawned) - reroutes,
+        # requested but never spawned — neither native nor rerouted
+        "unspawned_dispatches": len(unspawned),
+        "unspawned_dispatch_ids": unspawned,
         "notices": notices,
         "hook_reroute_decisions": hook_reroutes,
-        "agent_types": dict(Counter(resolved.values())),
+        "agent_types": dict(Counter(effective.values())),
         "requested_agent_types": dict(Counter(requested.values())),
         "tokens": _tokens(last, events),
         "cost_usd": float(last.get("total_cost_usd") or 0.0),
@@ -442,10 +455,17 @@ def _tokens(result: Mapping[str, Any], events: list[dict]) -> dict:
        claude emit one `result` per turn, and only the last one's modelUsage is
        the whole session, subagents included.
     2. That result's per-turn `usage`.
-    3. No result event at all: sum `message.usage` over the assistant events.
+    3. No result event at all: sum `message.usage` once per assistant MESSAGE.
        A run killed on the timeout never reaches a result, and reporting 0
        tokens for it would fold a free run into the mean for whichever arm
-       times out — flattering exactly the arm that failed."""
+       times out — flattering exactly the arm that failed.
+
+       Deduped on `message.id`, because claude emits one assistant event per
+       CONTENT BLOCK and every event of a message repeats the same usage
+       snapshot (live fixture: 10 assistant events, 5 message ids, usage
+       identical within each pair). Summing per event roughly doubled the
+       total, and only timed-out runs take this path — so the inflation lands
+       on whichever arm times out more, not symmetrically."""
     tot = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
 
     def add_snake(u: Mapping[str, Any]) -> None:
@@ -467,12 +487,20 @@ def _tokens(result: Mapping[str, Any], events: list[dict]) -> dict:
     elif isinstance(usage, dict):
         add_snake(usage)
     else:
+        seen: set[str] = set()
         for ev in events:
             if ev.get("type") != "assistant":
                 continue
-            u = (ev.get("message") or {}).get("usage")
-            if isinstance(u, dict):
-                add_snake(u)
+            msg = ev.get("message") or {}
+            u = msg.get("usage")
+            if not isinstance(u, dict):
+                continue
+            mid = msg.get("id")
+            if isinstance(mid, str) and mid:
+                if mid in seen:
+                    continue          # same message, same usage snapshot
+                seen.add(mid)
+            add_snake(u)
     tot["total"] = sum(tot.values())
     return tot
 
@@ -535,9 +563,18 @@ def mark_validity(arm: str, ex: dict) -> dict:
     ex["arm"] = arm
     ex["validity"] = validity_for(arm, ex)
     warnings: list[str] = []
-    if not ex.get("dispatches"):
+    unspawned = int(ex.get("unspawned_dispatches") or 0)
+    if not ex.get("dispatches") and not unspawned:
         warnings.append("no subagent dispatches in the transcript — the "
                         "scaffold did not take")
+    if unspawned:
+        # not a validity flag: an in-flight dispatch is what a killed run looks
+        # like, and a killed run is a measurement
+        warnings.append(
+            f"{unspawned} Agent dispatch(es) never reached a task_started and "
+            "count as neither native nor rerouted (the run was probably killed "
+            "with them in flight): "
+            f"{', '.join(ex.get('unspawned_dispatch_ids') or [])}")
     if arm == "a" and hook_declined(ex):
         warnings.append("tandem hook-route emitted its 'nothing was rerouted' "
                         "notice: the hook fired and declined")

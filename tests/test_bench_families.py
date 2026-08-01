@@ -140,6 +140,42 @@ def test_final_answer_with_block_on_the_live_async_arm_a_transcript():
     assert "Found two matching functions" not in answer
 
 
+def test_final_answer_selection_reports_which_turn_was_scored():
+    """Which of the candidate turns the newest-fence rule took, and how many
+    there were. Without those two numbers a verdict cannot say whether the
+    rule rescued an early answer or scored a trailing summary."""
+    evs = _async_tail("here it is:\n```\ndef f(): pass\n```",
+                      "Task complete. The investigation confirmed my finding.",
+                      "Both agents have now completed.")
+    answer, index, total = common.final_answer_selection(evs)
+    assert answer == "here it is:\n```\ndef f(): pass\n```"
+    assert (index, total) == (0, 3)
+    assert index < total - 1           # the newest turn was NOT what was scored
+    assert common.final_answer_with_block(evs) == answer
+
+
+def test_final_answer_selection_shows_a_displaced_answer():
+    """Caveat 11's residual, made visible.
+
+    The trailing summary re-quotes one line of the function inside a fence, so
+    "newest turn with any fence" takes the FRAGMENT and the complete earlier
+    answer is displaced. The rule is deliberately unchanged; what the index
+    adds is that the verdict now says the scored turn was the last of
+    several."""
+    evs = _async_tail(
+        "the function is:\n```python\ndef f():\n    return 1\n```",
+        "Task complete — the agents confirmed the `return 1`:\n"
+        "```python\n    return 1\n```")
+    answer, index, total = common.final_answer_selection(evs)
+    assert (index, total) == (1, 2)
+    assert index == total - 1
+    assert "def f()" not in answer
+
+
+def test_final_answer_selection_of_an_empty_transcript():
+    assert common.final_answer_selection([]) == ("", -1, 0)
+
+
 # --- fenced blocks ------------------------------------------------------------
 
 
@@ -513,6 +549,30 @@ def test_lca_verify_scores_the_turn_that_carried_the_answer(tmp_path):
     v = lca.verify(task, str(rd))
     assert v["status"] == "verified" and v["passed"] is True
     assert v["detail"]["predicted_files"] == ["a.py", "b.py"]
+    # ... and the verdict says which of the two turns it scored
+    assert v["detail"]["answer_turn_index"] == 0
+    assert v["detail"]["answer_turns_total"] == 2
+
+
+def test_lca_verdict_says_when_the_trailing_turn_was_the_one_scored(tmp_path):
+    """The residual of README caveat 11, visible in verdict.json.
+
+    The trailing summary re-quotes ONE of the paths inside a fence, so the
+    newest-fence rule scores the summary rather than the list it displaced —
+    which lca would otherwise show only as a low recall. answer_turn_index ==
+    answer_turns_total - 1 is the signature to look for."""
+    rd = tmp_path / "run"
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "transcript.jsonl").write_text("\n".join(json.dumps(e) for e in _async_tail(
+        "The fix has to touch:\n```\na.py\nb.py\n```",
+        "Agent 2 confirmed the main one:\n```\na.py\n```")) + "\n")
+    task = {"id": "lca-1", "family": "lca", "expected_files": ["a.py", "b.py"],
+            "f1_threshold": 0.5, "_workdir": str(tmp_path)}
+    v = lca.verify(task, str(rd))
+    assert v["detail"]["predicted_files"] == ["a.py"]
+    assert v["detail"]["recall"] == 0.5
+    assert v["detail"]["answer_turn_index"] == 1
+    assert v["detail"]["answer_turns_total"] == 2
 
 
 def test_lca_verify_errors_when_the_pin_is_empty(tmp_path):
@@ -678,6 +738,10 @@ def test_repoqa_verify_scores_the_turn_that_carried_the_block(tmp_path, monkeypa
     assert v["status"] == "verified" and v["passed"] is True
     assert v["detail"]["answer_had_code_block"] is True
     assert "def _merge_string_group" in seen["row"]["output"][0]
+    # answer_had_code_block is true for a re-quoting summary too; these two say
+    # WHICH turn was scored, which is what separates the two cases
+    assert v["detail"]["answer_turn_index"] == 0
+    assert v["detail"]["answer_turns_total"] == 2
 
 
 def test_repoqa_prompt_asks_for_a_fenced_code_block():

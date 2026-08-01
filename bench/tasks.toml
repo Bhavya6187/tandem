@@ -24,7 +24,7 @@ arms = ["a", "b"]
 # bypassPermissions is required, not a convenience: in `-p` mode a task that
 # has to edit files would otherwise stall on a permission prompt that has no
 # user to answer it. Each run gets its own throwaway workdir under
-# bench/work/workdirs/.
+# bench/work/.workdirs/.
 claude_flags = ["--permission-mode", "bypassPermissions"]
 # `runner.py smoke` runs this one on both arms — the cheapest family, no docker.
 smoke_task = "repoqa-python-black"

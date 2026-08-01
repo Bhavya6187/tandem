@@ -38,7 +38,7 @@ from typing import Any, Mapping
 from family_api import PromptSpec
 from family_common import (BenchFamilyError, cache_dir, cached_json, clone_at,
                            error_verdict, fenced_blocks,
-                           final_answer_with_block,
+                           final_answer_selection,
                            github_url, read_events, set_scores, slug, verdict)
 
 ROWS_URL = ("https://datasets-server.huggingface.co/rows"
@@ -187,12 +187,16 @@ def verify(task: Mapping[str, Any], rundir: str) -> dict:
                 f"task {task.get('id')!r} has no expected_files, so there is "
                 "nothing to score against. Pin it in bench/tasks.toml.")
         threshold = float(task.get("f1_threshold", 0.5))
-        answer = final_answer_with_block(
+        # turn index and count travel with the score: the newest-fence rule can
+        # score a trailing summary that re-quotes one path, and in this family
+        # that would otherwise surface only as a low recall (README caveat 11)
+        answer, turn_index, turns_total = final_answer_selection(
             read_events(Path(rundir) / "transcript.jsonl"))
         predicted = parse_file_list(answer)
         scores = set_scores(predicted, expected)
         detail = dict(scores, expected_files=expected, predicted_files=predicted,
-                      threshold=threshold)
+                      threshold=threshold, answer_turn_index=turn_index,
+                      answer_turns_total=turns_total)
         if not predicted:
             return verdict("verified", False, 0.0, reason="no_answer", **detail)
         return verdict("verified", scores["f1"] >= threshold, scores["f1"], **detail)
