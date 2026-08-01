@@ -1,6 +1,7 @@
 # Codex-model subagents — design
 
-2026-07-31. Status: approved design, pre-implementation.
+2026-07-31. Status: implemented; spikes S1–S4 and the live E2E run against
+claude 2.1.220 / codex 0.145.0 on 2026-07-31 (results recorded inline).
 
 ## Goal
 
@@ -55,7 +56,7 @@ never a process.
 ```
 user ──▶ claude (native UI; native Agent dispatch, one call per subagent)
              │  PreToolUse (plugin-registered) runs: tandem hook-route
-             │  → allow + updatedInput {subagent_type: codex-worker,
+             │  → allow + updatedInput {subagent_type: tandem:codex-worker,
              │     model: <cheap claude driver>, prompt: brief}
              ▼
          codex-worker bridge (haiku driver, Bash-only, plugin-shipped)
@@ -110,9 +111,10 @@ dispatch in v1 is fresh-type (forks pass through natively).
   `codex exec resume <fork-id> -m <model>` with the brief. The fork is
   **never registered as a sync source**: no cursor, no echo-suppression
   changes, shadow untouched.
-- Fanout: pass the codex feature flag enabling multi-agent tools when
-  `allow_fanout = true` (flag name pinned by spike S2), so the worker may
-  `spawn_agent` natively at its own discretion.
+- Fanout: pass `--enable <fanout_feature>` when configured. On codex 0.145
+  nothing needs passing (S2): the `multi_agent` feature is stable and on by
+  default, so the worker may `spawn_agent` natively at its own discretion,
+  and its children inherit its (cheap) model unless it overrides them.
 - Output: codex exec's streamed activity passes through to stdout as it
   runs; the final message is printed last. Exit code mirrors codex exec.
 - `-q/--quiet` (what the bridge agent uses): the raw transcript is
@@ -147,12 +149,19 @@ Reads the PreToolUse JSON from stdin. Emits nothing (exit 0) — meaning
 - `route = "off"` in config;
 - `subagent_type` is `"fork"` (claude forks stay native in v1 — they're
   prompt-cache-cheap and semantically claude's own full-context worker);
-- `subagent_type` is already `codex-worker` (loop guard).
+- `subagent_type` is already the bridge (loop guard) — matched
+  scope-insensitively (`…:codex-worker` or bare `codex-worker`), because
+  the model asks for it both ways once it sees the name in an error.
 
 Otherwise emit `allow` + `updatedInput`. `updatedInput` replaces the whole
 input object, so it carries every original field with three rewrites:
 
-1. `subagent_type` → `codex-worker`.
+1. `subagent_type` → `tandem:codex-worker`. **Plugin-scoped, load-bearing:**
+   claude registers a plugin's agents as `<plugin-name>:<agent-name>` and
+   rejects the bare name — live E2E (2.1.220, 2026-07-31) failed every
+   dispatch with `Agent type 'codex-worker' not found. Available agents:
+   …, tandem:codex-worker`. A test pins the rewrite target to
+   `plugin.json`'s `name` + the agent file's `name:` so the two cannot drift.
 2. `model` → the cheap claude driver (`haiku`). **Load-bearing:** real
    traces show dispatches carry `model: "opus"`, and the per-invocation
    model param overrides agent frontmatter — without this rewrite the
@@ -192,26 +201,40 @@ it rewrite an unrelated tool's input.
   dispatch: `TANDEM_TASK_EOF` unless that string occurs in the brief, else
   the same with random digits appended. A fixed delimiter is a shell
   injection hazard — a brief containing that line (this repo's own docs do)
-  would end the heredoc early and run the remainder as shell.
+  would end the heredoc early and run the remainder as shell. The body
+  opens with an unconditional **"you never do the task yourself"** rule
+  (S4: without it, haiku answered a one-command task directly instead of
+  delegating — correct answer, zero savings, silent policy failure).
 - `hooks/hooks.json` — PreToolUse, matcher `Agent|Task` (defensive: the
   alias guarantee covers settings/agent definitions, not hook matchers
   explicitly), command `tandem hook-route || true`. The `|| true` is
   load-bearing, not cosmetic: click's usage-error path exits 2 outside the
   command body (version skew — plugin installed, older tandem on PATH
   lacking the subcommand), and exit 2 blocks the dispatch.
-- Install: local plugin from the repo for v1 (marketplace later).
-  Registration is the plugin's entire job; policy lives in tandem config.
+- Install: local plugin from a clone of this repo for v1 —
+  `claude --plugin-dir /path/to/tandem/plugin` (marketplace later). The
+  wheel packages `src/tandem` only, so `pip install tandem-cli` alone never
+  reroutes anything; the README says so explicitly. Registration is the
+  plugin's entire job; policy lives in tandem config.
 
 ### Config (`~/.tandem/config.toml`, new file; `TANDEM_HOME` honored)
 
 ```toml
 [subagents]
-route = "all"          # all | off        (later: matchers, route_forks)
-model = "…"            # cheap codex model id; default pinned by spike S1
-context = "match"      # match | task | full
-allow_fanout = true    # codex-native spawn_agent inside workers
+route = "all"           # all | off        (later: matchers, route_forks)
+model = "gpt-5.6-luna"  # cheap codex model id ("" = codex's own default)
+context = "match"       # match | task | full
+fanout_feature = ""     # codex --enable <name>; "" = don't pass the flag
 keep_forks = false
 ```
+
+`fanout_feature` replaces the planned `allow_fanout` boolean: S2 found no
+flag to toggle on codex 0.145 (multi-agent is on by default), so a boolean
+would have had nothing to switch. The string is the escape hatch for a
+future codex that gates fanout behind a named feature — empty means "pass
+no `--enable`", which is the correct value today. **Do not set it blindly:**
+`codex exec --enable <unknown>` exits 1 with `Error: Unknown feature flag`
+before the model is ever called, which would fail every worker.
 
 `context = "match"` is the core policy: mirror the context decision Claude
 itself made per dispatch. Fresh-type dispatch → task-only (Claude wrote a
@@ -287,18 +310,65 @@ price of "no forged results" under the documented hook surface.
   tandem).
 - Fork-type dispatches stay on Claude (`route_forks` is a later option).
 
-## Spikes (before or during implementation)
+## Spikes — run live 2026-07-31 (claude 2.1.220, codex 0.145.0)
 
-- **S1**: enumerate cheap codex model ids available under this ChatGPT
-  plan; confirm `codex exec resume <fork> -m <model>` honors the override
-  on a tandem-authored rollout (fresh uuid7 should dodge the per-thread
-  model cache in `state_5.sqlite` — verify).
-- **S2**: codex multi-agent feature flag name for `--enable`; whether
-  spawned workers start cold (expected) — informs `allow_fanout` wiring.
-- **S3**: confirm the `Agent|Task` hook matcher fires on claude 2.1.220,
-  and the exact `updatedInput` echo behavior on an Agent call.
-- **S4**: haiku bridge relays long results verbatim without embellishment
-  (prompt-tune the agent body if not).
+- **S1** — *cheap codex model ids, and whether `-m` survives a resume of a
+  tandem-authored rollout.* The plan's slugs come from
+  `~/.codex/models_cache.json`: `gpt-5.6-sol` (account default, frontier),
+  `gpt-5.6-terra`, `gpt-5.6-luna` ("fast and affordable"), `gpt-5.5`,
+  `gpt-5.4`, `gpt-5.4-mini` ("small, fast, cost-efficient"). `codex exec -m
+  gpt-5.6-luna` and `-m gpt-5.4-mini` both answered; an unknown id fails
+  loudly and distinctively — HTTP 400 `The '<id>' model is not supported
+  when using Codex with a ChatGPT account.` **`-m` is honored on resume:**
+  `tandem sub -m gpt-5.6-luna --context task` on a freshly seeded
+  `originator: "tandem-sub"` rollout produced `turn_context.model =
+  "gpt-5.6-luna"` and `thread_settings_applied.model = "gpt-5.6-luna"` in
+  the retained rollout, while the account default stayed `gpt-5.6-sol` — no
+  per-thread model cache interference. Shipped guidance: `model =
+  "gpt-5.6-luna"` (`gpt-5.4-mini` for the cheapest tier).
+- **S2** — *fanout feature flag; do spawned workers start cold?* **There is
+  no flag to pass on 0.145.** `codex features list` reports `multi_agent`
+  as stage `stable`, effective `true` by default; `multi_agent_v2` is
+  stable-but-off; `multi_agent_mode` and `enable_fanout` are stage
+  `removed`. The tandem-seeded worker rollout recorded
+  `turn_context.multi_agent_version = "v1"` with no flag passed, so workers
+  can already `spawn_agent`. `fanout_feature` therefore ships empty and
+  exists only for a future codex that gates this; a wrong value is fatal
+  (`codex exec --enable <unknown>` → `Error: Unknown feature flag`, exit 1,
+  before any model call). Spawned workers **do** start cold: the
+  `multi_agent_v1` tool schema defines `fork_context` as "True forks the
+  current thread history into the new agent; false or omitted starts with
+  only the initial prompt", and children "inherit your current model by
+  default" — so a cheap parent keeps its whole subtree cheap.
+- **S3** — *does the `Agent|Task` matcher fire, and how is `updatedInput`
+  echoed?* Fires on 2.1.220 (`hook_name: "PreToolUse:Agent"`), and the
+  rewrite is applied: `task_started` carries `subagent_type:
+  "tandem:codex-worker"`, the worker's sidechain entries carry
+  `attributionAgent: "tandem:codex-worker"` / `attributionPlugin:
+  "tandem"`, and it ran on `claude-haiku-4-5` — the `model` rewrite does
+  override the dispatch's own model, as the design assumed. Echo behavior:
+  the assistant's `tool_use` block in the transcript keeps the **original**
+  input; the hook's stdout lands beside it as a `hook_success` attachment
+  (and as a `hook_response` event under `--include-hook-events`). So the
+  transcript shows the pre-rewrite dispatch — `task_started` is where the
+  effective input is visible. **Defect found here:** rewriting to the bare
+  `codex-worker` failed every dispatch (`Agent type 'codex-worker' not
+  found. Available agents: …, tandem:codex-worker`); the rewrite target is
+  now the plugin-scoped id (see hook-route above).
+- **S4** — *does the haiku bridge relay verbatim?* Not with the original
+  agent body: on a one-command task it answered directly with `find`
+  instead of delegating. The body **was** in its system prompt (probed via
+  `claude -p --agent tandem:codex-worker`) and `tools: Bash(tandem sub:*)`
+  **did** narrow its toolset to Bash alone — but nothing forbade doing the
+  work, so it did. Fixed by an unconditional "you never do the task
+  yourself … `tandem sub` is the ONLY command you may ever run" rule at the
+  top of the body. After the fix the bridge ran `tandem sub -q` with the
+  brief on a heredoc and returned codex's final message **byte-for-byte
+  identical** to the `-o/--output-last-message` file. Caveat: verified on a
+  short result; the mechanism copies stdout, so long-result risk is model
+  discipline, not extraction. Note `Bash(tandem sub:*)` constrains the
+  *tool list*, not the *command* — a session that broadly allows `Bash`
+  still lets the relay run anything, which is how the deviation happened.
 
 ## Testing
 
@@ -309,9 +379,24 @@ price of "no forged results" under the documented hook surface.
   parsing.
 - Integration: golden claude transcript containing background Agent
   dispatch + task-notification → shadow sync unchanged and complete.
-- Live E2E (manual, this repo): dispatch a real subagent under the plugin,
-  observe reroute, codex execution, result return, `switch`, and both-side
-  resume; `tandem doctor` green throughout.
+- Live E2E — run 2026-07-31 headlessly (`claude -p … --plugin-dir <repo>/plugin
+  --output-format stream-json --include-hook-events`, scratch project with a
+  paired session under a scratch `TANDEM_HOME`). All of it verified in one
+  run: hook fires and rewrites (`task_started.subagent_type =
+  tandem:codex-worker`, worker on `claude-haiku-4-5`); bridge runs `tandem
+  sub -q` with the brief on a heredoc; a `tandem-sub` rollout is created in
+  the session cwd and the codex worker does the work on `gpt-5.6-luna`;
+  `tandem status` shows `subagent running: gpt-5.6-luna (task) …` while it
+  runs and the marker is gone after; the Agent tool result equals codex's
+  final message byte-for-byte, and the parent repeats it verbatim; `tandem
+  sync` lands the dispatch in the shadow as a native `function_call`
+  `Agent` + `function_call_output` pair; after `tandem switch`, a real
+  `codex exec resume <shadow>` answered a question about the subagent's
+  result from synced context; `tandem doctor` green.
+  Not reachable headlessly, left for manual interactive verification: the
+  interactive task-panel view of running workers, and the background
+  (`run_in_background: true`) return path — the foreground path was the one
+  exercised.
 
 ## Later
 

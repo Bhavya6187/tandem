@@ -59,6 +59,34 @@ text between terminals:
 tandem run --on codex "second opinion: why is this test flaky?"
 ```
 
+### 🐣 Subagents on the cheap model.
+
+Load tandem's Claude Code plugin and Claude's subagent dispatches run on a
+cheap codex model instead — automatically, with the task brief forwarded
+verbatim and the result returned through Claude's own machinery. Claude
+orchestrates; codex does the legwork; your Claude quota stays on the main
+thread. The plugin lives in this repo (not in the wheel), so point Claude
+at a clone:
+
+```bash
+git clone https://github.com/Bhavya6187/tandem
+claude --plugin-dir /path/to/tandem/plugin
+```
+
+Routing policy lives in `~/.tandem/config.toml`, never in prompts:
+
+```toml
+[subagents]
+route = "all"           # all | off
+model = "gpt-5.6-luna"  # any codex model id ("" = codex's own default)
+context = "match"       # match | task | full
+keep_forks = false      # keep each worker's rollout for debugging
+```
+
+Fork dispatches stay on Claude, each worker's full codex log is kept under
+`~/.tandem/subagents/`, and `tandem status` lists the workers running right
+now. Drop the `--plugin-dir` flag and Claude is byte-for-byte stock again.
+
 ### 🏠 Every model in its native harness.
 
 This is not a lowest-common-denominator wrapper UI. Claude runs in real
@@ -114,6 +142,7 @@ tandem resume a1b2c3d4e5f6   # a specific one (id from the exit hint)
 | `switch` | Flip active/shadow and enter the other agent — at the tandem prompt, or one-shot from your shell (one-shot only flips, it doesn't enter) |
 | `tandem resume [id]` | Continue the most recent (or a specific) session |
 | `tandem run --on codex "…"` | One-off prompt to the *other* agent, with full context |
+| `tandem sub "…"` | Run one delegated task on a codex model (used by the plugin's reroute hook) |
 | `tandem status` | Show pairing, roles, and sync position |
 
 There are also three maintenance commands — `tandem doctor` (health
