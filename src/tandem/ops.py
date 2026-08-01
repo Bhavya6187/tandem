@@ -15,6 +15,7 @@ import fcntl
 import json
 import os
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -288,6 +289,7 @@ def run_sub(
     context: str = "task",
     fanout_feature: str = "",
     keep_forks: bool = False,
+    quiet: bool = False,
 ) -> int:
     """Execute one delegated subagent task on codex. context='task' resumes
     a freshly seeded empty rollout in the session cwd (claude wrote a
@@ -295,7 +297,15 @@ def run_sub(
     and resumes that instead. Either way the worker runs in a tandem-authored
     'tandem-sub' rollout that is never a sync source and never adoptable as
     the pair's own codex session, and is disposed of on exit. The brief is
-    passed through verbatim. Exit code mirrors codex."""
+    passed through verbatim. Exit code mirrors codex.
+
+    quiet=True is the bridge-agent mode: codex's raw transcript goes to a log
+    file and this command's ENTIRE stdout becomes the worker's final message
+    (via codex's own `-o/--output-last-message`). With inherited stdio the
+    caller would instead get the whole exec log — header, actions, token
+    counts — and asking a cheap relay model to extract "the final message"
+    from that is unreliable. quiet=False is byte-for-byte unchanged: stdio is
+    inherited so manual runs still stream live."""
     adapter = get_adapter("codex")
     argv = [adapter.binary, "exec", "--skip-git-repo-check"]
     if model:
@@ -307,9 +317,17 @@ def run_sub(
             sub_id, sub_path = fork_shadow(store, session)
     else:
         sub_id, sub_path = seed_sub_rollout(session)
-    argv += ["resume", sub_id, task]
 
     sub_root = paths.tandem_home() / "subagents" / session.tandem_id
+    last_path = log_path = None
+    if quiet:
+        logs = sub_root / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        last_path, log_path = logs / f"{sub_id}.last", logs / f"{sub_id}.log"
+        # exec-level flag: must precede the `resume` subcommand, like -m
+        argv += ["-o", str(last_path)]
+    argv += ["resume", sub_id, task]
+
     marker = sub_root / "running" / f"{sub_id}.json"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps({
@@ -317,7 +335,12 @@ def run_sub(
         "task_preview": task[:120],
     }))
     try:
-        code = _run(argv, cwd=session.cwd).returncode
+        if quiet:
+            with open(log_path, "wb") as fh:
+                code = _run(argv, cwd=session.cwd, stdout=fh,
+                            stderr=subprocess.STDOUT).returncode
+        else:
+            code = _run(argv, cwd=session.cwd).returncode
     finally:
         marker.unlink(missing_ok=True)
         if keep_forks:
@@ -325,4 +348,29 @@ def run_sub(
             sub_path.rename(sub_root / sub_path.name)
         else:
             sub_path.unlink(missing_ok=True)
+        if quiet:
+            _relay_last_message(last_path, log_path)
     return code
+
+
+def _relay_last_message(last_path: Path, log_path: Path, tail: int = 50) -> None:
+    """Print exactly what the bridge should return as its final message: the
+    worker's last message, or — when codex died before writing one — the tail
+    of its log, so a failed relay still carries the error text instead of
+    reporting an empty failure. Never prefixes or wraps: the caller's whole
+    stdout is the payload. Both files are retained as the debugging trail."""
+    text = ""
+    try:
+        text = last_path.read_text(errors="replace")
+    except OSError:
+        pass
+    if not text.strip():
+        try:
+            lines = log_path.read_text(errors="replace").splitlines()
+        except OSError:
+            lines = []
+        text = "\n".join(lines[-tail:])
+    if not text:
+        return
+    sys.stdout.write(text if text.endswith("\n") else text + "\n")
+    sys.stdout.flush()

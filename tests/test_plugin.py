@@ -33,3 +33,11 @@ def test_bridge_agent_definition():
     assert "tandem sub" in body
     assert "verbatim" in body
     assert "[tandem-sub failed]" in body
+    # quiet mode: the command's whole output IS the final message, so the
+    # relay has nothing to extract (inherited stdio would hand it codex's
+    # entire exec log instead)
+    assert "tandem sub -q" in body
+    # a fixed heredoc delimiter is a shell-injection hazard: a task message
+    # containing that line truncates the brief and runs the rest as shell
+    assert "TANDEM_TASK_EOF_" in body
+    assert re.search(r"unless .*appears|appears .*in the task", body)

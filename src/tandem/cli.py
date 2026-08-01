@@ -296,8 +296,13 @@ def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
               type=click.Choice(["task", "full"]), default=None,
               help="Worker context: cold task-only, or a full fork of the "
                    "paired session (config policy decides by default).")
+@click.option("-q", "--quiet", is_flag=True,
+              help="Print only the worker's final message (raw codex output "
+                   "goes to a log under ~/.tandem/subagents/<id>/logs). Used "
+                   "by the bridge agent, which relays stdout verbatim.")
 @click.argument("task", required=False)
-def sub(model: str | None, context_mode: str | None, task: str | None) -> None:
+def sub(model: str | None, context_mode: str | None, quiet: bool,
+        task: str | None) -> None:
     """Run one delegated subagent task on codex (task argument or stdin).
 
     Used by the tandem plugin's codex-worker bridge; also works manually."""
@@ -319,6 +324,7 @@ def sub(model: str | None, context_mode: str | None, task: str | None) -> None:
             context=context_mode or ("full" if cfg.context == "full" else "task"),
             fanout_feature=cfg.fanout_feature,
             keep_forks=cfg.keep_forks,
+            quiet=quiet,
         )
     sys.exit(code)
 

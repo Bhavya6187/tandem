@@ -1,7 +1,9 @@
 """tandem sub: shadow forking and the subagent execution op."""
 
 import json
+import subprocess
 import time
+from pathlib import Path
 
 from tandem import ops, paths
 from tandem.runner import await_codex_rollout
@@ -226,6 +228,75 @@ class TestRunSub:
         assert seen["during"][0].exists() is False  # removed on completion
 
 
+class TestQuietRelay:
+    """Quiet mode exists for the bridge agent: with inherited stdio the Bash
+    output is codex's ENTIRE exec log (header, actions, token counts), and
+    "return the final message verbatim" is not something a haiku relay can do
+    reliably. Quiet mode makes the command's whole output BE the final
+    message, via codex's own `-o/--output-last-message`."""
+
+    def test_quiet_relays_only_the_last_message(self, env_factory, monkeypatch,
+                                                capsys):
+        env = env_factory(active="claude")
+        calls = {}
+
+        def fake_run(argv, cwd=None, **kw):
+            calls["argv"], calls["kw"] = argv, kw
+            i = argv.index("-o")
+            calls["o_before_resume"] = i < argv.index("resume")
+            calls["last"] = Path(argv[i + 1])
+            calls["last"].write_text("FINAL ANSWER")
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        code = ops.run_sub(env.store, env.session, "t", quiet=True)
+
+        assert code == 0
+        # -o is an exec-level flag: it must precede the `resume` subcommand
+        assert calls["o_before_resume"]
+        # stdout carries the worker's answer and nothing else
+        assert capsys.readouterr().out == "FINAL ANSWER\n"
+        # the raw transcript is redirected to a retained log for debugging
+        logs = (paths.tandem_home() / "subagents" / env.session.tandem_id
+                / "logs")
+        assert calls["last"].parent == logs
+        assert calls["kw"]["stderr"] == subprocess.STDOUT
+        assert list(logs.glob("*.log")) != []
+
+    def test_quiet_falls_back_to_the_log_tail(self, env_factory, monkeypatch,
+                                              capsys):
+        """A codex run that dies before writing a last message must still
+        relay something — otherwise the bridge reports an empty failure."""
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, stdout=None, **kw):
+            stdout.write(b"boom: auth failed\nstack line\n")
+            stdout.flush()
+            return _R(1)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        code = ops.run_sub(env.store, env.session, "t", quiet=True)
+
+        assert code == 1
+        out = capsys.readouterr().out
+        assert "boom: auth failed" in out
+        assert "stack line" in out
+
+    def test_non_quiet_streams_with_inherited_stdio(self, env_factory,
+                                                    monkeypatch, capsys):
+        """Manual `tandem sub` keeps streaming: no -o, no redirection."""
+        env = env_factory(active="claude")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "_run",
+            lambda argv, cwd=None, **kw: calls.update(argv=argv, kw=kw) or _R(0),
+        )
+        ops.run_sub(env.store, env.session, "t")
+        assert "-o" not in calls["argv"]
+        assert calls["kw"] == {}
+        assert capsys.readouterr().out == ""
+
+
 class TestSubCli:
     def _cli_env(self, env, monkeypatch):
         from tandem import cli
@@ -266,6 +337,20 @@ class TestSubCli:
         assert r.exit_code == 0
         assert calls["kw"]["model"] == "gpt-x-mini"
         assert calls["kw"]["context"] == "full"
+        assert calls["kw"]["quiet"] is False
+
+    def test_sub_quiet_flag_forwards(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(cli.main, ["sub", "-q", "brief"])
+        assert r.exit_code == 0
+        assert calls["kw"]["quiet"] is True
 
     def test_sub_empty_task_errors(self, env_factory, monkeypatch):
         import click.testing

@@ -81,7 +81,7 @@ fleet state; codex manages its own interior fanout.
 
 ### `tandem sub` (new op + CLI command)
 
-`tandem sub [-m MODEL] [--context task|full] [TASK]` — task read from
+`tandem sub [-m MODEL] [--context task|full] [-q] [TASK]` — task read from
 stdin when not passed as an argument (Claude briefs are multi-paragraph;
 stdin avoids argv quoting and length limits). With no `--context` flag the
 config policy decides: `match` resolves to `task`, because every rerouted
@@ -115,6 +115,18 @@ dispatch in v1 is fresh-type (forks pass through natively).
   `spawn_agent` natively at its own discretion.
 - Output: codex exec's streamed activity passes through to stdout as it
   runs; the final message is printed last. Exit code mirrors codex exec.
+- `-q/--quiet` (what the bridge agent uses): the raw transcript is
+  redirected to `~/.tandem/subagents/<tandem-id>/logs/<run-id>.log` and the
+  command's **entire stdout is the worker's final message**, captured via
+  codex's own `-o/--output-last-message` into `<run-id>.last`. Without this
+  the bridge's Bash output is the whole exec log — header, actions, token
+  counts — and "return the final message verbatim" is not something a
+  haiku-tier relay can do reliably; quiet mode removes the extraction step
+  rather than trusting it. If the `.last` file is missing or empty (codex
+  died first), the log's tail is printed instead, so a failed relay still
+  carries the error text. Both files are retained as the debugging trail.
+  Non-quiet behavior is unchanged: stdio is inherited and manual runs
+  stream live.
 - Cleanup: delete the worker's rollout (fork or seed) on completion.
   `keep_forks = true` retains it under `~/.tandem/subagents/<tandem-id>/`
   for debugging (and as the future resume path for follow-up messages to a
@@ -171,11 +183,16 @@ it rewrite an unrelated tool's input.
 ### The plugin (`plugin/` in this repo)
 
 - `agents/codex-worker.md` — frontmatter: `model: haiku`,
-  `tools: Bash(tandem sub:*)`. Body: run `tandem sub` with the brief on
+  `tools: Bash(tandem sub:*)`. Body: run `tandem sub -q` with the brief on
   stdin and a generous Bash timeout (codex runs can be long; background
-  subagents keep Bash, so backgrounding is safe); return the final message
-  verbatim — no summarizing, no commentary; on nonzero exit, return the
-  output prefixed `[tandem-sub failed]` and stop.
+  subagents keep Bash, so backgrounding is safe); the command's entire
+  output IS the final message, so return it verbatim — no summarizing, no
+  commentary; on nonzero exit, return the output prefixed
+  `[tandem-sub failed]` and stop. The heredoc delimiter is chosen per
+  dispatch: `TANDEM_TASK_EOF` unless that string occurs in the brief, else
+  the same with random digits appended. A fixed delimiter is a shell
+  injection hazard — a brief containing that line (this repo's own docs do)
+  would end the heredoc early and run the remainder as shell.
 - `hooks/hooks.json` — PreToolUse, matcher `Agent|Task` (defensive: the
   alias guarantee covers settings/agent definitions, not hook matchers
   explicitly), command `tandem hook-route || true`. The `|| true` is
@@ -224,9 +241,12 @@ contract a fork asks for — only reachable in v1 by forcing `context =
 
 - Claude's native task panel lists every bridge as a running subagent —
   fleet liveness for free.
-- `codex exec` stdout streams inside the bridge's Bash call and is visible
-  in the TUI task/transcript view today; that rendering is real but
-  contractually unspecified — do not build load-bearing UX on it.
+- Bridge runs no longer stream into the tool view: the bridge passes `-q`,
+  so codex's activity goes to a log file and only the final message reaches
+  stdout. That is the deliberate trade for a relay that cannot garble the
+  result. Manual `tandem sub` (no `-q`) still streams live in the terminal,
+  and the per-run logs under `~/.tandem/subagents/<tandem-id>/logs/` are the
+  debugging trail for what a worker actually did.
 - `tandem status` (run from a second terminal, or `! tandem status` inside
   claude, which costs a little context) grows a section listing active
   workers: model, cold/fork, rollout path, retained forks.

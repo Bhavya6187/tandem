@@ -321,7 +321,7 @@ git commit -m "feat: fork_shadow — ephemeral codex rollout copies for subagent
 
 **Interfaces:**
 - Consumes: `fork_shadow`, `_sub_lock`, `_run` seam (Task 2); `load_subagents_config`, `SubagentsConfig` (Task 1); `get_adapter`, `paths.tandem_home`.
-- Produces: `run_sub(store, session, task, *, model: str = "", context: str = "task", fanout_feature: str = "", keep_forks: bool = False) -> int`, `seed_sub_rollout(session) -> tuple[str, Path]`, and the `tandem sub` command (`-m/--model`, `--context task|full`, task from argument or stdin). The bridge agent (Task 5) and status (Task 6) rely on: exit code mirrors codex exec; running-marker files under `$TANDEM_HOME/subagents/<tandem-id>/running/<run-id>.json` with keys `model`, `context`, `task_preview`, `pid`; retained sub rollouts moved to `$TANDEM_HOME/subagents/<tandem-id>/`.
+- Produces: `run_sub(store, session, task, *, model: str = "", context: str = "task", fanout_feature: str = "", keep_forks: bool = False, quiet: bool = False) -> int`, `seed_sub_rollout(session) -> tuple[str, Path]`, and the `tandem sub` command (`-m/--model`, `--context task|full`, `-q/--quiet`, task from argument or stdin). The bridge agent (Task 5) and status (Task 6) rely on: exit code mirrors codex exec; running-marker files under `$TANDEM_HOME/subagents/<tandem-id>/running/<run-id>.json` with keys `model`, `context`, `task_preview`, `pid`; retained sub rollouts moved to `$TANDEM_HOME/subagents/<tandem-id>/`.
 
 **Both contexts resume a tandem-authored rollout.** A cold `codex exec` would write an ordinary rollout in the session cwd (non-tandem originator, fresh mtime) — exactly what `await_codex_rollout` looks for — so the next codex-id capture would bind the pair's `codex_session_id` to a throwaway worker transcript that `run_sub` then deletes. `context='task'` therefore seeds its own minimal `originator: "tandem-sub"` rollout and resumes that; Task 2's discovery guard then covers every sub rollout, fork or seed.
 
@@ -480,9 +480,79 @@ class TestRunSub:
         assert len(seen["during"]) == 1
         assert seen["payload"][0]["task_preview"] == "watch me"
         assert seen["during"][0].exists() is False  # removed on completion
+
+
+class TestQuietRelay:
+    """Quiet mode exists for the bridge agent: with inherited stdio the Bash
+    output is codex's ENTIRE exec log (header, actions, token counts), and
+    "return the final message verbatim" is not something a haiku relay can do
+    reliably. Quiet mode makes the command's whole output BE the final
+    message, via codex's own `-o/--output-last-message`."""
+
+    def test_quiet_relays_only_the_last_message(self, env_factory, monkeypatch,
+                                                capsys):
+        env = env_factory(active="claude")
+        calls = {}
+
+        def fake_run(argv, cwd=None, **kw):
+            calls["argv"], calls["kw"] = argv, kw
+            i = argv.index("-o")
+            calls["o_before_resume"] = i < argv.index("resume")
+            calls["last"] = Path(argv[i + 1])
+            calls["last"].write_text("FINAL ANSWER")
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        code = ops.run_sub(env.store, env.session, "t", quiet=True)
+
+        assert code == 0
+        # -o is an exec-level flag: it must precede the `resume` subcommand
+        assert calls["o_before_resume"]
+        # stdout carries the worker's answer and nothing else
+        assert capsys.readouterr().out == "FINAL ANSWER\n"
+        # the raw transcript is redirected to a retained log for debugging
+        logs = (paths.tandem_home() / "subagents" / env.session.tandem_id
+                / "logs")
+        assert calls["last"].parent == logs
+        assert calls["kw"]["stderr"] == subprocess.STDOUT
+        assert list(logs.glob("*.log")) != []
+
+    def test_quiet_falls_back_to_the_log_tail(self, env_factory, monkeypatch,
+                                              capsys):
+        """A codex run that dies before writing a last message must still
+        relay something — otherwise the bridge reports an empty failure."""
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, stdout=None, **kw):
+            stdout.write(b"boom: auth failed\nstack line\n")
+            stdout.flush()
+            return _R(1)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        code = ops.run_sub(env.store, env.session, "t", quiet=True)
+
+        assert code == 1
+        out = capsys.readouterr().out
+        assert "boom: auth failed" in out
+        assert "stack line" in out
+
+    def test_non_quiet_streams_with_inherited_stdio(self, env_factory,
+                                                    monkeypatch, capsys):
+        """Manual `tandem sub` keeps streaming: no -o, no redirection."""
+        env = env_factory(active="claude")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "_run",
+            lambda argv, cwd=None, **kw: calls.update(argv=argv, kw=kw) or _R(0),
+        )
+        ops.run_sub(env.store, env.session, "t")
+        assert "-o" not in calls["argv"]
+        assert calls["kw"] == {}
+        assert capsys.readouterr().out == ""
 ```
 
-(`tests/test_sub.py` imports `paths` alongside `ops` at module level for these.)
+(`tests/test_sub.py` imports `paths` alongside `ops` at module level for these,
+plus `subprocess` and `pathlib.Path` for the quiet-mode tests.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -528,6 +598,7 @@ def run_sub(
     context: str = "task",
     fanout_feature: str = "",
     keep_forks: bool = False,
+    quiet: bool = False,
 ) -> int:
     """Execute one delegated subagent task on codex. context='task' resumes
     a freshly seeded empty rollout in the session cwd (claude wrote a
@@ -535,7 +606,15 @@ def run_sub(
     and resumes that instead. Either way the worker runs in a tandem-authored
     'tandem-sub' rollout that is never a sync source and never adoptable as
     the pair's own codex session, and is disposed of on exit. The brief is
-    passed through verbatim. Exit code mirrors codex."""
+    passed through verbatim. Exit code mirrors codex.
+
+    quiet=True is the bridge-agent mode: codex's raw transcript goes to a log
+    file and this command's ENTIRE stdout becomes the worker's final message
+    (via codex's own `-o/--output-last-message`). With inherited stdio the
+    caller would instead get the whole exec log — header, actions, token
+    counts — and asking a cheap relay model to extract "the final message"
+    from that is unreliable. quiet=False is byte-for-byte unchanged: stdio is
+    inherited so manual runs still stream live."""
     adapter = get_adapter("codex")
     argv = [adapter.binary, "exec", "--skip-git-repo-check"]
     if model:
@@ -547,9 +626,17 @@ def run_sub(
             sub_id, sub_path = fork_shadow(store, session)
     else:
         sub_id, sub_path = seed_sub_rollout(session)
-    argv += ["resume", sub_id, task]
 
     sub_root = paths.tandem_home() / "subagents" / session.tandem_id
+    last_path = log_path = None
+    if quiet:
+        logs = sub_root / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        last_path, log_path = logs / f"{sub_id}.last", logs / f"{sub_id}.log"
+        # exec-level flag: must precede the `resume` subcommand, like -m
+        argv += ["-o", str(last_path)]
+    argv += ["resume", sub_id, task]
+
     marker = sub_root / "running" / f"{sub_id}.json"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps({
@@ -557,7 +644,12 @@ def run_sub(
         "task_preview": task[:120],
     }))
     try:
-        code = _run(argv, cwd=session.cwd).returncode
+        if quiet:
+            with open(log_path, "wb") as fh:
+                code = _run(argv, cwd=session.cwd, stdout=fh,
+                            stderr=subprocess.STDOUT).returncode
+        else:
+            code = _run(argv, cwd=session.cwd).returncode
     finally:
         marker.unlink(missing_ok=True)
         if keep_forks:
@@ -565,7 +657,32 @@ def run_sub(
             sub_path.rename(sub_root / sub_path.name)
         else:
             sub_path.unlink(missing_ok=True)
+        if quiet:
+            _relay_last_message(last_path, log_path)
     return code
+
+
+def _relay_last_message(last_path: Path, log_path: Path, tail: int = 50) -> None:
+    """Print exactly what the bridge should return as its final message: the
+    worker's last message, or — when codex died before writing one — the tail
+    of its log, so a failed relay still carries the error text instead of
+    reporting an empty failure. Never prefixes or wraps: the caller's whole
+    stdout is the payload. Both files are retained as the debugging trail."""
+    text = ""
+    try:
+        text = last_path.read_text(errors="replace")
+    except OSError:
+        pass
+    if not text.strip():
+        try:
+            lines = log_path.read_text(errors="replace").splitlines()
+        except OSError:
+            lines = []
+        text = "\n".join(lines[-tail:])
+    if not text:
+        return
+    sys.stdout.write(text if text.endswith("\n") else text + "\n")
+    sys.stdout.flush()
 ```
 
 Add `SUB_SEED_NOTE` to `src/tandem/constants.py`:
@@ -624,6 +741,28 @@ class TestSubCli:
         assert r.exit_code == 0
         assert calls["kw"]["model"] == "gpt-x-mini"
         assert calls["kw"]["context"] == "full"
+        assert calls["kw"]["quiet"] is False
+
+    def test_sub_quiet_flag_forwards(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(cli.main, ["sub", "-q", "brief"])
+        assert r.exit_code == 0
+        assert calls["kw"]["quiet"] is True
+
+    def test_sub_empty_task_errors(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        r = click.testing.CliRunner().invoke(cli.main, ["sub"], input="  \n")
+        assert r.exit_code == 1
+        assert "empty task" in r.output
 
     def test_sub_empty_task_errors(self, env_factory, monkeypatch):
         import click.testing
@@ -649,8 +788,13 @@ In `src/tandem/cli.py`, add after `run_cmd`:
               type=click.Choice(["task", "full"]), default=None,
               help="Worker context: cold task-only, or a full fork of the "
                    "paired session (config policy decides by default).")
+@click.option("-q", "--quiet", is_flag=True,
+              help="Print only the worker's final message (raw codex output "
+                   "goes to a log under ~/.tandem/subagents/<id>/logs). Used "
+                   "by the bridge agent, which relays stdout verbatim.")
 @click.argument("task", required=False)
-def sub(model: str | None, context_mode: str | None, task: str | None) -> None:
+def sub(model: str | None, context_mode: str | None, quiet: bool,
+        task: str | None) -> None:
     """Run one delegated subagent task on codex (task argument or stdin).
 
     Used by the tandem plugin's codex-worker bridge; also works manually."""
@@ -672,6 +816,7 @@ def sub(model: str | None, context_mode: str | None, task: str | None) -> None:
             context=context_mode or ("full" if cfg.context == "full" else "task"),
             fanout_feature=cfg.fanout_feature,
             keep_forks=cfg.keep_forks,
+            quiet=quiet,
         )
     sys.exit(code)
 ```
@@ -1033,7 +1178,7 @@ git commit -m "feat: tandem hook-route — PreToolUse reroute of Agent dispatche
 - Test: `tests/test_plugin.py`
 
 **Interfaces:**
-- Consumes: the CLI commands `tandem hook-route` (Task 4) and `tandem sub` (Task 3).
+- Consumes: the CLI commands `tandem hook-route` (Task 4) and `tandem sub -q` (Task 3) — the bridge depends on quiet mode, where the command's entire stdout is the worker's final message.
 - Produces: an installable local plugin. Loaded for development/E2E with `claude --plugin-dir /Users/bhavya/git/tandem/plugin` (verify the flag spelling with `claude --help`; the plugins doc also documents marketplace installs for distribution later).
 
 - [ ] **Step 1: Write the failing tests**
@@ -1075,6 +1220,14 @@ def test_bridge_agent_definition():
     assert "tandem sub" in body
     assert "verbatim" in body
     assert "[tandem-sub failed]" in body
+    # quiet mode: the command's whole output IS the final message, so the
+    # relay has nothing to extract (inherited stdio would hand it codex's
+    # entire exec log instead)
+    assert "tandem sub -q" in body
+    # a fixed heredoc delimiter is a shell-injection hazard: a task message
+    # containing that line truncates the brief and runs the rest as shell
+    assert "TANDEM_TASK_EOF_" in body
+    assert re.search(r"unless .*appears|appears .*in the task", body)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1124,19 +1277,27 @@ tools: Bash(tandem sub:*)
 
 You are a relay between this session and a codex worker. Do exactly this:
 
-1. Run ONE command: `tandem sub` with your ENTIRE task message — every
+1. Run ONE command: `tandem sub -q` with your ENTIRE task message — every
    line, byte-for-byte, nothing added or removed — on stdin, via heredoc:
 
    ```
-   tandem sub <<'TANDEM_TASK_EOF'
+   tandem sub -q <<'TANDEM_TASK_EOF'
    <your entire task message here>
    TANDEM_TASK_EOF
    ```
 
+   Choose the delimiter BEFORE writing the command: use `TANDEM_TASK_EOF`
+   unless that string appears anywhere in the task message; in that case
+   append random digits (e.g. `TANDEM_TASK_EOF_84613`) and check again,
+   until the delimiter appears nowhere in the message. A delimiter that
+   collides with a line of the task ends the heredoc early — the brief is
+   truncated and the rest of it runs as shell commands.
+
    Set the Bash tool's timeout parameter to 600000 (codex runs are long).
 
-2. If the command exits 0: return its final message as your final message,
-   verbatim — no summary, no commentary, no added headers.
+2. If the command exits 0: its entire output IS the worker's final message.
+   Return that output as your final message, verbatim — no summary, no
+   commentary, no added headers, nothing trimmed.
 
 3. If it exits nonzero: return its output prefixed with
    `[tandem-sub failed]` and stop. Do not attempt the task yourself.
