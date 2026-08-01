@@ -10,7 +10,13 @@ from pathlib import Path
 
 from .config import SubagentsConfig
 
-BRIDGE_AGENT = "codex-worker"
+# Claude registers a plugin's agents under `<plugin-name>:<agent-name>`, and
+# the bare name does NOT resolve. Live E2E on claude 2.1.220 (2026-07-31):
+# rewriting to "codex-worker" made every dispatch fail with
+#   Agent type 'codex-worker' not found. Available agents: …, tandem:codex-worker
+# so the rewrite must carry the plugin scope.
+BRIDGE_NAME = "codex-worker"
+BRIDGE_AGENT = f"tandem:{BRIDGE_NAME}"
 BRIDGE_MODEL = "haiku"
 
 
@@ -33,8 +39,11 @@ def route(
     if not isinstance(tool_input, dict):
         return None
     subagent_type = tool_input.get("subagent_type") or ""
-    # forks keep claude's native full-context contract; bridge = loop guard
-    if subagent_type in ("fork", BRIDGE_AGENT):
+    # forks keep claude's native full-context contract; bridge = loop guard.
+    # The guard is scope-insensitive: the model can (and in live traces does)
+    # ask for the bridge by either the plugin-scoped id or the bare name, and
+    # rewriting either one again would re-enter this hook forever.
+    if subagent_type == "fork" or subagent_type.rsplit(":", 1)[-1] == BRIDGE_NAME:
         return None
     prompt = tool_input.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():

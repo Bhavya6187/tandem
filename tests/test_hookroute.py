@@ -5,7 +5,13 @@ import json
 from pathlib import Path
 
 from tandem.config import SubagentsConfig
-from tandem.hookroute import BRIDGE_AGENT, BRIDGE_MODEL, find_agent_body, route
+from tandem.hookroute import (
+    BRIDGE_AGENT,
+    BRIDGE_MODEL,
+    BRIDGE_NAME,
+    find_agent_body,
+    route,
+)
 
 
 def _payload(subagent_type="Explore", prompt="find the tests", **extra):
@@ -64,6 +70,12 @@ class TestPassthrough:
 
     def test_bridge_loop_guard(self):
         assert _route(_payload(subagent_type=BRIDGE_AGENT)) is None
+
+    def test_bridge_loop_guard_is_scope_insensitive(self):
+        # the model asks for the bridge by either id (both observed live);
+        # rewriting the bare name would re-enter this hook forever
+        assert _route(_payload(subagent_type=BRIDGE_NAME)) is None
+        assert _route(_payload(subagent_type=f"other:{BRIDGE_NAME}")) is None
 
     def test_route_off(self):
         assert _route(_payload(), cfg=SubagentsConfig(route="off")) is None

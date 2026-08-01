@@ -23,6 +23,21 @@ def test_hooks_register_hook_route():
     assert cmds == ["tandem hook-route || true"]
 
 
+def test_hook_rewrite_target_matches_the_plugin_scoped_agent_id():
+    """Claude resolves a plugin's agents as `<plugin-name>:<agent-name>` and
+    rejects the bare name (live, 2.1.220: "Agent type 'codex-worker' not
+    found. Available agents: …, tandem:codex-worker"). If the manifest name
+    or the agent's `name:` ever moves, the hook's rewrite target must move
+    with it — otherwise every rerouted dispatch fails."""
+    from tandem.hookroute import BRIDGE_AGENT
+
+    plugin_name = json.loads(
+        (PLUGIN / ".claude-plugin" / "plugin.json").read_text())["name"]
+    front = (PLUGIN / "agents" / "codex-worker.md").read_text().split("---")[1]
+    agent_name = re.search(r"^name:\s*(\S+)\s*$", front, re.M).group(1)
+    assert BRIDGE_AGENT == f"{plugin_name}:{agent_name}"
+
+
 def test_bridge_agent_definition():
     text = (PLUGIN / "agents" / "codex-worker.md").read_text()
     front = text.split("---")[1]
@@ -33,6 +48,10 @@ def test_bridge_agent_definition():
     assert "tandem sub" in body
     assert "verbatim" in body
     assert "[tandem-sub failed]" in body
+    # live E2E (haiku 4.5, 2026-07-31): given a one-command task and a Bash
+    # tool, the relay answered it itself with `find` instead of delegating.
+    # The unconditional "never do the task yourself" rule is the fix.
+    assert re.search(r"never do the task yourself", body, re.I)
     # quiet mode: the command's whole output IS the final message, so the
     # relay has nothing to extract (inherited stdio would hand it codex's
     # entire exec log instead)
