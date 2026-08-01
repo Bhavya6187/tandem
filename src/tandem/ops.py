@@ -11,8 +11,12 @@ nothing synced ever bounces back.
 
 from __future__ import annotations
 
+import fcntl
+import json
 import subprocess
 import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import paths
@@ -20,6 +24,7 @@ from .harness import get_adapter, other
 from .runner import TailLoop, await_codex_rollout
 from .state import PairedSession, StateStore
 from .sync import SyncEngine, SyncSetupError
+from .util import append_jsonl_fsync, read_jsonl, uuid7
 
 # seam for tests (patching subprocess.run itself would also intercept the
 # CLI version probes)
@@ -205,3 +210,45 @@ def _file_size(path: Path | None) -> int | None:
         return path.stat().st_size
     except OSError:
         return None
+
+
+@contextmanager
+def _sub_lock():
+    """Serializes drain-then-fork across parallel `tandem sub` processes.
+    The cold task path never takes this lock — it touches no shared state."""
+    lock_path = paths.tandem_home() / "sub.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def fork_shadow(store: StateStore, session: PairedSession) -> tuple[str, Path]:
+    """Copy the codex shadow rollout into a fresh ephemeral rollout for one
+    subagent worker: same history, new uuid7 identity, originator
+    'tandem-sub'. The fork is NEVER registered as a sync source. Returns
+    (fork_session_id, fork_path)."""
+    if not session.codex_session_id:
+        _create_codex_shadow_late(store, session)
+        session = store.get_session(session.tandem_id) or session
+    drain_source(store, session, session.active, flush_dangling=True)
+    src = source_transcript(session, "codex")
+    if src is None:
+        raise SyncSetupError("codex shadow rollout not found")
+    entries = read_jsonl(src)
+    if not entries or entries[0].get("type") != "session_meta":
+        raise SyncSetupError("shadow rollout has no session_meta first line")
+    fork_id = uuid7()
+    meta = json.loads(json.dumps(entries[0]))  # deep copy
+    meta["payload"]["id"] = fork_id
+    meta["payload"]["session_id"] = fork_id
+    meta["payload"]["originator"] = "tandem-sub"
+    now = datetime.now(timezone.utc)
+    day_dir = paths.codex_sessions_dir() / now.strftime("%Y/%m/%d")
+    fname = f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{fork_id}.jsonl"
+    fork_path = day_dir / fname
+    append_jsonl_fsync(fork_path, [meta] + entries[1:])
+    return fork_id, fork_path
