@@ -409,7 +409,7 @@ def extract_transcript(events: Iterable[dict]) -> dict:
         "hook_reroute_decisions": hook_reroutes,
         "agent_types": dict(Counter(resolved.values())),
         "requested_agent_types": dict(Counter(requested.values())),
-        "tokens": _tokens(last),
+        "tokens": _tokens(last, events),
         "cost_usd": float(last.get("total_cost_usd") or 0.0),
         "duration_ms": int(last.get("duration_ms") or 0),
         "num_turns": int(last.get("num_turns") or 0),
@@ -419,15 +419,27 @@ def extract_transcript(events: Iterable[dict]) -> dict:
     }
 
 
-def _tokens(result: Mapping[str, Any]) -> dict:
-    """Token totals from the LAST result event.
+def _tokens(result: Mapping[str, Any], events: list[dict]) -> dict:
+    """Token totals, from the best source this transcript has.
 
-    An async Agent dispatch makes claude emit one `result` per turn; the last
-    one's `modelUsage` is the whole session, subagents included. `usage` is
-    per-turn, so it is only the fallback (and the fallback matters: a run
-    killed on timeout may have no modelUsage at all)."""
+    1. The LAST result event's `modelUsage` — an async Agent dispatch makes
+       claude emit one `result` per turn, and only the last one's modelUsage is
+       the whole session, subagents included.
+    2. That result's per-turn `usage`.
+    3. No result event at all: sum `message.usage` over the assistant events.
+       A run killed on the timeout never reaches a result, and reporting 0
+       tokens for it would fold a free run into the mean for whichever arm
+       times out — flattering exactly the arm that failed."""
     tot = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
+
+    def add_snake(u: Mapping[str, Any]) -> None:
+        tot["input"] += int(u.get("input_tokens") or 0)
+        tot["output"] += int(u.get("output_tokens") or 0)
+        tot["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
+        tot["cache_creation"] += int(u.get("cache_creation_input_tokens") or 0)
+
     mu = result.get("modelUsage")
+    usage = result.get("usage")
     if isinstance(mu, dict) and mu:
         for per in mu.values():
             if not isinstance(per, dict):
@@ -436,13 +448,15 @@ def _tokens(result: Mapping[str, Any]) -> dict:
             tot["output"] += int(per.get("outputTokens") or 0)
             tot["cache_read"] += int(per.get("cacheReadInputTokens") or 0)
             tot["cache_creation"] += int(per.get("cacheCreationInputTokens") or 0)
+    elif isinstance(usage, dict):
+        add_snake(usage)
     else:
-        u = result.get("usage")
-        if isinstance(u, dict):
-            tot["input"] = int(u.get("input_tokens") or 0)
-            tot["output"] = int(u.get("output_tokens") or 0)
-            tot["cache_read"] = int(u.get("cache_read_input_tokens") or 0)
-            tot["cache_creation"] = int(u.get("cache_creation_input_tokens") or 0)
+        for ev in events:
+            if ev.get("type") != "assistant":
+                continue
+            u = (ev.get("message") or {}).get("usage")
+            if isinstance(u, dict):
+                add_snake(u)
     tot["total"] = sum(tot.values())
     return tot
 
@@ -462,17 +476,40 @@ def hook_declined(ex: Mapping[str, Any]) -> bool:
         bool((ex.get("side_effects") or {}).get("warn_stamp"))
 
 
+def native_dispatches(ex: Mapping[str, Any]) -> int:
+    """Dispatches that ran on claude. Derived when the field is absent so that
+    an extraction.json written by an older runner still classifies."""
+    if ex.get("native_dispatches") is not None:
+        return int(ex["native_dispatches"])
+    return max(0, int(ex.get("dispatches") or 0) - int(ex.get("reroutes") or 0))
+
+
 def validity_for(arm: str, ex: Mapping[str, Any]) -> str:
     """Was this run a measurement of what we think it measured?
 
     Arm A exists to measure rerouted subagents; if nothing rerouted it measured
-    arm B a second time. A notice means the hook fired and declined — that
-    dispatch ran natively — so a notice in arm A invalidates it even when
-    something else did reroute."""
+    arm B a second time. Two ways that goes wrong, and only one of them is
+    noisy:
+
+    - the hook could not reroute at all (no session, no usable codex). It says
+      so, once, via the notice — `hook_declined`.
+    - the hook fired, was healthy, and still returned None for SOME dispatches:
+      `route()` passes through `fork` subagents, dispatches already aimed at
+      the bridge, and blank prompts, and `missed_reroute_notice()` is silent
+      for exactly those (has_session and codex_ok short-circuit it). Nothing
+      announces it. The scaffold asks for >=2 parallel dispatches, so a run
+      with one rerouted and one native Agent is entirely reachable — and
+      averaging it in would blend the two arms, which is the one error this
+      bench cannot afford.
+
+    Hence a distinct flag rather than a warning: the aggregator excludes it.
+    Arm B is native by definition, so unrerouted dispatches are the point
+    there, not a defect."""
     reroutes = int(ex.get("reroutes") or 0)
     if arm == "a":
-        return "valid" if reroutes > 0 and not hook_declined(ex) \
-            else "invalid_no_reroute"
+        if reroutes == 0 or hook_declined(ex):
+            return "invalid_no_reroute"
+        return "invalid_partial_reroute" if native_dispatches(ex) else "valid"
     if arm == "b":
         return "invalid_leak" if reroutes > 0 else "valid"
     return "valid"
@@ -488,10 +525,19 @@ def mark_validity(arm: str, ex: dict) -> dict:
     if arm == "a" and hook_declined(ex):
         warnings.append("tandem hook-route emitted its 'nothing was rerouted' "
                         "notice: the hook fired and declined")
+    if arm == "a" and int(ex.get("reroutes") or 0) and native_dispatches(ex):
+        warnings.append(
+            f"only {ex.get('reroutes')} of {ex.get('dispatches')} dispatches "
+            f"rerouted; {native_dispatches(ex)} ran natively with no notice "
+            f"(spawned agent types: {ex.get('agent_types')})")
     hook_reroutes = int(ex.get("hook_reroute_decisions") or 0)
     if hook_reroutes > int(ex.get("reroutes") or 0):
         warnings.append(f"hook rewrote {hook_reroutes} dispatch(es) but only "
                         f"{ex.get('reroutes')} spawned as the bridge")
+    if ex.get("result_events") == 0:        # absent key != counted zero
+        warnings.append("claude produced no result event — it was killed or "
+                        "died mid-run; token totals fall back to per-message "
+                        "usage and are not session-wide")
     if ex.get("result_is_error"):
         warnings.append("claude's final result event is an error")
     ex["warnings"] = warnings
@@ -802,15 +848,30 @@ def _launch(cmd: list[str], cwd: str, env: dict, out: Path, err: Path,
             timed_out = True
             _kill_group(proc)
             rc = proc.returncode if proc.returncode is not None else -signal.SIGKILL
+        except KeyboardInterrupt:
+            # start_new_session means the Ctrl-C that reached us did NOT reach
+            # claude. Left alone it would keep spending budget, keep dispatching
+            # codex workers, and keep writing under the shared arm-A
+            # TANDEM_HOME — where its late `tandem sub` logs would land inside
+            # the NEXT run's side_effects_since() window and look like reroutes
+            # that run never made.
+            _kill_group(proc)
+            raise
     return rc, timed_out, time.monotonic() - started
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
+    """SIGTERM the child's whole process group, then SIGKILL what survives.
+
+    A failed killpg is never a reason to stop: SIGTERM can fail (EPERM, or the
+    leader already reaped while a grandchild lives on) while SIGKILL would
+    still land, and giving up after the first error is how an escalation path
+    silently becomes a single polite request."""
     for sig, grace in ((signal.SIGTERM, 10), (signal.SIGKILL, 5)):
         try:
             os.killpg(os.getpgid(proc.pid), sig)
         except (OSError, ProcessLookupError):
-            return
+            pass
         try:
             proc.wait(timeout=grace)
             return

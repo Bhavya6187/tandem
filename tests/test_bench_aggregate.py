@@ -10,11 +10,11 @@ aggregate = load_bench_module("aggregate")
 
 
 def verdict(task="t1", arm="a", repeat=0, validity="valid", status="verified",
-            passed=True, wall=10.0, tokens=1000, dispatches=2):
+            passed=True, wall=10.0, tokens=1000, dispatches=2, warnings=()):
     return {
         "schema": 1, "run_id": "r1", "task": task, "family": "repoqa",
         "arm": arm, "repeat": repeat, "status": status, "passed": passed,
-        "score": None, "validity": validity,
+        "score": None, "validity": validity, "warnings": list(warnings),
         "run": {"exit_code": 0, "timed_out": False, "wall_clock_s": wall},
         "metrics": {"tokens_total": tokens, "dispatches": dispatches,
                     "reroutes": 1 if arm == "a" else 0, "notices": 0},
@@ -127,6 +127,23 @@ def test_invalid_reasons_are_broken_out():
     assert row["invalid_reasons"] == {"invalid_no_reroute": 1, "invalid_leak": 1}
 
 
+def test_warned_runs_are_counted_per_group():
+    vs = [verdict(repeat=0, warnings=["claude produced no result event"]),
+          verdict(repeat=1, warnings=["no subagent dispatches", "and another"]),
+          verdict(repeat=2)]
+    row = aggregate.summarize(vs)["rows"][0]
+    assert row["warned"] == 2
+    assert row["valid"] == 3          # a warning is not an exclusion
+
+
+def test_partial_reroute_shows_up_as_its_own_invalid_reason():
+    vs = [verdict(validity="invalid_partial_reroute", passed=None),
+          verdict(repeat=1)]
+    row = aggregate.summarize(vs)["rows"][0]
+    assert row["invalid_reasons"] == {"invalid_partial_reroute": 1}
+    assert row["valid"] == 1
+
+
 def test_timeouts_are_counted_as_runs_not_as_invalid():
     v = verdict(passed=False)
     v["run"]["timed_out"] = True
@@ -156,3 +173,22 @@ def test_render_shows_a_dash_for_unknown_pass_rate():
 
 def test_render_of_nothing_says_so():
     assert "no verdicts" in aggregate.render(aggregate.summarize([])).lower()
+
+
+def test_render_surfaces_warned_runs_per_task_and_arm():
+    out = aggregate.render(aggregate.summarize([
+        verdict(task="t1", arm="a", repeat=0,
+                warnings=["claude produced no result event"]),
+        verdict(task="t1", arm="a", repeat=1, warnings=["something else"]),
+        verdict(task="t2", arm="b", repeat=0, warnings=["one more"]),
+        verdict(task="t2", arm="b", repeat=1),
+    ]))
+    note = [ln for ln in out.splitlines() if "warning" in ln.lower()]
+    assert note, out
+    assert "t1/a × 2" in note[0]
+    assert "t2/b × 1" in note[0]
+
+
+def test_render_has_no_warning_note_when_nothing_is_warned():
+    out = aggregate.render(aggregate.summarize([verdict()]))
+    assert "warning" not in out.lower()

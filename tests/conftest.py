@@ -33,6 +33,39 @@ def load_bench_module(name):
     return mod
 
 
+def bench_stream(name):
+    """One of the live-captured stream-json fixtures, as a list of events."""
+    with open(BENCH_FIXTURES / f"stream-{name}.jsonl") as fh:
+        return [json.loads(ln) for ln in fh if ln.strip()]
+
+
+def bench_mixed_stream():
+    """A run where one dispatch rerouted and one stayed native, silently.
+
+    Real and reachable: hookroute.route() returns None — no rewrite, and no
+    notice either, because missed_reroute_notice() also stays silent when the
+    session is healthy — for `fork` subagents, for dispatches already aimed at
+    the bridge, and for blank prompts. The bench scaffold asks for >=2 parallel
+    dispatches, so arm A can genuinely produce one of each.
+
+    Built by splicing the native fixture's Agent dispatch (a distinct
+    tool_use_id) into the rerouted fixture, so every event is one claude
+    really emitted."""
+    rerouted = bench_stream("reroute")
+    native = bench_stream("native")
+    extra = [e for e in native
+             if (e.get("type") == "system" and e.get("subtype") == "task_started"
+                 and e.get("task_type") == "local_agent")
+             or (e.get("type") == "assistant"
+                 and any(b.get("name") in ("Agent", "Task")
+                         for b in (e.get("message") or {}).get("content") or []
+                         if isinstance(b, dict)))]
+    assert len(extra) == 2, extra          # one tool_use + one task_started
+    out = list(rerouted)
+    out[-2:-2] = extra                     # before the trailing result events
+    return out
+
+
 def write_line(path, obj=None, text=None):
     with open(path, "a") as f:
         f.write((text if text is not None else json.dumps(obj)) + "\n")

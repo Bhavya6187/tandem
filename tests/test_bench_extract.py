@@ -18,7 +18,7 @@ for paths and for the operator's own SessionStart plugin context:
 import json
 
 import pytest
-from conftest import BENCH_FIXTURES, load_bench_module
+from conftest import BENCH_FIXTURES, bench_mixed_stream, load_bench_module
 
 runner = load_bench_module("runner")
 
@@ -40,6 +40,11 @@ def reroute():
 @pytest.fixture
 def notice():
     return runner.extract_transcript(events("notice"))
+
+
+@pytest.fixture
+def mixed():
+    return runner.extract_transcript(bench_mixed_stream())
 
 
 # --- session facts -----------------------------------------------------------
@@ -88,6 +93,14 @@ def test_background_bash_is_not_a_dispatch(reroute):
     assert reroute["dispatches"] == 1
 
 
+def test_mixed_run_counts_both_kinds(mixed):
+    assert mixed["dispatches"] == 2
+    assert mixed["reroutes"] == 1
+    assert mixed["native_dispatches"] == 1
+    assert mixed["notices"] == 0          # the silent case: no notice at all
+    assert mixed["agent_types"] == {"tandem:codex-worker": 1, "Explore": 1}
+
+
 def test_hook_decisions_are_counted(reroute, native):
     assert reroute["hook_reroute_decisions"] == 1
     assert native["hook_reroute_decisions"] == 0
@@ -127,6 +140,27 @@ def test_tokens_fall_back_to_usage_when_model_usage_is_absent():
     }
 
 
+def test_killed_run_with_no_result_event_still_reports_tokens(native):
+    # a run killed on timeout never emits a `result`; the per-message usage on
+    # every assistant event is what is left, and folding a 0 into the token
+    # means would quietly flatter whichever arm timed out
+    killed = [e for e in events("native") if e.get("type") != "result"]
+    ex = runner.extract_transcript(killed)
+    assert ex["result_events"] == 0
+    assert ex["tokens"]["output"] > 0
+    assert ex["tokens"]["total"] > 0
+    # the fallback is per-message usage, so it is a different (smaller) number
+    # than the session-wide modelUsage the result event carries
+    assert ex["tokens"]["total"] != native["tokens"]["total"]
+
+
+def test_a_missing_result_event_is_warned_about():
+    ex = runner.mark_validity("b", runner.extract_transcript(
+        [e for e in events("native") if e.get("type") != "result"]))
+    assert ex["validity"] == "valid"           # a killed run is still a run
+    assert any("result event" in w for w in ex["warnings"])
+
+
 def test_empty_transcript_extracts_zeros():
     e = runner.extract_transcript([])
     assert e["dispatches"] == 0 and e["reroutes"] == 0 and e["notices"] == 0
@@ -151,7 +185,8 @@ def test_read_stream_missing_file_is_empty(tmp_path):
 
 
 def make(reroutes=0, notices=0, dispatches=1):
-    return {"dispatches": dispatches, "reroutes": reroutes, "notices": notices}
+    return {"dispatches": dispatches, "reroutes": reroutes, "notices": notices,
+            "native_dispatches": dispatches - reroutes}
 
 
 @pytest.mark.parametrize("arm,ex,expected", [
@@ -159,12 +194,31 @@ def make(reroutes=0, notices=0, dispatches=1):
     ("a", make(reroutes=0), "invalid_no_reroute"),
     ("a", make(reroutes=1, notices=1), "invalid_no_reroute"),
     ("a", make(reroutes=0, dispatches=0), "invalid_no_reroute"),
+    # one rerouted, one not — no notice, so nothing else would have caught it
+    ("a", make(reroutes=1, dispatches=2), "invalid_partial_reroute"),
+    ("a", make(reroutes=2, dispatches=5), "invalid_partial_reroute"),
+    # nothing rerouted at all stays the stronger, more specific verdict
+    ("a", make(reroutes=0, dispatches=3), "invalid_no_reroute"),
     ("b", make(reroutes=0), "valid"),
     ("b", make(reroutes=1), "invalid_leak"),
     ("b", make(reroutes=0, notices=1), "valid"),
+    # arm B is native by definition; unrerouted dispatches are the point
+    ("b", make(reroutes=0, dispatches=4), "valid"),
 ])
 def test_validity_rules(arm, ex, expected):
     assert runner.validity_for(arm, ex) == expected
+
+
+def test_partial_reroute_is_derived_when_native_dispatches_is_absent():
+    # older extraction.json files, and synthetic dicts, only have the counts
+    assert runner.validity_for("a", {"dispatches": 3, "reroutes": 1}) == \
+        "invalid_partial_reroute"
+
+
+def test_partial_reroute_warning_names_the_counts(mixed):
+    ex = runner.mark_validity("a", mixed)
+    assert ex["validity"] == "invalid_partial_reroute"
+    assert any("1 of 2" in w for w in ex["warnings"]), ex["warnings"]
 
 
 def test_warn_stamp_alone_invalidates_arm_a():

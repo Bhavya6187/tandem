@@ -83,6 +83,11 @@ def _tally(verdicts: list[dict], task: str | None, arm: str) -> dict:
         "timeouts": sum(1 for v in verdicts
                         if (v.get("run") or {}).get("timed_out")),
         "invalid_reasons": dict(Counter(v.get("validity") for v in invalid)),
+        # A warning is not an exclusion — a killed run whose token totals fell
+        # back to per-message usage is still a measurement — but it IS the
+        # reason a mean can be quietly degenerate, so the table has to say the
+        # runs exist rather than leaving them to whoever opens verdict.json.
+        "warned": sum(1 for v in verdicts if v.get("warnings")),
     }
     return row
 
@@ -133,13 +138,19 @@ def render(summary: Mapping[str, Any]) -> str:
 
     reasons = Counter()
     timeouts = 0
+    warned = []
     for r in rows:
         reasons.update(r["invalid_reasons"])
         timeouts += r["timeouts"]
+        if r["warned"]:
+            warned.append(f"{r['task']}/{r['arm']} × {r['warned']}")
     notes = []
     if reasons:
         notes.append("Excluded as invalid: "
                      + ", ".join(f"{k} × {v}" for k, v in sorted(reasons.items())))
+    if warned:
+        notes.append("Runs with warnings (read their verdict.json before "
+                     "trusting the row): " + ", ".join(warned))
     if timeouts:
         notes.append(f"Timed out (counted, not excluded): {timeouts}")
     unverified = sum(r["unverified"] for r in rows)

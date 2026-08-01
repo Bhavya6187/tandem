@@ -7,12 +7,15 @@ canned stream-json they replay is the sanitized live fixture pair."""
 
 import json
 import os
+import signal
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from conftest import BENCH_DIR, BENCH_FIXTURES, load_bench_module
+from conftest import (BENCH_DIR, BENCH_FIXTURES, bench_mixed_stream,
+                      load_bench_module)
 
 runner = load_bench_module("runner")
 
@@ -259,6 +262,18 @@ def test_run_marks_a_leak_in_arm_b(rig, monkeypatch):
     assert b["validity"] == "invalid_leak"
 
 
+def test_run_marks_a_partial_reroute_in_arm_a(rig, monkeypatch, tmp_path):
+    mixed = tmp_path / "mixed.jsonl"
+    mixed.write_text("".join(json.dumps(e) + "\n" for e in bench_mixed_stream()))
+    monkeypatch.setenv("FAKE_STREAM_A", str(mixed))
+    runner.main(["run", *rig.argv("--run-id", "t1", "--arms", "a")])
+    a = json.loads((rundir(rig, arm="a") / "extraction.json").read_text())
+    v = json.loads((rundir(rig, arm="a") / "verdict.json").read_text())
+    assert a["reroutes"] == 1 and a["native_dispatches"] == 1
+    assert a["validity"] == v["validity"] == "invalid_partial_reroute"
+    assert any("1 of 2" in w for w in v["warnings"])
+
+
 def test_run_marks_arm_a_without_reroute(rig, monkeypatch):
     monkeypatch.setenv("FAKE_STREAM_A", str(BENCH_FIXTURES / "stream-notice.jsonl"))
     runner.main(["run", *rig.argv("--run-id", "t1", "--arms", "a")])
@@ -445,6 +460,67 @@ def test_smoke_runs_the_pinned_smoke_task_on_both_arms(rig):
     assert len(rig.invocations()) == 2
     for arm in ("a", "b"):
         assert rundir(rig, arm=arm, run_id="s1").is_dir()
+
+
+# --- process control ---------------------------------------------------------
+
+
+def test_ctrl_c_kills_the_claude_process_group_before_propagating(
+        tmp_path, monkeypatch):
+    """SIGINT reaches the runner but not claude: _launch opens the child in its
+    own session, so nothing else would ever kill it."""
+    killed = []
+    monkeypatch.setattr(runner, "_kill_group", lambda p: killed.append(p.pid))
+    real_wait = subprocess.Popen.wait
+    seen = {"n": 0}
+
+    def fake_wait(self, timeout=None):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            raise KeyboardInterrupt
+        return real_wait(self, timeout=timeout)
+
+    monkeypatch.setattr(subprocess.Popen, "wait", fake_wait)
+    with pytest.raises(KeyboardInterrupt):
+        runner._launch([sys.executable, "-c", "import time; time.sleep(0.3)"],
+                       str(tmp_path), dict(os.environ),
+                       tmp_path / "o", tmp_path / "e", 60)
+    assert len(killed) == 1
+
+
+def test_kill_group_kills_a_real_child(tmp_path):
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                            start_new_session=True)
+    runner._kill_group(proc)
+    assert proc.poll() is not None
+
+
+def test_kill_group_still_tries_sigkill_after_a_failed_sigterm(monkeypatch):
+    sent = []
+
+    def fake_killpg(pgid, sig):
+        sent.append(sig)
+        if sig == signal.SIGTERM:
+            raise PermissionError("not permitted")
+
+    monkeypatch.setattr(os, "killpg", fake_killpg)
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+
+    class Proc:
+        pid = 424242
+        returncode = None
+
+        def __init__(self):
+            self.waits = 0
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("claude", timeout)
+            return -9
+
+    runner._kill_group(Proc())
+    assert sent == [signal.SIGTERM, signal.SIGKILL]
 
 
 # --- family contract ---------------------------------------------------------
