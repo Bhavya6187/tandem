@@ -59,6 +59,40 @@ text between terminals:
 tandem run --on codex "second opinion: why is this test flaky?"
 ```
 
+### 🐣 Subagents on the cheap model.
+
+Load tandem's Claude Code plugin and Claude's subagent dispatches run on
+the codex model you choose instead — automatically, with the task brief
+forwarded verbatim and the result returned through Claude's own machinery.
+Claude orchestrates; codex does the legwork; your Claude quota stays on the
+main thread. The plugin lives in this repo (not in the wheel), so point
+Claude at a clone:
+
+```bash
+git clone https://github.com/Bhavya6187/tandem
+claude --plugin-dir /path/to/tandem/plugin
+```
+
+Then create `~/.tandem/config.toml` and pick your plan's cheap model (ids
+are listed in `~/.codex/models_cache.json`):
+
+```toml
+[subagents]
+model = "gpt-5.6-luna"  # ← the whole point: set this
+route = "all"           # all | off
+context = "match"       # match | task | full
+keep_forks = false      # keep each worker's rollout for debugging
+```
+
+**Without `model`, workers run on your codex account's default model —
+probably not the cheap one.** Every other key above is already the default;
+that one is not, and routing is on as soon as the plugin loads, so
+`tandem doctor` warns until you set it.
+
+Fork dispatches stay on Claude, each worker's full codex log is kept under
+`~/.tandem/subagents/`, and `tandem status` lists the workers running right
+now. Drop the `--plugin-dir` flag and Claude is byte-for-byte stock again.
+
 ### 🏠 Every model in its native harness.
 
 This is not a lowest-common-denominator wrapper UI. Claude runs in real
@@ -114,6 +148,7 @@ tandem resume a1b2c3d4e5f6   # a specific one (id from the exit hint)
 | `switch` | Flip active/shadow and enter the other agent — at the tandem prompt, or one-shot from your shell (one-shot only flips, it doesn't enter) |
 | `tandem resume [id]` | Continue the most recent (or a specific) session |
 | `tandem run --on codex "…"` | One-off prompt to the *other* agent, with full context |
+| `tandem sub "…"` | Run one delegated task on a codex model (used by the plugin's reroute hook) |
 | `tandem status` | Show pairing, roles, and sync position |
 
 There are also three maintenance commands — `tandem doctor` (health

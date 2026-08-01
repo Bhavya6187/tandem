@@ -16,6 +16,12 @@ SEED_NOTE = (
     "this session's own tool vocabulary."
 )
 
+# Seed line of the minimal rollout a cold `tandem sub` worker resumes. Cold
+# workers get no shared history; the note exists so the rollout has model
+# context at all (codex resume and tandem's own validate_transcript both
+# reject a rollout with no response_item).
+SUB_SEED_NOTE = "[tandem] Delegated subagent worker session (no shared history)."
+
 # Untranslatable-entry placeholder (decision for the spec's open question).
 PLACEHOLDER = (
     "[tandem: turn {turn} could not be translated from {source} — {reason}; "

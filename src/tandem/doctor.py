@@ -10,6 +10,7 @@ calls) on top.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -225,9 +226,62 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
             f"{len(qfiles)} quarantined raw entr(y/ies) under {qdir}"
         )
 
+    _subagent_checks(report, session)
+
     if live:
         _live_resume_checks(report, session, transcripts)
     return report
+
+
+def _subagent_checks(report: DoctorReport, session) -> None:
+    """Subagent routing hygiene: routing is on by default but the model is
+    not chosen for you, billing follows codex auth, and codex workers only
+    see CLAUDE.md content inside the tandem:shared block."""
+    from . import paths
+    from .config import load_subagents_config
+
+    cfg = load_subagents_config()
+    if cfg.route == "off":
+        return
+    # model="" means no `-m`, i.e. the codex account default — the frontier
+    # tier on every plan seen so far. Combined with the route="all" default
+    # that silently sends every dispatch to the most expensive model, so it
+    # is a warning, not a note. The dataclass default stays empty on
+    # purpose: a baked-in id would 400 on accounts that lack it.
+    if not cfg.model:
+        report.warn(
+            "subagents: no model configured — workers will use your codex "
+            "account's default (set [subagents] model in "
+            "~/.tandem/config.toml to a cheap tier)"
+        )
+    if os.environ.get("OPENAI_API_KEY"):
+        report.warn(
+            "subagents: OPENAI_API_KEY is set — codex may bill the API "
+            "instead of your ChatGPT subscription"
+        )
+    auth_path = paths.codex_home() / "auth.json"
+    try:
+        auth = json.loads(auth_path.read_text())
+    except (OSError, ValueError):
+        auth = None
+    # valid JSON that is not an object would make .get raise AttributeError,
+    # which no doctor check may do: an unreadable auth.json is a skipped
+    # check, never a traceback.
+    if isinstance(auth, dict) and auth.get("OPENAI_API_KEY") and not auth.get("tokens"):
+        report.warn(
+            "subagents: codex auth is API-key based — subagent runs "
+            "will bill the API, not the subscription"
+        )
+    claude_md = Path(session.cwd) / "CLAUDE.md"
+    try:
+        if "tandem:shared:begin" not in claude_md.read_text():
+            report.warn(
+                "subagents: CLAUDE.md has no tandem:shared block — project "
+                "rules will not reach codex workers (move subagent-relevant "
+                "rules into the shared block)"
+            )
+    except OSError:
+        pass
 
 
 def _live_resume_checks(report: DoctorReport, session, transcripts) -> None:

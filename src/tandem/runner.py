@@ -125,9 +125,19 @@ class TailLoop:
         return len(lines)
 
 
+# Rollouts tandem wrote itself: "tandem" heads a seeded shadow (codex
+# adapter), "tandem-sub" heads a subagent rollout (ops.fork_shadow for
+# --context full, ops.seed_sub_rollout for the cold path). Both live in
+# codex's sessions dir with a fresh mtime and the session cwd, so discovery
+# must skip them or a live worker gets adopted as the pair's real codex
+# session.
+_TANDEM_ORIGINATORS = ("tandem", "tandem-sub")
+
+
 def await_codex_rollout(cwd: str, after: float, timeout: float | None = None) -> Path | None:
     """Find the rollout file codex just created for this cwd (codex mints its
-    own session id; tandem discovers it from the filesystem)."""
+    own session id; tandem discovers it from the filesystem). Rollouts tandem
+    authored are never candidates."""
     deadline = None if timeout is None else time.time() + timeout
     while True:
         for p in paths.iter_codex_rollouts_newest_first():
@@ -140,7 +150,8 @@ def await_codex_rollout(cwd: str, after: float, timeout: float | None = None) ->
                 if (
                     meta.get("type") == "session_meta"
                     and meta.get("payload", {}).get("cwd") == cwd
-                    and meta.get("payload", {}).get("originator") != "tandem"
+                    and meta.get("payload", {}).get("originator")
+                    not in _TANDEM_ORIGINATORS
                 ):
                     return p
             except (OSError, json.JSONDecodeError):
@@ -213,12 +224,23 @@ class InteractiveRunner:
                 watcher.watch(sentinel)
                 watcher.start()
                 loop = TailLoop(store, current, active, path, sink)
+                # `tandem sub --context full` drains this same cursor row from
+                # a separate process, holding `ops._sub_lock()` across its
+                # drain-then-fork. Two concurrent drains of one cursor
+                # translate the same lines twice — duplicate turns and call ids
+                # in the shadow and in the fork — so the tail thread takes the
+                # same flock. Kept tight around the drain itself: the wait
+                # between iterations must not hold it. (Imported here: `ops`
+                # imports this module.)
+                from . import ops
                 try:
                     while not stop.is_set():
-                        loop.drain()
+                        with ops._sub_lock():
+                            loop.drain()
                         watcher.wait()
                     # final drain after the CLI exits
-                    loop.drain()
+                    with ops._sub_lock():
+                        loop.drain()
                     errors.extend(loop.errors)
                 finally:
                     watcher.stop()
