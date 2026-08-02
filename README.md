@@ -194,6 +194,7 @@ tandem resume a1b2c3d4e5f6   # a specific one (id from the exit hint)
 | `tandem run --on codex "…"` | One-off prompt to the *other* agent, with full context |
 | `tandem sub "…"` | Run one delegated task on a codex model (used by the plugin's reroute hook; `--sandbox read-only\|workspace-write` overrides the dispatching session's write consent) |
 | `tandem status` | Show pairing, roles, and sync position |
+| `tandem plugin install` | Install the tandem Claude Code plugin through claude's own CLI (marketplace add + install) |
 
 There are also three maintenance commands — `tandem doctor` (health
 check: verifies both sessions are resumable), `tandem sync` (manual

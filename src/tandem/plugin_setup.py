@@ -34,7 +34,7 @@ def is_plugin_installed() -> bool:
     stay silent.
     """
     try:
-        raw = paths.claude_installed_plugins_path().read_text()
+        raw = paths.claude_installed_plugins_path().read_text(encoding="utf-8")
     except FileNotFoundError:
         return False
     # ValueError covers the UnicodeDecodeError read_text() raises when the
@@ -61,7 +61,8 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess | None:
     """Echo-and-run one claude command; None when it cannot run at all."""
     click.echo("  $ " + " ".join(cmd))
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=120)
     except (OSError, subprocess.TimeoutExpired):
         return None
 
