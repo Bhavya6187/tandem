@@ -116,3 +116,6 @@ def test_bridge_agent_definition():
     # containing that line truncates the brief and runs the rest as shell
     assert "TANDEM_TASK_EOF_" in body
     assert re.search(r"unless .*appears|appears .*in the task", body)
+    assert "[tandem-sub blocked: write]" in body
+    assert "--sandbox workspace-write" in body
+    assert re.search(r"[Nn]ever add that flag", body)

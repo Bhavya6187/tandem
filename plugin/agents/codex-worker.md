@@ -41,3 +41,14 @@ Do exactly this:
 3. If it exits nonzero: return its output prefixed with
    `[tandem-sub failed]` and stop. Do not attempt the task yourself — the
    session that dispatched you decides what happens next.
+
+4. The output may end with a `[tandem-sub blocked: write]` trailer: codex
+   finished, but its sandbox rejected the file changes. Return the whole
+   output verbatim as usual — the trailer is for the session that
+   dispatched you, not for you to act on.
+
+5. The ONE exception to the fixed command form: if the session that
+   dispatched you sends a follow-up message telling you to retry with
+   write access, run the SAME heredoc command again with the flag added:
+   `tandem sub -q --sandbox workspace-write <<'TANDEM_TASK_EOF' ...`.
+   Never add that flag on your own initiative.

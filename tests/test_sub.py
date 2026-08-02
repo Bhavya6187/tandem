@@ -684,3 +684,116 @@ class TestSandboxPlumbing:
         r = click.testing.CliRunner().invoke(cli.main, ["sub", "brief"])
         assert r.exit_code == 0
         assert calls["kw"]["sandbox"] == ""
+
+
+class TestBlockedWriteFooter:
+    def _fake_run_blocked(self, last_text="Could not write the file."):
+        def fake_run(argv, cwd=None, **kw):
+            # non-quiet runs pass no `-o`: stdio is inherited and codex
+            # writes no last-message file. The rejected patch still lands.
+            if "-o" in argv:
+                Path(argv[argv.index("-o") + 1]).write_text(last_text)
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            write_line(sub_path, {
+                "timestamp": "t", "type": "event_msg",
+                "payload": {"type": "patch_apply_end", "stdout": "",
+                            "success": False,
+                            "changes": {"plugin/README.md": {"type": "add"}}},
+            })
+            return _R(0)
+        return fake_run
+
+    def test_quiet_blocked_write_appends_structured_footer(
+            self, env_factory, monkeypatch, capsys):
+        env = env_factory(active="claude")
+        monkeypatch.setattr(ops, "_run", self._fake_run_blocked())
+        code = ops.run_sub(env.store, env.session, "t", quiet=True)
+        assert code == 0                       # exit code stays codex's
+        out = capsys.readouterr().out
+        assert "Could not write the file." in out
+        assert out.index("Could not write") < out.index(ops.BLOCKED_HEADER)
+        assert "plugin/README.md" in out
+        assert "--sandbox workspace-write" in out   # the retry hint
+
+    def test_retry_hint_suppressed_when_already_workspace_write(
+            self, env_factory, monkeypatch, capsys):
+        # blocked even with write access => the hint would be a lie
+        env = env_factory(active="claude")
+        monkeypatch.setattr(ops, "_run", self._fake_run_blocked())
+        ops.run_sub(env.store, env.session, "t", quiet=True,
+                    sandbox="workspace-write")
+        out = capsys.readouterr().out
+        assert ops.BLOCKED_HEADER in out
+        assert "--sandbox workspace-write`" not in out.split(
+            ops.BLOCKED_HEADER)[1]
+
+    def test_successful_patches_emit_no_footer(self, env_factory,
+                                               monkeypatch, capsys):
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text("done")
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            write_line(sub_path, {
+                "timestamp": "t", "type": "event_msg",
+                "payload": {"type": "patch_apply_end", "stdout": "ok",
+                            "success": True,
+                            "changes": {"a.py": {"type": "update"}}},
+            })
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_sub(env.store, env.session, "t", quiet=True)
+        assert ops.BLOCKED_HEADER not in capsys.readouterr().out
+
+    def test_non_quiet_never_prints_footer(self, env_factory, monkeypatch,
+                                           capsys):
+        # manual runs stream codex's own output; the footer is bridge
+        # protocol, not user chrome
+        env = env_factory(active="claude")
+        monkeypatch.setattr(ops, "_run", self._fake_run_blocked())
+        ops.run_sub(env.store, env.session, "t")
+        assert ops.BLOCKED_HEADER not in capsys.readouterr().out
+
+    def test_unreadable_rollout_degrades_to_no_footer(self, env_factory,
+                                                      monkeypatch, capsys):
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text("fine")
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            sub_path.write_text("not json {{{\n")
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        code = ops.run_sub(env.store, env.session, "t", quiet=True)
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "fine" in out
+        assert ops.BLOCKED_HEADER not in out
+
+    def test_full_context_ignores_patches_from_before_this_run(
+            self, env_factory, monkeypatch, capsys):
+        """A `--context full` fork inherits the pair's real codex rollout —
+        apply_patch failures from earlier interactive turns included. Those
+        are not this worker's doing, and reporting them sends the
+        orchestrator retrying a write this run never attempted."""
+        env = env_factory(active="claude")
+        ops.fast_forward(env.store, env.session, "claude")
+        write_line(env.codex_shadow, {
+            "timestamp": "t", "type": "event_msg",
+            "payload": {"type": "patch_apply_end", "stdout": "",
+                        "success": False,
+                        "changes": {"old/stale.py": {"type": "add"}}},
+        })
+        monkeypatch.setattr(ops, "_run", self._fake_run_blocked())
+        ops.run_sub(env.store, env.session, "t", quiet=True, context="full")
+        out = capsys.readouterr().out
+        # this run's own rejection is still reported ...
+        assert ops.BLOCKED_HEADER in out
+        assert "plugin/README.md" in out
+        # ... the inherited one is not
+        assert "old/stale.py" not in out

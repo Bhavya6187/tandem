@@ -326,6 +326,15 @@ def run_sub(
     else:
         sub_id, sub_path = seed_sub_rollout(session)
 
+    # Everything already in the rollout predates this run (a fork inherits the
+    # pair's whole codex history); only patches attempted below are this
+    # worker's. Newline count, as in fast_forward: whole-line JSONL, so it is
+    # the entry index — and an unreadable file just means "count from zero".
+    try:
+        sub_pre_entries = sub_path.read_bytes().count(b"\n")
+    except OSError:
+        sub_pre_entries = 0
+
     sub_root = paths.tandem_home() / "subagents" / session.tandem_id
     last_path = log_path = None
     if quiet:
@@ -363,6 +372,14 @@ def run_sub(
         # codex already produced and billed for.
         if quiet:
             _relay_last_message(last_path, log_path)
+            # Bridge protocol: turn "sandbox rejected the writes" from prose
+            # buried in the answer into a fixed trailer the orchestrating
+            # session can match on. Must read sub_path before disposal below.
+            rejected = blocked_write_paths(sub_path, since=sub_pre_entries)
+            if rejected:
+                sys.stdout.write(blocked_footer(
+                    rejected, retry_hint=sandbox != "workspace-write"))
+                sys.stdout.flush()
         marker.unlink(missing_ok=True)
         if keep_forks:
             sub_root.mkdir(parents=True, exist_ok=True)
@@ -372,6 +389,57 @@ def run_sub(
         else:
             sub_path.unlink(missing_ok=True)
     return code
+
+
+# The bridge-protocol marker for "codex finished but the sandbox rejected
+# its writes". The orchestrating session matches on this exact line, so it
+# is public API: change it and every dispatching model's instructions rot.
+BLOCKED_HEADER = "[tandem-sub blocked: write]"
+
+
+def blocked_write_paths(sub_path: Path, *, since: int = 0) -> list[str]:
+    """Paths whose apply_patch the sandbox rejected during this run, in
+    event order. Codex records each attempt as event_msg/patch_apply_end
+    with a success flag (docs/formats.md); anything unreadable or
+    unexpected yields [] — detection is advisory, never load-bearing.
+
+    `since` is the entry count the rollout had before the run: a
+    `--context full` fork carries the pair's real codex history, failed
+    applies from earlier interactive turns included, and those are not this
+    worker's doing."""
+    try:
+        entries = read_jsonl(sub_path)[since:]
+    except Exception:
+        return []
+    rejected: list[str] = []
+    for e in entries:
+        if not isinstance(e, dict) or e.get("type") != "event_msg":
+            continue
+        p = e.get("payload")
+        if not isinstance(p, dict) or p.get("type") != "patch_apply_end":
+            continue
+        if p.get("success"):
+            continue
+        changes = p.get("changes")
+        if isinstance(changes, dict) and changes:
+            rejected += [c for c in changes if c not in rejected]
+        elif "(unknown path)" not in rejected:
+            rejected.append("(unknown path)")
+    return rejected
+
+
+def blocked_footer(rejected: list[str], *, retry_hint: bool) -> str:
+    lines = [
+        BLOCKED_HEADER,
+        "The codex worker's file changes were rejected by its sandbox; "
+        "no files were modified. Rejected: " + ", ".join(rejected[:10]),
+    ]
+    if retry_hint:
+        lines.append(
+            "To grant writes: message this worker to rerun the same task "
+            "with `tandem sub -q --sandbox workspace-write`, or ask it to "
+            "return the content and apply the changes yourself.")
+    return "\n".join(lines) + "\n"
 
 
 def _relay_last_message(last_path: Path, log_path: Path, tail: int = 50) -> None:
