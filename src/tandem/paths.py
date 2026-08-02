@@ -49,6 +49,11 @@ def claude_transcript_path(cwd: str | Path, session_id: str) -> Path:
     return claude_project_dir(cwd) / f"{session_id}.jsonl"
 
 
+def claude_installed_plugins_path() -> Path:
+    """Claude's installed-plugin registry (observed: claude 2.1.220)."""
+    return claude_home() / "plugins" / "installed_plugins.json"
+
+
 # --- Codex ------------------------------------------------------------------
 
 def codex_home() -> Path:

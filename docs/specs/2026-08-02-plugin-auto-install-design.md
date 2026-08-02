@@ -22,8 +22,11 @@ that wraps both of Claude's.
 
 - `is_plugin_installed() -> bool` — reads
   `~/.claude/plugins/installed_plugins.json` and checks for a `tandem@tandem`
-  entry with at least one install record. Any IO or parse surprise returns
-  `True`: ambiguity means stay silent, never nag. Read-only — Claude's CLI
+  entry with at least one install record. A missing file or an absent/empty
+  `tandem@tandem` entry is definitively not installed (`False` — a fresh
+  Claude install has no registry, and that user must see the offer). An
+  unreadable or unparseable file, or an unexpected shape, returns `True`:
+  ambiguity means stay silent, never nag. Read-only — Claude's CLI
   remains the sole writer of its own state.
 - `install_plugin() -> bool` — runs `claude plugin marketplace add
   Bhavya6187/tandem` then `claude plugin install tandem@tandem`, echoing each
