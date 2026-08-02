@@ -872,3 +872,67 @@ class TestBlockedWriteFooter:
         out = capsys.readouterr().out
         assert ops.BLOCKED_HEADER not in out
         assert "probe.txt" not in out
+
+    def test_non_patch_output_mentioning_the_marker_is_ignored(
+            self, env_factory, monkeypatch, capsys):
+        """Dogfooding hazard: this repo's own ops.py contains the literal
+        marker, so a worker grepping for it gets the string straight back in
+        ordinary tool output. Matching that as a blocked write escalates the
+        orchestrator to workspace-write after a run that patched nothing."""
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text("Found 3 matches.")
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            write_line(sub_path, {
+                "timestamp": "t", "type": "response_item",
+                "payload": {"type": "custom_tool_call", "call_id": "c-rg",
+                            "name": "exec",
+                            "input": "rg -n 'patch rejected' src/"}})
+            write_line(sub_path, {
+                "timestamp": "t", "type": "response_item",
+                "payload": {"type": "custom_tool_call_output",
+                            "call_id": "c-rg", "output": [
+                                {"type": "input_text",
+                                 "text": "src/tandem/ops.py:404:"
+                                         'PATCH_REJECTED = "patch rejected"\n'
+                                         "src/tandem/ops.py:437:carrying "
+                                         "`patch rejected`. The\n"}]}})
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_sub(env.store, env.session, "t", quiet=True)
+        out = capsys.readouterr().out
+        assert "Found 3 matches." in out
+        assert ops.BLOCKED_HEADER not in out
+
+    def test_rejected_patch_with_unparseable_targets_still_reports(
+            self, env_factory, monkeypatch, capsys):
+        """The narrowing gates on the CALL looking like a patch, not on the
+        targets parsing: a real rejection whose paths cannot be extracted must
+        still reach the orchestrator, as "(unknown path)"."""
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text("could not write")
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            write_line(sub_path, {
+                "timestamp": "t", "type": "response_item",
+                "payload": {"type": "custom_tool_call", "call_id": "c-p",
+                            "name": "exec",
+                            "input": "await tools.apply_patch(supplied);\n"}})
+            write_line(sub_path, {
+                "timestamp": "t", "type": "response_item",
+                "payload": {"type": "custom_tool_call_output",
+                            "call_id": "c-p",
+                            "output": "Script error:\npatch rejected: writing "
+                                      "is blocked by read-only sandbox"}})
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_sub(env.store, env.session, "t", quiet=True)
+        out = capsys.readouterr().out
+        assert ops.BLOCKED_HEADER in out
+        assert "(unknown path)" in out

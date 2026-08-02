@@ -474,10 +474,17 @@ def blocked_write_paths(sub_path: Path, *, since: int = 0) -> list[str]:
             if isinstance(call_id, str) and isinstance(src, str):
                 scripts[call_id] = src
         elif ptype == "custom_tool_call_output":
-            if PATCH_REJECTED not in _output_text(p.get("output")):
-                continue
             call_id = p.get("call_id")
             src = scripts.get(call_id, "") if isinstance(call_id, str) else ""
+            # Only a call that actually tried to patch can be a blocked write.
+            # Matching the marker in ANY tool output false-positives on a
+            # worker that merely grepped for the string — this very file
+            # contains it, so `rg 'patch rejected' src/` was enough to fake a
+            # rejection and push the orchestrator into a needless escalation.
+            if "*** Begin Patch" not in src and "apply_patch" not in src:
+                continue
+            if PATCH_REJECTED not in _output_text(p.get("output")):
+                continue
             add(_PATCH_TARGET_RE.findall(src))
     return rejected
 
