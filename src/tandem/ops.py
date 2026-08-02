@@ -399,8 +399,13 @@ BLOCKED_HEADER = "[tandem-sub blocked: write]"
 
 
 # Codex's literal marker in a failed exec's output when the sandbox (or an
-# approval policy) refuses an apply_patch: "patch rejected: writing is blocked
-# by read-only sandbox; rejected by user approval settings".
+# approval policy) refuses a patch. Observed text: "patch rejected: writing
+# is blocked by read-only sandbox; rejected by user approval settings".
+#
+# Deliberately never on the same physical line as the patch tool's name: a
+# worker that greps this repo for that name would otherwise get a hit line
+# carrying both literals, which is exactly the shape the join below reads as
+# a real rejection.
 PATCH_REJECTED = "patch rejected"
 
 # `*** Add File: <path>` out of the patch text. That text usually reaches us

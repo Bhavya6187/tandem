@@ -85,7 +85,7 @@ are listed in `~/.codex/models_cache.json`):
 ```toml
 [subagents]
 model = "gpt-5.6-luna"  # ← the whole point: set this
-route = "all"           # all | off
+route = "all"           # all | manual | off
 context = "match"       # match | task | full
 keep_forks = false      # keep each worker's rollout for debugging
 ```
@@ -94,6 +94,24 @@ keep_forks = false      # keep each worker's rollout for debugging
 probably not the cheap one.** Every other key above is already the default;
 that one is not, and routing is on as soon as the plugin loads, so
 `tandem doctor` warns until you set it.
+
+- `route = "manual"` turns off automatic rerouting: dispatches stay on
+  Claude until you explicitly ask for the `tandem:gpt` agent — "use gpt
+  subagents for this". (`route = "off"` is the same silence, but `manual`
+  keeps `tandem doctor`'s subagent checks on, since you still send work to
+  codex.) Explicit `tandem:gpt` dispatches work under `route = "all"` too;
+  there they're just not the only way in.
+- Write access follows your Claude permission mode. Dispatch while you're in
+  `acceptEdits` or `bypassPermissions` and the codex worker runs with
+  `--sandbox workspace-write`; in any other mode tandem passes no sandbox
+  flag at all, so the worker gets codex's own default — read-only, unless
+  you configured codex otherwise. A read-only worker that tried to edit
+  files comes back with a `[tandem-sub blocked: write]` trailer naming the
+  rejected paths; then it's your call — have it rerun with `tandem sub -q
+  --sandbox workspace-write`, or apply what it returned yourself.
+- Your own agents named `gpt` or `codex-worker` are never rerouted — the
+  loop guard matches on the last segment of the agent name in any scope — so
+  a local `.claude/agents/gpt.md` of yours keeps dispatching natively.
 
 Fork dispatches stay on Claude, each worker's full codex log is kept under
 `~/.tandem/subagents/`, and `tandem status` lists the workers running right
@@ -161,7 +179,7 @@ tandem resume a1b2c3d4e5f6   # a specific one (id from the exit hint)
 | `switch` | Flip active/shadow and enter the other agent — at the tandem prompt, or one-shot from your shell (one-shot only flips, it doesn't enter) |
 | `tandem resume [id]` | Continue the most recent (or a specific) session |
 | `tandem run --on codex "…"` | One-off prompt to the *other* agent, with full context |
-| `tandem sub "…"` | Run one delegated task on a codex model (used by the plugin's reroute hook) |
+| `tandem sub "…"` | Run one delegated task on a codex model (used by the plugin's reroute hook; `--sandbox read-only\|workspace-write` overrides the dispatching session's write consent) |
 | `tandem status` | Show pairing, roles, and sync position |
 
 There are also three maintenance commands — `tandem doctor` (health

@@ -1,6 +1,6 @@
 [project]
 name = "tandem-cli"
-version = "0.1.5"
+version = "0.1.6"
 description = "Meta-harness that runs Claude Code and Codex CLI with live trace sync."
 readme = "README.md"
 license = "MIT"
