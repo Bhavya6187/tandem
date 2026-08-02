@@ -289,6 +289,7 @@ def run_sub(
     model: str = "",
     context: str = "task",
     fanout_feature: str = "",
+    sandbox: str = "",
     keep_forks: bool = False,
     quiet: bool = False,
 ) -> int:
@@ -314,6 +315,11 @@ def run_sub(
         argv += ["-m", model]
     if fanout_feature:
         argv += ["--enable", fanout_feature]
+    if sandbox:
+        # exec-level flag: must precede the `resume` subcommand, like -m.
+        # Value is caller-validated ("read-only"/"workspace-write"); the
+        # brief can never influence it (stdin-only transport).
+        argv += ["--sandbox", sandbox]
     if context == "full":
         with _sub_lock():
             sub_id, sub_path = fork_shadow(store, session)

@@ -594,3 +594,93 @@ class TestDoctorAndStatus:
         assert r.exit_code == 0
         assert "subagent running: gpt-x-mini (task) audit the README" in r.output
         assert r.output.count("subagent running:") == 1
+
+
+class TestSandboxPlumbing:
+    def test_run_sub_passes_sandbox_before_resume(self, env_factory,
+                                                  monkeypatch):
+        env = env_factory(active="claude")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "_run",
+            lambda argv, cwd=None, **kw: calls.update(argv=argv) or _R(0),
+        )
+        ops.run_sub(env.store, env.session, "t", sandbox="workspace-write")
+        argv = calls["argv"]
+        i = argv.index("--sandbox")
+        assert argv[i + 1] == "workspace-write"
+        assert i < argv.index("resume")   # exec-level flag, like -m and -o
+
+    def test_run_sub_default_omits_sandbox(self, env_factory, monkeypatch):
+        env = env_factory(active="claude")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "_run",
+            lambda argv, cwd=None, **kw: calls.update(argv=argv) or _R(0),
+        )
+        ops.run_sub(env.store, env.session, "t")
+        assert "--sandbox" not in calls["argv"]
+
+    def test_sub_cli_flag_forwards(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = TestSubCli()._cli_env(env, monkeypatch)
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "--sandbox", "workspace-write", "brief"])
+        assert r.exit_code == 0
+        assert calls["kw"]["sandbox"] == "workspace-write"
+
+    def test_sub_cli_reads_stamp_when_no_flag(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = TestSubCli()._cli_env(env, monkeypatch)
+        stamp = paths.tandem_home() / "sandbox" / env.session.tandem_id
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text("workspace-write")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(cli.main, ["sub", "brief"])
+        assert r.exit_code == 0
+        assert calls["kw"]["sandbox"] == "workspace-write"
+
+    def test_sub_cli_flag_beats_stamp(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = TestSubCli()._cli_env(env, monkeypatch)
+        stamp = paths.tandem_home() / "sandbox" / env.session.tandem_id
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text("workspace-write")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "--sandbox", "read-only", "brief"])
+        assert r.exit_code == 0
+        assert calls["kw"]["sandbox"] == "read-only"
+
+    def test_sub_cli_garbage_stamp_degrades_to_no_flag(self, env_factory,
+                                                       monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = TestSubCli()._cli_env(env, monkeypatch)
+        stamp = paths.tandem_home() / "sandbox" / env.session.tandem_id
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text("danger-full-access")   # never act on this
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(cli.main, ["sub", "brief"])
+        assert r.exit_code == 0
+        assert calls["kw"]["sandbox"] == ""

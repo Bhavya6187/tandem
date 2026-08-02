@@ -319,9 +319,15 @@ def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
               help="Print only the worker's final message (raw codex output "
                    "goes to a log under ~/.tandem/subagents/<id>/logs). Used "
                    "by the bridge agent, which relays stdout verbatim.")
+@click.option("--sandbox", "sandbox",
+              type=click.Choice(["read-only", "workspace-write"]),
+              default=None,
+              help="Codex sandbox for this worker. Default: the consent the "
+                   "dispatching claude session stamped via its permission "
+                   "mode, else codex's configured default.")
 @click.argument("task", required=False)
 def sub(model: str | None, context_mode: str | None, quiet: bool,
-        task: str | None) -> None:
+        sandbox: str | None, task: str | None) -> None:
     """Run one delegated subagent task on codex (task argument or stdin).
 
     Used by the tandem plugin's codex-worker bridge; also works manually."""
@@ -344,6 +350,8 @@ def sub(model: str | None, context_mode: str | None, quiet: bool,
             fanout_feature=cfg.fanout_feature,
             keep_forks=cfg.keep_forks,
             quiet=quiet,
+            sandbox=sandbox if sandbox is not None
+                    else _read_sandbox_stamp(session.tandem_id),
         )
     sys.exit(code)
 
