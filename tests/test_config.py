@@ -27,6 +27,15 @@ def test_reads_values(tmp_path, monkeypatch):
     assert cfg.keep_forks is True
 
 
+def test_route_manual_is_accepted(tmp_path, monkeypatch):
+    # unlisted values degrade to "all", so a supported name has to be listed
+    home = tmp_path / ".tandem"
+    home.mkdir()
+    (home / "config.toml").write_text('[subagents]\nroute = "manual"\n')
+    monkeypatch.setenv("TANDEM_HOME", str(home))
+    assert load_subagents_config().route == "manual"
+
+
 def test_invalid_values_fall_back(tmp_path, monkeypatch):
     home = tmp_path / ".tandem"
     home.mkdir()

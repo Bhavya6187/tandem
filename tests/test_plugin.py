@@ -1,4 +1,5 @@
-"""The plugin is static registration only — validate the three files."""
+"""The plugin is static registration only — validate its manifests (plugin,
+marketplace, hooks) and its two agent definitions."""
 
 import json
 import re
@@ -116,3 +117,45 @@ def test_bridge_agent_definition():
     # containing that line truncates the brief and runs the rest as shell
     assert "TANDEM_TASK_EOF_" in body
     assert re.search(r"unless .*appears|appears .*in the task", body)
+    assert "[tandem-sub blocked: write]" in body
+    assert "--sandbox workspace-write" in body
+    assert re.search(r"[Nn]ever add that flag", body)
+
+
+def test_gpt_alias_agent_definition():
+    text = (PLUGIN / "agents" / "gpt.md").read_text()
+    front = text.split("---")[1]
+    assert re.search(r"^name:\s*gpt\s*$", front, re.M)
+    assert re.search(r"^model:\s*haiku\s*$", front, re.M)
+    assert re.search(r"^tools:\s*Bash\(tandem sub:\*\)\s*$", front, re.M)
+    # user-facing: the description must invite selection (unlike
+    # codex-worker's "not meant for manual selection")
+    desc = re.search(r"^description:\s*(.+)$", front, re.M).group(1)
+    assert "not meant for manual selection" not in desc
+    assert re.search(r"GPT", desc)
+    # same relay contract as codex-worker
+    body = text.split("---", 2)[2]
+    for marker in ("tandem sub -q", "TANDEM_TASK_EOF_", "verbatim",
+                   "[tandem-sub failed]", "[tandem-sub blocked: write]",
+                   "--sandbox workspace-write"):
+        assert marker in body, marker
+    assert re.search(r"never do the task yourself", body, re.I)
+    # The alias differs ONLY in frontmatter: it is the same relay, offered for
+    # manual selection. Byte equality is the real pin — the markers above only
+    # sample the contract, so an edit to one body that the other misses (a
+    # reworded rule, a new guard) would otherwise slip through as two agents
+    # that behave differently under the same name.
+    assert body == (PLUGIN / "agents" / "codex-worker.md").read_text(
+    ).split("---", 2)[2]
+
+
+def test_loop_guard_covers_both_relay_agents():
+    """Every agent under plugin/agents/ must be in hookroute's guard set:
+    a plugin agent missing from RELAY_NAMES gets rewritten away from
+    itself on dispatch (or worse, loops)."""
+    from tandem.hookroute import RELAY_NAMES
+    names = set()
+    for f in (PLUGIN / "agents").glob("*.md"):
+        front = f.read_text().split("---")[1]
+        names.add(re.search(r"^name:\s*(\S+)\s*$", front, re.M).group(1))
+    assert names == set(RELAY_NAMES)

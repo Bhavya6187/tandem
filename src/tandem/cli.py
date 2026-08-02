@@ -319,9 +319,15 @@ def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
               help="Print only the worker's final message (raw codex output "
                    "goes to a log under ~/.tandem/subagents/<id>/logs). Used "
                    "by the bridge agent, which relays stdout verbatim.")
+@click.option("--sandbox", "sandbox",
+              type=click.Choice(["read-only", "workspace-write"]),
+              default=None,
+              help="Codex sandbox for this worker. Default: the consent the "
+                   "dispatching claude session stamped via its permission "
+                   "mode, else codex's configured default.")
 @click.argument("task", required=False)
 def sub(model: str | None, context_mode: str | None, quiet: bool,
-        task: str | None) -> None:
+        sandbox: str | None, task: str | None) -> None:
     """Run one delegated subagent task on codex (task argument or stdin).
 
     Used by the tandem plugin's codex-worker bridge; also works manually."""
@@ -344,6 +350,8 @@ def sub(model: str | None, context_mode: str | None, quiet: bool,
             fanout_feature=cfg.fanout_feature,
             keep_forks=cfg.keep_forks,
             quiet=quiet,
+            sandbox=sandbox if sandbox is not None
+                    else _read_sandbox_stamp(session.tandem_id),
         )
     sys.exit(code)
 
@@ -404,6 +412,39 @@ def _mark_warned(stamp: Path | None) -> None:
             pass
 
 
+def _sandbox_stamp_path(tandem_id: str) -> Path:
+    # tandem_id comes from our own state store (hex), never from payload
+    # text, so it is safe as a filename component without filtering.
+    return paths.tandem_home() / "sandbox" / tandem_id
+
+
+def _stamp_sandbox(tandem_id: str, value: str) -> None:
+    """Record the dispatching session's current write-consent for this pair.
+    Rewritten on every dispatch so a mode change (including back to default)
+    always wins; best-effort, because no stamp failure may reach the
+    dispatch. Known race: two claude sessions dispatching on the same pair
+    interleave last-write-wins; the window is the relay's spawn time."""
+    try:
+        p = _sandbox_stamp_path(tandem_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(value)
+    except OSError:
+        pass
+
+
+def _read_sandbox_stamp(tandem_id: str) -> str:
+    """The stamped consent, filtered to the one value we ever act on —
+    anything unexpected (corrupt file, hand-edited) degrades to no flag."""
+    try:
+        text = _sandbox_stamp_path(tandem_id).read_text().strip()
+    # ValueError covers the UnicodeDecodeError read_text() raises when the
+    # file is not UTF-8: our caller has no blanket except, so an escaping
+    # read failure would crash the dispatch instead of dropping the flag.
+    except (OSError, ValueError):
+        return ""
+    return text if text == "workspace-write" else ""
+
+
 @main.command(name="hook-route")
 def hook_route_cmd() -> None:
     """Claude Code PreToolUse hook: reroute subagent dispatches to codex.
@@ -411,6 +452,13 @@ def hook_route_cmd() -> None:
     Reads hook JSON on stdin; prints a decision or nothing. This function
     ALWAYS exits 0 — exit 2 would block the dispatch, and any failure here
     must degrade to native behavior.
+
+    It also has one side effect beyond its output: every Agent/Task dispatch
+    in a paired session writes the permission mode's sandbox consent to
+    `$TANDEM_HOME/sandbox/<tandem_id>`, which the relay's `tandem sub` reads
+    when it is given no `--sandbox` flag. That is how write consent reaches
+    codex at all — it cannot ride the dispatch itself, since the relay's only
+    channel to the worker is the untrusted brief.
 
     When nothing is rerouted because tandem is not usable here — no paired
     session for the cwd, or codex missing/unsupported — it prints a bare
@@ -428,13 +476,20 @@ def hook_route_cmd() -> None:
     is what makes exit 2 unreachable in practice."""
     try:
         from .config import load_subagents_config
-        from .hookroute import missed_reroute_notice, route
+        from .hookroute import missed_reroute_notice, route, sandbox_for_mode
 
         payload = json.loads(sys.stdin.read() or "{}")
         cwd = payload.get("cwd") or _cwd()
         cfg = load_subagents_config()
         with StateStore() as store:
             session = store.latest_session_for_cwd(cwd)
+        # Consent travels out-of-band: the relay's `tandem sub` reads this
+        # stamp, so it must be current before the dispatch spawns the relay.
+        # Stamped regardless of route config — a manual tandem:gpt dispatch
+        # (never rewritten below) consents via permission mode all the same.
+        if session is not None and payload.get("tool_name") in ("Agent", "Task"):
+            _stamp_sandbox(session.tandem_id,
+                           sandbox_for_mode(payload.get("permission_mode")))
         codex_ok = False
         if session is not None:
             adapter = get_adapter("codex")

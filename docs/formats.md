@@ -76,6 +76,16 @@ home), `TANDEM_HOME` (tandem state).
     (`turn_id`), `user_message`, `agent_message` (`phase`), `token_count`,
     `patch_apply_end` (`{stdout, success, changes: {path: {type, content}}}`),
     `task_complete` (`last_agent_message`).
+    - A patch the sandbox **rejects** emits no `patch_apply_end` at all
+      (live probe, 2026-08-01, `codex exec --sandbox read-only`: the event
+      is written when a patch applies, and every observed one carried
+      `success: true`). The rejection survives only in the `response_item`
+      pair — the `custom_tool_call` that ran the patch tool plus its
+      call_id-matched `custom_tool_call_output`, whose output text carries
+      `patch rejected` at the start of a line (`Script error:\npatch
+      rejected: …`). That pair is what `ops.blocked_write_paths` matches, and
+      it matches the marker line-anchored — mid-line hits are what a worker
+      grepping for these literals gets back, not a rejection.
   - `turn_context` — per turn: cwd, approval_policy, sandbox_policy, model.
   - `world_state` — environment snapshot.
 - Resume: `codex resume <session-id>` (interactive) and

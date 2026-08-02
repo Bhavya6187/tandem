@@ -594,3 +594,399 @@ class TestDoctorAndStatus:
         assert r.exit_code == 0
         assert "subagent running: gpt-x-mini (task) audit the README" in r.output
         assert r.output.count("subagent running:") == 1
+
+
+class TestSandboxPlumbing:
+    def test_run_sub_passes_sandbox_before_resume(self, env_factory,
+                                                  monkeypatch):
+        env = env_factory(active="claude")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "_run",
+            lambda argv, cwd=None, **kw: calls.update(argv=argv) or _R(0),
+        )
+        ops.run_sub(env.store, env.session, "t", sandbox="workspace-write")
+        argv = calls["argv"]
+        i = argv.index("--sandbox")
+        assert argv[i + 1] == "workspace-write"
+        assert i < argv.index("resume")   # exec-level flag, like -m and -o
+
+    def test_run_sub_default_omits_sandbox(self, env_factory, monkeypatch):
+        env = env_factory(active="claude")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "_run",
+            lambda argv, cwd=None, **kw: calls.update(argv=argv) or _R(0),
+        )
+        ops.run_sub(env.store, env.session, "t")
+        assert "--sandbox" not in calls["argv"]
+
+    def test_sub_cli_flag_forwards(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = TestSubCli()._cli_env(env, monkeypatch)
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "--sandbox", "workspace-write", "brief"])
+        assert r.exit_code == 0
+        assert calls["kw"]["sandbox"] == "workspace-write"
+
+    def test_sub_cli_reads_stamp_when_no_flag(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = TestSubCli()._cli_env(env, monkeypatch)
+        stamp = paths.tandem_home() / "sandbox" / env.session.tandem_id
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text("workspace-write")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(cli.main, ["sub", "brief"])
+        assert r.exit_code == 0
+        assert calls["kw"]["sandbox"] == "workspace-write"
+
+    def test_sub_cli_flag_beats_stamp(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = TestSubCli()._cli_env(env, monkeypatch)
+        stamp = paths.tandem_home() / "sandbox" / env.session.tandem_id
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text("workspace-write")
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "--sandbox", "read-only", "brief"])
+        assert r.exit_code == 0
+        assert calls["kw"]["sandbox"] == "read-only"
+
+    def test_sub_cli_rejects_danger_full_access(self, env_factory, monkeypatch):
+        """Global constraint: tandem never grants codex an unsandboxed run.
+        `danger-full-access` is not in the Choice, so click kills the invocation
+        with a usage error (exit 2) before run_sub is reached — the value is
+        unreachable through the flag, whatever the brief asks for."""
+        import click.testing
+        env = env_factory(active="claude")
+        cli = TestSubCli()._cli_env(env, monkeypatch)
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "--sandbox", "danger-full-access", "brief"])
+        assert r.exit_code == 2
+        assert not calls
+
+    def test_sub_cli_garbage_stamp_degrades_to_no_flag(self, env_factory,
+                                                       monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = TestSubCli()._cli_env(env, monkeypatch)
+        stamp = paths.tandem_home() / "sandbox" / env.session.tandem_id
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text("danger-full-access")   # never act on this
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(cli.main, ["sub", "brief"])
+        assert r.exit_code == 0
+        assert calls["kw"]["sandbox"] == ""
+
+
+class TestBlockedWriteFooter:
+    def _fake_run_blocked(self, last_text="Could not write the file."):
+        def fake_run(argv, cwd=None, **kw):
+            # non-quiet runs pass no `-o`: stdio is inherited and codex
+            # writes no last-message file. The rejected patch still lands.
+            if "-o" in argv:
+                Path(argv[argv.index("-o") + 1]).write_text(last_text)
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            write_line(sub_path, {
+                "timestamp": "t", "type": "event_msg",
+                "payload": {"type": "patch_apply_end", "stdout": "",
+                            "success": False,
+                            "changes": {"plugin/README.md": {"type": "add"}}},
+            })
+            return _R(0)
+        return fake_run
+
+    def test_quiet_blocked_write_appends_structured_footer(
+            self, env_factory, monkeypatch, capsys):
+        env = env_factory(active="claude")
+        monkeypatch.setattr(ops, "_run", self._fake_run_blocked())
+        code = ops.run_sub(env.store, env.session, "t", quiet=True)
+        assert code == 0                       # exit code stays codex's
+        out = capsys.readouterr().out
+        assert "Could not write the file." in out
+        assert out.index("Could not write") < out.index(ops.BLOCKED_HEADER)
+        assert "plugin/README.md" in out
+        assert "--sandbox workspace-write" in out   # the retry hint
+
+    def test_retry_hint_suppressed_when_already_workspace_write(
+            self, env_factory, monkeypatch, capsys):
+        # blocked even with write access => the hint would be a lie
+        env = env_factory(active="claude")
+        monkeypatch.setattr(ops, "_run", self._fake_run_blocked())
+        ops.run_sub(env.store, env.session, "t", quiet=True,
+                    sandbox="workspace-write")
+        out = capsys.readouterr().out
+        assert ops.BLOCKED_HEADER in out
+        assert "--sandbox workspace-write`" not in out.split(
+            ops.BLOCKED_HEADER)[1]
+
+    def test_successful_patches_emit_no_footer(self, env_factory,
+                                               monkeypatch, capsys):
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text("done")
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            write_line(sub_path, {
+                "timestamp": "t", "type": "event_msg",
+                "payload": {"type": "patch_apply_end", "stdout": "ok",
+                            "success": True,
+                            "changes": {"a.py": {"type": "update"}}},
+            })
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_sub(env.store, env.session, "t", quiet=True)
+        assert ops.BLOCKED_HEADER not in capsys.readouterr().out
+
+    def test_non_quiet_never_prints_footer(self, env_factory, monkeypatch,
+                                           capsys):
+        # manual runs stream codex's own output; the footer is bridge
+        # protocol, not user chrome
+        env = env_factory(active="claude")
+        monkeypatch.setattr(ops, "_run", self._fake_run_blocked())
+        ops.run_sub(env.store, env.session, "t")
+        assert ops.BLOCKED_HEADER not in capsys.readouterr().out
+
+    def test_unreadable_rollout_degrades_to_no_footer(self, env_factory,
+                                                      monkeypatch, capsys):
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text("fine")
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            sub_path.write_text("not json {{{\n")
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        code = ops.run_sub(env.store, env.session, "t", quiet=True)
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "fine" in out
+        assert ops.BLOCKED_HEADER not in out
+
+    def test_full_context_ignores_patches_from_before_this_run(
+            self, env_factory, monkeypatch, capsys):
+        """A `--context full` fork inherits the pair's real codex rollout —
+        apply_patch failures from earlier interactive turns included. Those
+        are not this worker's doing, and reporting them sends the
+        orchestrator retrying a write this run never attempted."""
+        env = env_factory(active="claude")
+        ops.fast_forward(env.store, env.session, "claude")
+        write_line(env.codex_shadow, {
+            "timestamp": "t", "type": "event_msg",
+            "payload": {"type": "patch_apply_end", "stdout": "",
+                        "success": False,
+                        "changes": {"old/stale.py": {"type": "add"}}},
+        })
+        monkeypatch.setattr(ops, "_run", self._fake_run_blocked())
+        ops.run_sub(env.store, env.session, "t", quiet=True, context="full")
+        out = capsys.readouterr().out
+        # this run's own rejection is still reported ...
+        assert ops.BLOCKED_HEADER in out
+        assert "plugin/README.md" in out
+        # ... the inherited one is not
+        assert "old/stale.py" not in out
+
+    # Modeled byte-for-byte on a live read-only rejection (controller probe,
+    # 2026-08-01, rollout 019fbfe6-…): codex emits NO patch_apply_end when the
+    # sandbox refuses a write — the rejection exists only as this call/output
+    # pair. The patch sits inside a JS string literal, so its line breaks are
+    # literal two-char `\n` escapes; only the JS statements use real newlines.
+    _LIVE_EXEC_INPUT = (
+        'const patch = "*** Begin Patch\\n*** Add File: probe.txt'
+        '\\n+hello\\n*** End Patch";\n'
+        'const result = await tools.apply_patch(patch);\ntext(result);\n'
+    )
+
+    def _rejection_pair(self, call_id="call_GLGqPXu3fYY5aw9m3cmzCyl4"):
+        return [
+            {"timestamp": "t", "type": "response_item",
+             "payload": {"type": "custom_tool_call", "status": "completed",
+                         "call_id": call_id, "name": "exec",
+                         "input": self._LIVE_EXEC_INPUT}},
+            {"timestamp": "t", "type": "response_item",
+             "payload": {"type": "custom_tool_call_output", "call_id": call_id,
+                         "output": [
+                             {"type": "input_text",
+                              "text": "Script failed\nWall time 0.0 seconds\n"
+                                      "Output:\n"},
+                             {"type": "input_text",
+                              "text": "Script error:\npatch rejected: writing "
+                                      "is blocked by read-only sandbox; "
+                                      "rejected by user approval settings"},
+                         ]}},
+        ]
+
+    def test_custom_tool_call_rejection_is_detected(self, env_factory,
+                                                    monkeypatch, capsys):
+        """The real rejection path. Matching only patch_apply_end left the
+        feature dead in production: codex emits that event when a patch
+        APPLIES, not when the sandbox refuses it."""
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text(
+                "I was unable to create the file.")
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            for e in self._rejection_pair():
+                write_line(sub_path, e)
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        code = ops.run_sub(env.store, env.session, "t", quiet=True)
+        assert code == 0
+        out = capsys.readouterr().out
+        assert ops.BLOCKED_HEADER in out
+        # the path is parsed out of the JS-escaped patch, stopping at the
+        # `\n` escape rather than swallowing the rest of the string literal
+        assert "Rejected: probe.txt" in out
+        assert "+hello" not in out
+
+    def test_custom_tool_call_rejection_below_watermark_is_ignored(
+            self, env_factory, monkeypatch, capsys):
+        """Same real shape, but inherited by a --context full fork from an
+        earlier interactive turn: not this worker's rejection."""
+        env = env_factory(active="claude")
+        ops.fast_forward(env.store, env.session, "claude")
+        for e in self._rejection_pair():
+            write_line(env.codex_shadow, e)
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text("no edits attempted")
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_sub(env.store, env.session, "t", quiet=True, context="full")
+        out = capsys.readouterr().out
+        assert ops.BLOCKED_HEADER not in out
+        assert "probe.txt" not in out
+
+    def test_non_patch_output_mentioning_the_marker_is_ignored(
+            self, env_factory, monkeypatch, capsys):
+        """Dogfooding hazard: this repo's own ops.py contains the literal
+        marker, so a worker grepping for it gets the string straight back in
+        ordinary tool output. Matching that as a blocked write escalates the
+        orchestrator to workspace-write after a run that patched nothing."""
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text("Found 3 matches.")
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            write_line(sub_path, {
+                "timestamp": "t", "type": "response_item",
+                "payload": {"type": "custom_tool_call", "call_id": "c-rg",
+                            "name": "exec",
+                            "input": "rg -n 'patch rejected' src/"}})
+            write_line(sub_path, {
+                "timestamp": "t", "type": "response_item",
+                "payload": {"type": "custom_tool_call_output",
+                            "call_id": "c-rg", "output": [
+                                {"type": "input_text",
+                                 "text": "src/tandem/ops.py:404:"
+                                         'PATCH_REJECTED = "patch rejected"\n'
+                                         "src/tandem/ops.py:437:carrying "
+                                         "`patch rejected`. The\n"}]}})
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_sub(env.store, env.session, "t", quiet=True)
+        out = capsys.readouterr().out
+        assert "Found 3 matches." in out
+        assert ops.BLOCKED_HEADER not in out
+
+    def test_combined_grep_hit_is_ignored(self, env_factory, monkeypatch,
+                                          capsys):
+        """The narrowing above gates on the CALL looking like a patch, which a
+        single grep for BOTH literals satisfies by itself: the pattern puts the
+        patch tool's name in the call input, and this repo's own source hands
+        the marker back in the output. A real rejection prints the marker at
+        the START of a line ("Script error:\\npatch rejected: …"); an rg hit
+        line never does — it is prefixed by `path:lineno:`."""
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text("Found 2 matches.")
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            write_line(sub_path, {
+                "timestamp": "t", "type": "response_item",
+                "payload": {"type": "custom_tool_call", "call_id": "c-rg2",
+                            "name": "exec",
+                            "input": "rg -n 'apply_patch|patch rejected' src/"}})
+            write_line(sub_path, {
+                "timestamp": "t", "type": "response_item",
+                "payload": {"type": "custom_tool_call_output",
+                            "call_id": "c-rg2", "output": [
+                                {"type": "input_text",
+                                 "text": "src/tandem/ops.py:404:"
+                                         'PATCH_REJECTED = "patch rejected"\n'
+                                         "src/tandem/ops.py:437:carrying "
+                                         "`patch rejected`. The\n"}]}})
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_sub(env.store, env.session, "t", quiet=True)
+        out = capsys.readouterr().out
+        assert "Found 2 matches." in out
+        assert ops.BLOCKED_HEADER not in out
+
+    def test_rejected_patch_with_unparseable_targets_still_reports(
+            self, env_factory, monkeypatch, capsys):
+        """The narrowing gates on the CALL looking like a patch, not on the
+        targets parsing: a real rejection whose paths cannot be extracted must
+        still reach the orchestrator, as "(unknown path)"."""
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text("could not write")
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            write_line(sub_path, {
+                "timestamp": "t", "type": "response_item",
+                "payload": {"type": "custom_tool_call", "call_id": "c-p",
+                            "name": "exec",
+                            "input": "await tools.apply_patch(supplied);\n"}})
+            write_line(sub_path, {
+                "timestamp": "t", "type": "response_item",
+                "payload": {"type": "custom_tool_call_output",
+                            "call_id": "c-p",
+                            "output": "Script error:\npatch rejected: writing "
+                                      "is blocked by read-only sandbox"}})
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_sub(env.store, env.session, "t", quiet=True)
+        out = capsys.readouterr().out
+        assert ops.BLOCKED_HEADER in out
+        assert "(unknown path)" in out

@@ -14,6 +14,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -289,6 +290,7 @@ def run_sub(
     model: str = "",
     context: str = "task",
     fanout_feature: str = "",
+    sandbox: str = "",
     keep_forks: bool = False,
     quiet: bool = False,
 ) -> int:
@@ -300,6 +302,12 @@ def run_sub(
     the pair's own codex session, and is disposed of on exit. The brief is
     passed through verbatim, on codex's stdin (`resume <id> -`), never as
     argv. Exit code mirrors codex.
+
+    `sandbox` is codex's `--sandbox` value ("read-only"/"workspace-write"),
+    empty for codex's own configured default. It is caller-validated — the CLI
+    accepts it only from a click.Choice flag or the dispatching session's
+    consent stamp — and can never come from the brief, which reaches codex on
+    stdin and never touches argv.
 
     quiet=True is the bridge-agent mode: codex's raw transcript goes to a log
     file and this command's ENTIRE stdout becomes the worker's final message
@@ -314,11 +322,25 @@ def run_sub(
         argv += ["-m", model]
     if fanout_feature:
         argv += ["--enable", fanout_feature]
+    if sandbox:
+        # exec-level flag: must precede the `resume` subcommand, like -m.
+        # Value is caller-validated ("read-only"/"workspace-write"); the
+        # brief can never influence it (stdin-only transport).
+        argv += ["--sandbox", sandbox]
     if context == "full":
         with _sub_lock():
             sub_id, sub_path = fork_shadow(store, session)
     else:
         sub_id, sub_path = seed_sub_rollout(session)
+
+    # Everything already in the rollout predates this run (a fork inherits the
+    # pair's whole codex history); only patches attempted below are this
+    # worker's. Newline count, as in fast_forward: whole-line JSONL, so it is
+    # the entry index — and an unreadable file just means "count from zero".
+    try:
+        sub_pre_entries = sub_path.read_bytes().count(b"\n")
+    except OSError:
+        sub_pre_entries = 0
 
     sub_root = paths.tandem_home() / "subagents" / session.tandem_id
     last_path = log_path = None
@@ -357,6 +379,14 @@ def run_sub(
         # codex already produced and billed for.
         if quiet:
             _relay_last_message(last_path, log_path)
+            # Bridge protocol: turn "sandbox rejected the writes" from prose
+            # buried in the answer into a fixed trailer the orchestrating
+            # session can match on. Must read sub_path before disposal below.
+            rejected = blocked_write_paths(sub_path, since=sub_pre_entries)
+            if rejected:
+                sys.stdout.write(blocked_footer(
+                    rejected, retry_hint=sandbox != "workspace-write"))
+                sys.stdout.flush()
         marker.unlink(missing_ok=True)
         if keep_forks:
             sub_root.mkdir(parents=True, exist_ok=True)
@@ -366,6 +396,137 @@ def run_sub(
         else:
             sub_path.unlink(missing_ok=True)
     return code
+
+
+# The bridge-protocol marker for "codex finished but the sandbox rejected
+# its writes". The orchestrating session matches on this exact line, so it
+# is public API: change it and every dispatching model's instructions rot.
+BLOCKED_HEADER = "[tandem-sub blocked: write]"
+
+
+# Codex's literal marker in a failed exec's output when the sandbox (or an
+# approval policy) refuses a patch. Observed text: "patch rejected: writing
+# is blocked by read-only sandbox; rejected by user approval settings".
+#
+# Deliberately never on the same physical line as the patch tool's name: a
+# worker that greps this repo for that name would otherwise get a hit line
+# carrying both literals, which is exactly the shape the join below reads as
+# a real rejection.
+PATCH_REJECTED = "patch rejected"
+
+# Anchored, because "somewhere in the output" is not a rejection. Codex prints
+# the marker as its own line ("Script error:\npatch rejected: …"), while a
+# worker grepping this repo gets it back inside an `rg` hit line, prefixed by
+# `path:lineno:`. Anchoring is what separates the two — and it is the only
+# thing that does once the grep pattern also names the patch tool, since then
+# the call itself looks like a patch to the gate below.
+_PATCH_REJECTED_RE = re.compile("^" + re.escape(PATCH_REJECTED), re.M)
+
+# `*** Add File: <path>` out of the patch text. That text usually reaches us
+# embedded in a JS string literal (`tools.apply_patch("*** Begin Patch\n…")`),
+# so a patch line ends at a literal two-char `\n` ESCAPE at least as often as
+# at a real newline — and the last one ends at the closing quote. Stop at all
+# three, or the path swallows the rest of the script.
+_PATCH_TARGET_RE = re.compile(
+    r"""\*\*\* (?:Add|Update|Delete) File: (.+?)(?=\\n|[\n"']|$)""")
+
+
+def _output_text(output) -> str:
+    """Flatten a custom_tool_call_output payload: codex writes either a plain
+    string or a list of {"type": "input_text", "text": …} blocks."""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list):
+        return "\n".join(
+            b["text"] for b in output
+            if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return ""
+
+
+def blocked_write_paths(sub_path: Path, *, since: int = 0) -> list[str]:
+    """Paths whose apply_patch the sandbox rejected during this run, in event
+    order. Anything unreadable or unexpected yields [] — detection is
+    advisory, never load-bearing.
+
+    Two shapes, because the obvious one is not the one that fires. Live probe
+    (2026-08-01, `codex exec --sandbox read-only`): a refused write emits NO
+    `patch_apply_end` at all — codex writes that event when a patch APPLIES
+    (every such event on that machine carried success:true). The rejection
+    survives only as the `custom_tool_call` running apply_patch plus its
+    call_id-matched `custom_tool_call_output` carrying `patch rejected`. The
+    `patch_apply_end` success:false branch is kept for other codex flows that
+    may still produce it.
+
+    `since` is the entry count the rollout had before the run: a
+    `--context full` fork carries the pair's real codex history, rejections
+    from earlier interactive turns included, and those are not this worker's
+    doing."""
+    try:
+        entries = read_jsonl(sub_path)[since:]
+    except Exception:
+        return []
+    rejected: list[str] = []
+    scripts: dict[str, str] = {}   # call_id -> the apply_patch invocation
+
+    def add(found: list[str]) -> None:
+        paths_ = [p.strip() for p in found if isinstance(p, str) and p.strip()]
+        rejected.extend(
+            p for p in (paths_ or ["(unknown path)"]) if p not in rejected)
+
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        p = e.get("payload")
+        if not isinstance(p, dict):
+            continue
+        ptype = p.get("type")
+        if e.get("type") == "event_msg" and ptype == "patch_apply_end":
+            if p.get("success"):
+                continue
+            changes = p.get("changes")
+            add(list(changes) if isinstance(changes, dict) else [])
+        elif ptype == "custom_tool_call":
+            # the call always precedes its output, so a forward pass resolves
+            # the join without a second scan (and never reaches back past
+            # `since` for a script this run did not run)
+            call_id, src = p.get("call_id"), p.get("input")
+            if isinstance(call_id, str) and isinstance(src, str):
+                scripts[call_id] = src
+        elif ptype == "custom_tool_call_output":
+            call_id = p.get("call_id")
+            src = scripts.get(call_id, "") if isinstance(call_id, str) else ""
+            # Only a call that actually tried to patch can be a blocked write.
+            # Matching the marker in ANY tool output false-positives on a
+            # worker that merely grepped for the string — this very file
+            # contains it, so `rg 'patch rejected' src/` was enough to fake a
+            # rejection and push the orchestrator into a needless escalation.
+            if "*** Begin Patch" not in src and "apply_patch" not in src:
+                continue
+            # ... and one grep for both literals passes that gate on its own,
+            # so the marker must also sit where codex puts it: line-anchored.
+            if not _PATCH_REJECTED_RE.search(_output_text(p.get("output"))):
+                continue
+            add(_PATCH_TARGET_RE.findall(src))
+    return rejected
+
+
+def blocked_footer(rejected: list[str], *, retry_hint: bool) -> str:
+    lines = [
+        BLOCKED_HEADER,
+        # NOT "no files were modified": under workspace-write a run can apply
+        # several patches and have a later one refused (a path outside the
+        # workspace, say), so the only claim this footer can make is about the
+        # patches it actually saw rejected.
+        "The codex worker's file changes were rejected by its sandbox; "
+        "the listed changes were not applied. Rejected: "
+        + ", ".join(rejected[:10]),
+    ]
+    if retry_hint:
+        lines.append(
+            "To grant writes: message this worker to rerun the same task "
+            "with `tandem sub -q --sandbox workspace-write`, or ask it to "
+            "return the content and apply the changes yourself.")
+    return "\n".join(lines) + "\n"
 
 
 def _relay_last_message(last_path: Path, log_path: Path, tail: int = 50) -> None:

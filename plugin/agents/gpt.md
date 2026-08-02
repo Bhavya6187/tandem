@@ -1,6 +1,6 @@
 ---
-name: codex-worker
-description: Executes delegated tasks on a codex model via tandem. Dispatched automatically by tandem's reroute hook; not meant for manual selection.
+name: gpt
+description: Runs the task on a GPT model via tandem's codex pairing. Select this when the user asks for GPT subagents or to run something on GPT/codex.
 model: haiku
 tools: Bash(tandem sub:*)
 ---
