@@ -14,6 +14,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -397,34 +398,87 @@ def run_sub(
 BLOCKED_HEADER = "[tandem-sub blocked: write]"
 
 
+# Codex's literal marker in a failed exec's output when the sandbox (or an
+# approval policy) refuses an apply_patch: "patch rejected: writing is blocked
+# by read-only sandbox; rejected by user approval settings".
+PATCH_REJECTED = "patch rejected"
+
+# `*** Add File: <path>` out of the patch text. That text usually reaches us
+# embedded in a JS string literal (`tools.apply_patch("*** Begin Patch\n…")`),
+# so a patch line ends at a literal two-char `\n` ESCAPE at least as often as
+# at a real newline — and the last one ends at the closing quote. Stop at all
+# three, or the path swallows the rest of the script.
+_PATCH_TARGET_RE = re.compile(
+    r"""\*\*\* (?:Add|Update|Delete) File: (.+?)(?=\\n|[\n"']|$)""")
+
+
+def _output_text(output) -> str:
+    """Flatten a custom_tool_call_output payload: codex writes either a plain
+    string or a list of {"type": "input_text", "text": …} blocks."""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list):
+        return "\n".join(
+            b["text"] for b in output
+            if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return ""
+
+
 def blocked_write_paths(sub_path: Path, *, since: int = 0) -> list[str]:
-    """Paths whose apply_patch the sandbox rejected during this run, in
-    event order. Codex records each attempt as event_msg/patch_apply_end
-    with a success flag (docs/formats.md); anything unreadable or
-    unexpected yields [] — detection is advisory, never load-bearing.
+    """Paths whose apply_patch the sandbox rejected during this run, in event
+    order. Anything unreadable or unexpected yields [] — detection is
+    advisory, never load-bearing.
+
+    Two shapes, because the obvious one is not the one that fires. Live probe
+    (2026-08-01, `codex exec --sandbox read-only`): a refused write emits NO
+    `patch_apply_end` at all — codex writes that event when a patch APPLIES
+    (every such event on that machine carried success:true). The rejection
+    survives only as the `custom_tool_call` running apply_patch plus its
+    call_id-matched `custom_tool_call_output` carrying `patch rejected`. The
+    `patch_apply_end` success:false branch is kept for other codex flows that
+    may still produce it.
 
     `since` is the entry count the rollout had before the run: a
-    `--context full` fork carries the pair's real codex history, failed
-    applies from earlier interactive turns included, and those are not this
-    worker's doing."""
+    `--context full` fork carries the pair's real codex history, rejections
+    from earlier interactive turns included, and those are not this worker's
+    doing."""
     try:
         entries = read_jsonl(sub_path)[since:]
     except Exception:
         return []
     rejected: list[str] = []
+    scripts: dict[str, str] = {}   # call_id -> the apply_patch invocation
+
+    def add(found: list[str]) -> None:
+        paths_ = [p.strip() for p in found if isinstance(p, str) and p.strip()]
+        rejected.extend(
+            p for p in (paths_ or ["(unknown path)"]) if p not in rejected)
+
     for e in entries:
-        if not isinstance(e, dict) or e.get("type") != "event_msg":
+        if not isinstance(e, dict):
             continue
         p = e.get("payload")
-        if not isinstance(p, dict) or p.get("type") != "patch_apply_end":
+        if not isinstance(p, dict):
             continue
-        if p.get("success"):
-            continue
-        changes = p.get("changes")
-        if isinstance(changes, dict) and changes:
-            rejected += [c for c in changes if c not in rejected]
-        elif "(unknown path)" not in rejected:
-            rejected.append("(unknown path)")
+        ptype = p.get("type")
+        if e.get("type") == "event_msg" and ptype == "patch_apply_end":
+            if p.get("success"):
+                continue
+            changes = p.get("changes")
+            add(list(changes) if isinstance(changes, dict) else [])
+        elif ptype == "custom_tool_call":
+            # the call always precedes its output, so a forward pass resolves
+            # the join without a second scan (and never reaches back past
+            # `since` for a script this run did not run)
+            call_id, src = p.get("call_id"), p.get("input")
+            if isinstance(call_id, str) and isinstance(src, str):
+                scripts[call_id] = src
+        elif ptype == "custom_tool_call_output":
+            if PATCH_REJECTED not in _output_text(p.get("output")):
+                continue
+            call_id = p.get("call_id")
+            src = scripts.get(call_id, "") if isinstance(call_id, str) else ""
+            add(_PATCH_TARGET_RE.findall(src))
     return rejected
 
 

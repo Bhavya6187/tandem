@@ -797,3 +797,78 @@ class TestBlockedWriteFooter:
         assert "plugin/README.md" in out
         # ... the inherited one is not
         assert "old/stale.py" not in out
+
+    # Modeled byte-for-byte on a live read-only rejection (controller probe,
+    # 2026-08-01, rollout 019fbfe6-…): codex emits NO patch_apply_end when the
+    # sandbox refuses a write — the rejection exists only as this call/output
+    # pair. The patch sits inside a JS string literal, so its line breaks are
+    # literal two-char `\n` escapes; only the JS statements use real newlines.
+    _LIVE_EXEC_INPUT = (
+        'const patch = "*** Begin Patch\\n*** Add File: probe.txt'
+        '\\n+hello\\n*** End Patch";\n'
+        'const result = await tools.apply_patch(patch);\ntext(result);\n'
+    )
+
+    def _rejection_pair(self, call_id="call_GLGqPXu3fYY5aw9m3cmzCyl4"):
+        return [
+            {"timestamp": "t", "type": "response_item",
+             "payload": {"type": "custom_tool_call", "status": "completed",
+                         "call_id": call_id, "name": "exec",
+                         "input": self._LIVE_EXEC_INPUT}},
+            {"timestamp": "t", "type": "response_item",
+             "payload": {"type": "custom_tool_call_output", "call_id": call_id,
+                         "output": [
+                             {"type": "input_text",
+                              "text": "Script failed\nWall time 0.0 seconds\n"
+                                      "Output:\n"},
+                             {"type": "input_text",
+                              "text": "Script error:\npatch rejected: writing "
+                                      "is blocked by read-only sandbox; "
+                                      "rejected by user approval settings"},
+                         ]}},
+        ]
+
+    def test_custom_tool_call_rejection_is_detected(self, env_factory,
+                                                    monkeypatch, capsys):
+        """The real rejection path. Matching only patch_apply_end left the
+        feature dead in production: codex emits that event when a patch
+        APPLIES, not when the sandbox refuses it."""
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text(
+                "I was unable to create the file.")
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            for e in self._rejection_pair():
+                write_line(sub_path, e)
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        code = ops.run_sub(env.store, env.session, "t", quiet=True)
+        assert code == 0
+        out = capsys.readouterr().out
+        assert ops.BLOCKED_HEADER in out
+        # the path is parsed out of the JS-escaped patch, stopping at the
+        # `\n` escape rather than swallowing the rest of the string literal
+        assert "Rejected: probe.txt" in out
+        assert "+hello" not in out
+
+    def test_custom_tool_call_rejection_below_watermark_is_ignored(
+            self, env_factory, monkeypatch, capsys):
+        """Same real shape, but inherited by a --context full fork from an
+        earlier interactive turn: not this worker's rejection."""
+        env = env_factory(active="claude")
+        ops.fast_forward(env.store, env.session, "claude")
+        for e in self._rejection_pair():
+            write_line(env.codex_shadow, e)
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text("no edits attempted")
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_sub(env.store, env.session, "t", quiet=True, context="full")
+        out = capsys.readouterr().out
+        assert ops.BLOCKED_HEADER not in out
+        assert "probe.txt" not in out
