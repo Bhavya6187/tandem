@@ -668,6 +668,24 @@ class TestSandboxPlumbing:
         assert r.exit_code == 0
         assert calls["kw"]["sandbox"] == "read-only"
 
+    def test_sub_cli_rejects_danger_full_access(self, env_factory, monkeypatch):
+        """Global constraint: tandem never grants codex an unsandboxed run.
+        `danger-full-access` is not in the Choice, so click kills the invocation
+        with a usage error (exit 2) before run_sub is reached — the value is
+        unreachable through the flag, whatever the brief asks for."""
+        import click.testing
+        env = env_factory(active="claude")
+        cli = TestSubCli()._cli_env(env, monkeypatch)
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(kw=kw) or 0,
+        )
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "--sandbox", "danger-full-access", "brief"])
+        assert r.exit_code == 2
+        assert not calls
+
     def test_sub_cli_garbage_stamp_degrades_to_no_flag(self, env_factory,
                                                        monkeypatch):
         import click.testing
@@ -905,6 +923,42 @@ class TestBlockedWriteFooter:
         ops.run_sub(env.store, env.session, "t", quiet=True)
         out = capsys.readouterr().out
         assert "Found 3 matches." in out
+        assert ops.BLOCKED_HEADER not in out
+
+    def test_combined_grep_hit_is_ignored(self, env_factory, monkeypatch,
+                                          capsys):
+        """The narrowing above gates on the CALL looking like a patch, which a
+        single grep for BOTH literals satisfies by itself: the pattern puts the
+        patch tool's name in the call input, and this repo's own source hands
+        the marker back in the output. A real rejection prints the marker at
+        the START of a line ("Script error:\\npatch rejected: …"); an rg hit
+        line never does — it is prefixed by `path:lineno:`."""
+        env = env_factory(active="claude")
+
+        def fake_run(argv, cwd=None, **kw):
+            Path(argv[argv.index("-o") + 1]).write_text("Found 2 matches.")
+            sub_path = paths.find_codex_rollout(
+                argv[argv.index("resume") + 1])
+            write_line(sub_path, {
+                "timestamp": "t", "type": "response_item",
+                "payload": {"type": "custom_tool_call", "call_id": "c-rg2",
+                            "name": "exec",
+                            "input": "rg -n 'apply_patch|patch rejected' src/"}})
+            write_line(sub_path, {
+                "timestamp": "t", "type": "response_item",
+                "payload": {"type": "custom_tool_call_output",
+                            "call_id": "c-rg2", "output": [
+                                {"type": "input_text",
+                                 "text": "src/tandem/ops.py:404:"
+                                         'PATCH_REJECTED = "patch rejected"\n'
+                                         "src/tandem/ops.py:437:carrying "
+                                         "`patch rejected`. The\n"}]}})
+            return _R(0)
+
+        monkeypatch.setattr(ops, "_run", fake_run)
+        ops.run_sub(env.store, env.session, "t", quiet=True)
+        out = capsys.readouterr().out
+        assert "Found 2 matches." in out
         assert ops.BLOCKED_HEADER not in out
 
     def test_rejected_patch_with_unparseable_targets_still_reports(

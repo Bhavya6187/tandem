@@ -453,6 +453,13 @@ def hook_route_cmd() -> None:
     ALWAYS exits 0 — exit 2 would block the dispatch, and any failure here
     must degrade to native behavior.
 
+    It also has one side effect beyond its output: every Agent/Task dispatch
+    in a paired session writes the permission mode's sandbox consent to
+    `$TANDEM_HOME/sandbox/<tandem_id>`, which the relay's `tandem sub` reads
+    when it is given no `--sandbox` flag. That is how write consent reaches
+    codex at all — it cannot ride the dispatch itself, since the relay's only
+    channel to the worker is the untrusted brief.
+
     When nothing is rerouted because tandem is not usable here — no paired
     session for the cwd, or codex missing/unsupported — it prints a bare
     top-level `{"systemMessage": …}` instead: a user-visible line with NO

@@ -1,4 +1,5 @@
-"""The plugin is static registration only — validate the three files."""
+"""The plugin is static registration only — validate its manifests (plugin,
+marketplace, hooks) and its two agent definitions."""
 
 import json
 import re
@@ -139,6 +140,13 @@ def test_gpt_alias_agent_definition():
                    "--sandbox workspace-write"):
         assert marker in body, marker
     assert re.search(r"never do the task yourself", body, re.I)
+    # The alias differs ONLY in frontmatter: it is the same relay, offered for
+    # manual selection. Byte equality is the real pin — the markers above only
+    # sample the contract, so an edit to one body that the other misses (a
+    # reworded rule, a new guard) would otherwise slip through as two agents
+    # that behave differently under the same name.
+    assert body == (PLUGIN / "agents" / "codex-worker.md").read_text(
+    ).split("---", 2)[2]
 
 
 def test_loop_guard_covers_both_relay_agents():

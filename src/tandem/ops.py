@@ -303,6 +303,12 @@ def run_sub(
     passed through verbatim, on codex's stdin (`resume <id> -`), never as
     argv. Exit code mirrors codex.
 
+    `sandbox` is codex's `--sandbox` value ("read-only"/"workspace-write"),
+    empty for codex's own configured default. It is caller-validated — the CLI
+    accepts it only from a click.Choice flag or the dispatching session's
+    consent stamp — and can never come from the brief, which reaches codex on
+    stdin and never touches argv.
+
     quiet=True is the bridge-agent mode: codex's raw transcript goes to a log
     file and this command's ENTIRE stdout becomes the worker's final message
     (via codex's own `-o/--output-last-message`). With inherited stdio the
@@ -408,6 +414,14 @@ BLOCKED_HEADER = "[tandem-sub blocked: write]"
 # a real rejection.
 PATCH_REJECTED = "patch rejected"
 
+# Anchored, because "somewhere in the output" is not a rejection. Codex prints
+# the marker as its own line ("Script error:\npatch rejected: …"), while a
+# worker grepping this repo gets it back inside an `rg` hit line, prefixed by
+# `path:lineno:`. Anchoring is what separates the two — and it is the only
+# thing that does once the grep pattern also names the patch tool, since then
+# the call itself looks like a patch to the gate below.
+_PATCH_REJECTED_RE = re.compile("^" + re.escape(PATCH_REJECTED), re.M)
+
 # `*** Add File: <path>` out of the patch text. That text usually reaches us
 # embedded in a JS string literal (`tools.apply_patch("*** Begin Patch\n…")`),
 # so a patch line ends at a literal two-char `\n` ESCAPE at least as often as
@@ -488,7 +502,9 @@ def blocked_write_paths(sub_path: Path, *, since: int = 0) -> list[str]:
             # rejection and push the orchestrator into a needless escalation.
             if "*** Begin Patch" not in src and "apply_patch" not in src:
                 continue
-            if PATCH_REJECTED not in _output_text(p.get("output")):
+            # ... and one grep for both literals passes that gate on its own,
+            # so the marker must also sit where codex puts it: line-anchored.
+            if not _PATCH_REJECTED_RE.search(_output_text(p.get("output"))):
                 continue
             add(_PATCH_TARGET_RE.findall(src))
     return rejected
@@ -497,8 +513,13 @@ def blocked_write_paths(sub_path: Path, *, since: int = 0) -> list[str]:
 def blocked_footer(rejected: list[str], *, retry_hint: bool) -> str:
     lines = [
         BLOCKED_HEADER,
+        # NOT "no files were modified": under workspace-write a run can apply
+        # several patches and have a later one refused (a path outside the
+        # workspace, say), so the only claim this footer can make is about the
+        # patches it actually saw rejected.
         "The codex worker's file changes were rejected by its sandbox; "
-        "no files were modified. Rejected: " + ", ".join(rejected[:10]),
+        "the listed changes were not applied. Rejected: "
+        + ", ".join(rejected[:10]),
     ]
     if retry_hint:
         lines.append(

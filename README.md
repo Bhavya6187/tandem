@@ -109,6 +109,11 @@ that one is not, and routing is on as soon as the plugin loads, so
   files comes back with a `[tandem-sub blocked: write]` trailer naming the
   rejected paths; then it's your call — have it rerun with `tandem sub -q
   --sandbox workspace-write`, or apply what it returned yourself.
+- Know the trust boundary: `--sandbox` on `tandem sub` overrides whatever
+  consent your permission mode stamped, and the only thing stopping a task
+  brief from talking the relay into adding that flag is the relay's own
+  instructions — so dispatching a task brief you don't trust is handing that
+  text the relay's privileges.
 - Your own agents named `gpt` or `codex-worker` are never rerouted — the
   loop guard matches on the last segment of the agent name in any scope — so
   a local `.claude/agents/gpt.md` of yours keeps dispatching natively.
