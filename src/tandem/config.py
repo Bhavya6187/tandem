@@ -14,14 +14,18 @@ from . import paths
 
 @dataclass(frozen=True)
 class SubagentsConfig:
-    route: str = "all"          # "all" | "off"
+    route: str = "all"          # "all" | "manual" | "off"
     model: str = ""             # "" -> omit -m; codex's configured default
     context: str = "match"      # "match" | "task" | "full"
     fanout_feature: str = ""    # --enable <name>; "" -> flag not passed
     keep_forks: bool = False
 
 
-_ROUTES = ("all", "off")
+# "manual": no auto-reroute and no missed-reroute notice — dispatch to codex
+# only when the model/user explicitly picks a bridge agent (`tandem:gpt`,
+# `tandem:codex-worker`). Distinct from "off" only in intent today; it exists
+# so docs can point users at a supported name instead of overloading "off".
+_ROUTES = ("all", "manual", "off")
 _CONTEXTS = ("match", "task", "full")
 
 

@@ -165,6 +165,35 @@ class TestNotice:
             "systemMessage": NOTICE_NO_SESSION}
 
 
+class TestManualRoute:
+    def test_manual_never_rewrites(self):
+        assert _route(_payload(),
+                      cfg=SubagentsConfig(route="manual")) is None
+
+    def test_manual_never_warns(self):
+        # like "off": an explicit user choice, so silence is the requested
+        # behavior even when nothing could reroute anyway
+        cfg = SubagentsConfig(route="manual")
+        assert _notice(_payload(), cfg=cfg) is None
+        assert _notice(_payload(), cfg=cfg,
+                       has_session=True, codex_ok=False) is None
+
+    def test_manual_still_stamps_sandbox(self, env_factory):
+        # the stamp is what an explicit tandem:gpt dispatch consents with,
+        # so it must be written before/regardless of the route decision
+        env = env_factory(active="claude")
+        (paths.tandem_home() / "config.toml").write_text(
+            '[subagents]\nroute = "manual"\n')
+        payload = _payload()
+        payload["cwd"] = env.cwd
+        payload["permission_mode"] = "acceptEdits"
+        r = _run_hook(payload)
+        assert r.exit_code == 0
+        assert r.output == ""            # no rewrite, no notice
+        assert (paths.tandem_home() / "sandbox"
+                / env.session.tandem_id).read_text() == "workspace-write"
+
+
 class TestFindAgentBody:
     def test_builtin_and_plugin_scoped_have_no_body(self, tmp_path):
         assert find_agent_body("Explore", str(tmp_path), tmp_path) == ""
