@@ -429,3 +429,14 @@ class TestReadSandboxStamp:
         assert cli._read_sandbox_stamp(tid) == ""
         cli._stamp_sandbox(tid, "danger-full-access")   # hand-edited
         assert cli._read_sandbox_stamp(tid) == ""
+
+    def test_non_utf8_stamp_degrades_instead_of_raising(self, env_factory):
+        # read_text() raises UnicodeDecodeError (a ValueError, NOT an
+        # OSError) on undecodable bytes; `tandem sub` calls this with no
+        # blanket except, so escaping here would crash the relay
+        from tandem import cli
+        tid = env_factory(active="claude").session.tandem_id
+        p = cli._sandbox_stamp_path(tid)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"\xff\xfe")
+        assert cli._read_sandbox_stamp(tid) == ""

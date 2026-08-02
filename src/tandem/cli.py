@@ -429,7 +429,10 @@ def _read_sandbox_stamp(tandem_id: str) -> str:
     anything unexpected (corrupt file, hand-edited) degrades to no flag."""
     try:
         text = _sandbox_stamp_path(tandem_id).read_text().strip()
-    except OSError:
+    # ValueError covers the UnicodeDecodeError read_text() raises when the
+    # file is not UTF-8: our caller has no blanket except, so an escaping
+    # read failure would crash the dispatch instead of dropping the flag.
+    except (OSError, ValueError):
         return ""
     return text if text == "workspace-write" else ""
 
