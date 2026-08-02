@@ -104,13 +104,14 @@ class BenchError(Exception):
 
 # Wrapped around every family's task text, identically in both arms.
 #
-# "Investigate only" is not politeness: rerouted subagents are codex workers
-# running under codex's own config, which in practice means `sandbox:
-# read-only` — they physically cannot edit files (bench/PAIRING.md caveat 7).
-# Native Explore subagents are read-only too, so restricting both arms the same
-# way is the fair comparison rather than a handicap. If a family ever needs
-# writing subagents, the arms stop being comparable and this scaffold has to be
-# revisited, not quietly relaxed.
+# "Investigate only" is an experimental control, not a physical constraint.
+# Since tandem PR #20 the worker sandbox follows the dispatching session's
+# permission mode, and the bench runs bypassPermissions, so arm-A workers CAN
+# write (bench/PAIRING.md caveat 7, README caveat 3). The control stays
+# because it keeps both arms measuring the same thing — investigation — and
+# avoids parallel-writer noise. If a family ever needs writing subagents,
+# that is a deliberate design change (a scaffold knob), not a quiet
+# relaxation of this string.
 SCAFFOLD = """\
 How to work on this (mandatory, and it applies to the whole task):
 

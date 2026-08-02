@@ -118,6 +118,10 @@ bench/work/tandem-home-a/config.toml     [subagents] route = "all"
 bench/work/tandem-home-b/config.toml     [subagents] route = "off"
 ```
 
+(tandem also accepts `route = "manual"` since PR #20 — hook-silent like
+`"off"`, with codex reachable only by explicitly naming a relay agent. The
+bench never uses it; arm B stays on `"off"`.)
+
 Each arm's claude process is launched with `TANDEM_HOME` pointed at its own
 home, so the two arms share no state, no pairings and no subagent logs. A
 hand-edit that turned the A/B into an A/A would otherwise be invisible in the
@@ -354,11 +358,27 @@ counting reroutes there reports zero every time. The hook's own stdout
    arms are over 94% cache. Barely 6% of the number in that column is the
    agent's own input and output. Label the column accordingly, or read
    `tokens_input` / `tokens_output` from `verdict.json` instead.
-3. **Rerouted workers run in codex's read-only sandbox.** They physically
-   cannot edit files, so the shared scaffold tells subagents in *both* arms to
-   investigate only and leaves every edit to the main agent. That keeps the
-   arms comparable; it also means this bench does not measure writing
-   subagents at all.
+3. **The investigate-only scaffold is an experimental control, not a physical
+   constraint.** Since tandem PR #20, the worker's sandbox follows the
+   dispatching session's permission mode: on every Agent/Task dispatch the
+   hook stamps `$TANDEM_HOME/sandbox/<tandem-id>` (`acceptEdits` or
+   `bypassPermissions` → `--sandbox workspace-write`; any other mode → empty,
+   i.e. codex's configured default, read-only in practice), and the relay's
+   `tandem sub` reads that stamp. The bench runs
+   `--permission-mode bypassPermissions`, so arm-A workers CAN write. The
+   shared scaffold still tells subagents in *both* arms to investigate only —
+   deliberately: it keeps both arms measuring the same thing (investigation)
+   and avoids parallel-writer noise. It also means this bench does not
+   measure writing subagents; relaxing that is a design change (a scaffold
+   knob), not a flag flip. Two side effects to watch: a worker whose sandbox
+   rejects a write appends a blocked-write trailer to its reply, which lands
+   in the answer text the verifiers read (should not occur under
+   bypassPermissions — if you see one, treat the run as suspect); and the
+   `tandem:gpt` alias is a user-selectable relay the hook never rewrites — an
+   arm-B transcript whose `agent_types` contains any `tandem:*` entry is
+   leak-shaped (it fails loudly today because only arm-A workdirs are
+   paired, but check before trusting the row). The smoke predates PR #20;
+   its worker logs say `sandbox: read-only`, which was true then.
 4. **Arm A is not hermetic.** The worker inherits the user's
    `~/.codex/config.toml`: their model, their MCP servers, their plugins and
    skills. In the smoke, every worker read a `using-superpowers` skill file

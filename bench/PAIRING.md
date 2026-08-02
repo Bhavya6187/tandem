@@ -177,14 +177,19 @@ Observed shadow header:
    tail loop run — which the headless bench does not do. **Keep arm A on the
    default `--context task`.**
 
-7. **The codex worker inherits the user's `~/.codex/config.toml`.** In the
-   live run that meant `sandbox: read-only`, `approval: never`, the user's
-   MCP servers (one of which logged an auth error), and user plugins/skills —
-   the worker spent two `exec` calls reading a `using-superpowers` skill file
-   before answering "ok". For the bench this is non-hermetic (extra tokens,
-   extra latency) and, more importantly, **read-only sandbox means rerouted
-   subagents cannot edit files.** Pick bench tasks accordingly, or give the
-   bench its own codex config.
+7. **The codex worker inherits the user's `~/.codex/config.toml`** — MCP
+   servers (one logged an auth error in the live run), plugins and skills:
+   the worker spent two `exec` calls reading a `using-superpowers` skill
+   file before answering "ok". For the bench this is non-hermetic (extra
+   tokens, extra latency). The *sandbox*, however, is no longer
+   unconditionally the config default: since tandem PR #20 the hook stamps
+   `$TANDEM_HOME/sandbox/<tandem-id>` from the dispatching session's
+   `permission_mode` on every Agent/Task dispatch (`acceptEdits` /
+   `bypassPermissions` → `workspace-write`, anything else → empty = config
+   default, read-only in practice), and `tandem sub` reads the stamp. The
+   live transcript in §5 shows `sandbox: read-only` because it was captured
+   before PR #20 under `default` mode; a bench run under
+   `--permission-mode bypassPermissions` gets `workspace-write` workers.
 
 8. **One pairing per cwd.** Pairing the same cwd twice creates a second row;
    `latest_session_for_cwd` then returns the newer one and the older row's
