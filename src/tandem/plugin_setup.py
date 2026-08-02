@@ -11,6 +11,10 @@ notice. The one-time offer lives here too so both entry points (bare
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+
+import click
 
 from . import paths
 
@@ -43,3 +47,52 @@ def is_plugin_installed() -> bool:
         return bool(plugins.get(PLUGIN_ID))
     except Exception:
         return True
+
+
+MANUAL_COMMANDS = (
+    "    claude plugin marketplace add Bhavya6187/tandem\n"
+    "    claude plugin install tandem@tandem"
+)
+
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess | None:
+    """Echo-and-run one claude command; None when it cannot run at all."""
+    click.echo("  $ " + " ".join(cmd))
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def install_plugin() -> bool:
+    """Marketplace add + plugin install through claude's CLI.
+
+    The add step is advisory — claude 2.1.220 exits 0 when the
+    marketplace is already declared, and if the add genuinely failed the
+    install step fails right after and reports. Only the install step
+    decides the return value.
+    """
+    if shutil.which("claude") is None:
+        click.secho("error: claude not found on PATH.", fg="red", err=True)
+        click.echo("Once it is installed, run:\n" + MANUAL_COMMANDS, err=True)
+        return False
+    add = _run(["claude", "plugin", "marketplace", "add", MARKETPLACE_REPO])
+    if add is not None and add.returncode != 0:
+        detail = (add.stderr or add.stdout).strip()
+        if detail:
+            click.secho(f"  marketplace add failed: {detail}",
+                        fg="yellow", err=True)
+    ins = _run(["claude", "plugin", "install", PLUGIN_ID])
+    if ins is None or ins.returncode != 0:
+        detail = "" if ins is None else (ins.stderr or ins.stdout).strip()
+        if detail:
+            click.secho(f"  {detail}", fg="red", err=True)
+        click.secho("Plugin install failed. Manual commands:",
+                    fg="red", err=True)
+        click.echo(MANUAL_COMMANDS, err=True)
+        return False
+    click.echo(
+        "Plugin installed. It takes effect in new Claude sessions "
+        "(running sessions are unaffected)."
+    )
+    return True
