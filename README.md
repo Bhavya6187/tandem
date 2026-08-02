@@ -70,14 +70,22 @@ the plugin that registers the hook — the plugin lives in this repo, not in
 the wheel, and without the binary on PATH it is inert.
 
 ```bash
-uv tool install tandem-cli                        # the binary the hook drives
-claude plugin marketplace add Bhavya6187/tandem   # this repo, as a marketplace
-claude plugin install tandem@tandem
+uv tool install tandem-cli   # the binary the hook drives
+tandem                       # first launch offers the plugin install — hit enter
+```
+
+Said no at the prompt, or running non-interactively? One command performs
+both marketplace steps whenever you're ready:
+
+```bash
+tandem plugin install   # = claude plugin marketplace add Bhavya6187/tandem
+                        #   + claude plugin install tandem@tandem
 ```
 
 The marketplace tracks this repo's default branch, but nothing updates
-behind your back: you pull new versions when you run `claude plugin
-marketplace update` (or `/plugin marketplace update` inside Claude).
+behind your back: the first-launch offer asks before touching anything, and
+you pull new versions when you run `claude plugin marketplace update` (or
+`/plugin marketplace update` inside Claude).
 
 Then create `~/.tandem/config.toml` and pick your plan's cheap model (ids
 are listed in `~/.codex/models_cache.json`):
