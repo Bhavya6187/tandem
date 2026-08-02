@@ -129,3 +129,82 @@ def test_missing_claude_binary_fails_without_running_anything(
     assert plugin_setup.install_plugin() is False
     assert calls == []
     assert "claude plugin install tandem@tandem" in capsys.readouterr().err
+
+
+# -- offer -------------------------------------------------------------------
+
+@pytest.fixture
+def offerable(homes, claude_on_path, monkeypatch):
+    """All four gates open: TTY, claude on PATH, no stamp, not installed."""
+    monkeypatch.setattr(plugin_setup, "_stdin_is_tty", lambda: True)
+    return homes
+
+
+def stamp_path(tmp_path):
+    return tmp_path / ".tandem" / "plugin-offer"
+
+
+def test_offer_silent_when_not_tty(homes, claude_on_path, monkeypatch, capsys):
+    monkeypatch.setattr(plugin_setup, "_stdin_is_tty", lambda: False)
+    plugin_setup.offer_install()
+    assert capsys.readouterr().out == ""
+    assert not stamp_path(homes).exists()
+
+
+def test_offer_silent_when_no_claude(homes, monkeypatch, capsys):
+    monkeypatch.setattr(plugin_setup, "_stdin_is_tty", lambda: True)
+    monkeypatch.setattr(plugin_setup.shutil, "which", lambda name: None)
+    plugin_setup.offer_install()
+    assert capsys.readouterr().out == ""
+    assert not stamp_path(homes).exists()
+
+
+def test_offer_silent_when_already_installed(offerable, capsys):
+    write_state(offerable, {"version": 2, "plugins": {
+        "tandem@tandem": [{"scope": "user"}]}})
+    plugin_setup.offer_install()
+    assert capsys.readouterr().out == ""
+    assert not stamp_path(offerable).exists()
+
+
+def test_offer_silent_when_stamped(offerable, monkeypatch, capsys):
+    stamp_path(offerable).parent.mkdir(parents=True, exist_ok=True)
+    stamp_path(offerable).touch()
+    monkeypatch.setattr(plugin_setup.click, "confirm",
+                        lambda *a, **k: pytest.fail("prompted despite stamp"))
+    plugin_setup.offer_install()
+    assert capsys.readouterr().out == ""
+
+
+def test_decline_prints_hint_and_stamps(offerable, monkeypatch, capsys):
+    monkeypatch.setattr(plugin_setup.click, "confirm", lambda *a, **k: False)
+    plugin_setup.offer_install()
+    assert plugin_setup.LATER_HINT in capsys.readouterr().out
+    assert stamp_path(offerable).exists()
+
+
+def test_accept_installs_and_stamps(offerable, monkeypatch):
+    installed = []
+    monkeypatch.setattr(plugin_setup.click, "confirm", lambda *a, **k: True)
+    monkeypatch.setattr(plugin_setup, "install_plugin",
+                        lambda: (installed.append(True), True)[1])
+    plugin_setup.offer_install()
+    assert installed == [True]
+    assert stamp_path(offerable).exists()
+
+
+def test_failed_install_still_stamps(offerable, monkeypatch):
+    monkeypatch.setattr(plugin_setup.click, "confirm", lambda *a, **k: True)
+    monkeypatch.setattr(plugin_setup, "install_plugin", lambda: False)
+    plugin_setup.offer_install()
+    assert stamp_path(offerable).exists()
+
+
+def test_abort_at_prompt_counts_as_decline(offerable, monkeypatch, capsys):
+    def raise_abort(*a, **k):
+        raise plugin_setup.click.Abort()
+
+    monkeypatch.setattr(plugin_setup.click, "confirm", raise_abort)
+    plugin_setup.offer_install()
+    assert plugin_setup.LATER_HINT in capsys.readouterr().out
+    assert stamp_path(offerable).exists()

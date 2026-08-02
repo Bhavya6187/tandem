@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
+from pathlib import Path
 
 import click
 
@@ -96,3 +98,56 @@ def install_plugin() -> bool:
         "(running sessions are unaffected)."
     )
     return True
+
+
+LATER_HINT = "You can install it later with: tandem plugin install"
+
+
+def _offer_stamp() -> Path:
+    return paths.tandem_home() / "plugin-offer"
+
+
+def _stdin_is_tty() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (ValueError, OSError):    # closed/replaced stdin
+        return False
+
+
+def offer_install() -> None:
+    """One-time [Y/n] offer before the interactive shell.
+
+    Every gate resolves to silence; only a *shown* offer stamps, and it
+    stamps whatever the answer or install outcome — the hint names the
+    retry path, so re-asking would just be nagging.
+    """
+    if not _stdin_is_tty():
+        return
+    if shutil.which("claude") is None:
+        return
+    stamp = _offer_stamp()
+    try:
+        if stamp.exists():
+            return
+    except OSError:
+        return
+    if is_plugin_installed():
+        return
+    try:
+        accepted = click.confirm(
+            "Install the tandem Claude Code plugin for codex-model "
+            "subagents?",
+            default=True,
+        )
+    except (click.Abort, EOFError):     # ctrl-C / ctrl-D = not now
+        click.echo()                    # newline after the aborted prompt
+        accepted = False
+    if accepted:
+        install_plugin()
+    else:
+        click.echo(LATER_HINT)
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    except OSError:
+        pass                            # best-effort, like warned/ stamps
