@@ -342,3 +342,17 @@ class TestCliNotice:
         r = _run_hook(payload)
         assert r.exit_code == 0
         assert not stale.exists()
+
+
+class TestSandboxForMode:
+    def test_edit_consenting_modes_map_to_workspace_write(self):
+        from tandem.hookroute import sandbox_for_mode
+        assert sandbox_for_mode("acceptEdits") == "workspace-write"
+        assert sandbox_for_mode("bypassPermissions") == "workspace-write"
+
+    def test_everything_else_maps_to_no_flag(self):
+        # unknown/future modes MUST degrade to no-write: an unrecognized
+        # string is not consent
+        from tandem.hookroute import sandbox_for_mode
+        for mode in ("default", "plan", "dontAsk", "auto", "", None, 7):
+            assert sandbox_for_mode(mode) == ""

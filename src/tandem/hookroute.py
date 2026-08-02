@@ -21,6 +21,20 @@ BRIDGE_NAME = "codex-worker"
 BRIDGE_AGENT = f"tandem:{BRIDGE_NAME}"
 BRIDGE_MODEL = "haiku"
 
+# Write-consent propagation: these are the two claude permission modes in
+# which the user has already said "apply edits without asking". Every other
+# value — default, plan, and any mode added after this list was written —
+# maps to "" (codex keeps its configured default, read-only in practice):
+# an unrecognized mode is not consent.
+WRITE_MODES = frozenset({"acceptEdits", "bypassPermissions"})
+
+
+def sandbox_for_mode(permission_mode) -> str:
+    """The codex --sandbox value a dispatch from this claude permission
+    mode has consented to, or "" for 'pass no flag'."""
+    return "workspace-write" if permission_mode in WRITE_MODES else ""
+
+
 # The plugin is installed globally in claude, so its silence is ambiguous:
 # "no tandem session here" and "tandem is broken" look identical from the
 # UI. These two lines are the only thing that distinguishes them, and each
