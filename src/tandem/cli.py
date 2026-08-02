@@ -404,6 +404,36 @@ def _mark_warned(stamp: Path | None) -> None:
             pass
 
 
+def _sandbox_stamp_path(tandem_id: str) -> Path:
+    # tandem_id comes from our own state store (hex), never from payload
+    # text, so it is safe as a filename component without filtering.
+    return paths.tandem_home() / "sandbox" / tandem_id
+
+
+def _stamp_sandbox(tandem_id: str, value: str) -> None:
+    """Record the dispatching session's current write-consent for this pair.
+    Rewritten on every dispatch so a mode change (including back to default)
+    always wins; best-effort, because no stamp failure may reach the
+    dispatch. Known race: two claude sessions dispatching on the same pair
+    interleave last-write-wins; the window is the relay's spawn time."""
+    try:
+        p = _sandbox_stamp_path(tandem_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(value)
+    except OSError:
+        pass
+
+
+def _read_sandbox_stamp(tandem_id: str) -> str:
+    """The stamped consent, filtered to the one value we ever act on —
+    anything unexpected (corrupt file, hand-edited) degrades to no flag."""
+    try:
+        text = _sandbox_stamp_path(tandem_id).read_text().strip()
+    except OSError:
+        return ""
+    return text if text == "workspace-write" else ""
+
+
 @main.command(name="hook-route")
 def hook_route_cmd() -> None:
     """Claude Code PreToolUse hook: reroute subagent dispatches to codex.
@@ -428,13 +458,20 @@ def hook_route_cmd() -> None:
     is what makes exit 2 unreachable in practice."""
     try:
         from .config import load_subagents_config
-        from .hookroute import missed_reroute_notice, route
+        from .hookroute import missed_reroute_notice, route, sandbox_for_mode
 
         payload = json.loads(sys.stdin.read() or "{}")
         cwd = payload.get("cwd") or _cwd()
         cfg = load_subagents_config()
         with StateStore() as store:
             session = store.latest_session_for_cwd(cwd)
+        # Consent travels out-of-band: the relay's `tandem sub` reads this
+        # stamp, so it must be current before the dispatch spawns the relay.
+        # Stamped regardless of route config — a manual tandem:gpt dispatch
+        # (never rewritten below) consents via permission mode all the same.
+        if session is not None and payload.get("tool_name") in ("Agent", "Task"):
+            _stamp_sandbox(session.tandem_id,
+                           sandbox_for_mode(payload.get("permission_mode")))
         codex_ok = False
         if session is not None:
             adapter = get_adapter("codex")

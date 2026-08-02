@@ -17,6 +17,7 @@ from tandem.hookroute import (
     find_agent_body,
     missed_reroute_notice,
     route,
+    sandbox_for_mode,
 )
 
 
@@ -346,13 +347,85 @@ class TestCliNotice:
 
 class TestSandboxForMode:
     def test_edit_consenting_modes_map_to_workspace_write(self):
-        from tandem.hookroute import sandbox_for_mode
         assert sandbox_for_mode("acceptEdits") == "workspace-write"
         assert sandbox_for_mode("bypassPermissions") == "workspace-write"
 
     def test_everything_else_maps_to_no_flag(self):
         # unknown/future modes MUST degrade to no-write: an unrecognized
         # string is not consent
-        from tandem.hookroute import sandbox_for_mode
         for mode in ("default", "plan", "dontAsk", "auto", "", None, 7):
             assert sandbox_for_mode(mode) == ""
+
+
+class TestSandboxStamp:
+    def _hook(self, env, mode):
+        payload = _payload()
+        payload["cwd"] = env.cwd
+        payload["session_id"] = "s-1"
+        if mode is not None:
+            payload["permission_mode"] = mode
+        return _run_hook(payload)
+
+    def _stamp(self, env):
+        return (paths.tandem_home() / "sandbox" / env.session.tandem_id)
+
+    def test_accept_edits_stamps_workspace_write(self, env_factory):
+        env = env_factory(active="claude")
+        r = self._hook(env, "acceptEdits")
+        assert r.exit_code == 0
+        assert self._stamp(env).read_text() == "workspace-write"
+        # the rewrite decision itself is unchanged by stamping
+        out = json.loads(r.output)
+        assert out["hookSpecificOutput"]["updatedInput"]["subagent_type"] \
+            == BRIDGE_AGENT
+
+    def test_default_mode_restamps_empty(self, env_factory):
+        # a later default-mode dispatch must revoke an earlier consent
+        env = env_factory(active="claude")
+        self._hook(env, "acceptEdits")
+        self._hook(env, "default")
+        assert self._stamp(env).read_text() == ""
+
+    def test_missing_mode_stamps_empty(self, env_factory):
+        env = env_factory(active="claude")
+        self._hook(env, None)
+        assert self._stamp(env).read_text() == ""
+
+    def test_no_session_writes_no_stamp(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+        payload = _payload()
+        payload["cwd"] = str(tmp_path)          # no paired session here
+        payload["permission_mode"] = "acceptEdits"
+        assert _run_hook(payload).exit_code == 0
+        assert not (tmp_path / ".tandem" / "sandbox").exists()
+
+    def test_unwritable_stamp_dir_does_not_break_the_dispatch(
+            self, env_factory):
+        # failure discipline: stamp I/O must never block a reroute
+        env = env_factory(active="claude")
+        (paths.tandem_home() / "sandbox").write_text("not a directory")
+        r = self._hook(env, "acceptEdits")
+        assert r.exit_code == 0
+        assert json.loads(r.output)["hookSpecificOutput"]["updatedInput"][
+            "subagent_type"] == BRIDGE_AGENT
+
+
+class TestReadSandboxStamp:
+    """The reader half of the pair (task 3 consumes it). Its filter is the
+    boundary between a file on disk and a codex sandbox flag, so only the
+    one value we ever act on may survive it."""
+
+    def test_round_trips_the_stamped_consent(self, env_factory):
+        from tandem import cli
+        tid = env_factory(active="claude").session.tandem_id
+        cli._stamp_sandbox(tid, "workspace-write")
+        assert cli._read_sandbox_stamp(tid) == "workspace-write"
+
+    def test_anything_unexpected_degrades_to_no_flag(self, env_factory):
+        from tandem import cli
+        tid = env_factory(active="claude").session.tandem_id
+        assert cli._read_sandbox_stamp(tid) == ""       # never stamped
+        cli._stamp_sandbox(tid, "")                     # consent revoked
+        assert cli._read_sandbox_stamp(tid) == ""
+        cli._stamp_sandbox(tid, "danger-full-access")   # hand-edited
+        assert cli._read_sandbox_stamp(tid) == ""
