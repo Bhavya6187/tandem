@@ -1,7 +1,9 @@
 """Shared fixtures: a paired session under tmp homes with both shadow files
 seeded the way a fresh `tandem` launch does, plus fake native entry builders."""
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,83 @@ import pytest
 from tandem.events import SessionContext
 from tandem.state import StateStore
 from tandem.util import read_jsonl
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BENCH_DIR = REPO_ROOT / "bench"
+BENCH_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "bench"
+
+
+def load_bench_module(name):
+    """Import a `bench/` module by file path, under a `bench_` alias.
+
+    bench/ is deliberately not a package and never importable from src/tandem
+    (see the plan's global constraints), so the bench tests load its modules
+    the same way the runner loads a family provisioner: by explicit path."""
+    alias = f"bench_{name}"
+    if alias in sys.modules:
+        return sys.modules[alias]
+    spec = importlib.util.spec_from_file_location(alias, BENCH_DIR / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[alias] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def load_bench_shared(name):
+    """Import a bench/ module under its REAL name, the way a family does.
+
+    `load_bench_module` aliases modules as `bench_<name>` so the runner and the
+    tests cannot collide. For family_api/family_common that aliasing is wrong:
+    the family modules do a plain `from family_common import ...`, so an
+    aliased copy would be a second, distinct module — and a test asserting
+    `pytest.raises(common.BenchFamilyError)` would then be asserting on a class
+    the family never raises."""
+    if str(BENCH_DIR) not in sys.path:
+        sys.path.insert(0, str(BENCH_DIR))
+    return importlib.import_module(name)
+
+
+def load_bench_family(name):
+    """Import bench/families/<name>.py the way runner.load_family does.
+
+    Goes through the runner rather than reimplementing the path dance so that
+    the tests exercise the same loader the bench uses — including the sys.path
+    entry the family modules need for `from family_api import ...`."""
+    runner = load_bench_module("runner")
+    return runner.load_family(name, runner.DEFAULT_FAMILY_DIR)
+
+
+def bench_stream(name):
+    """One of the live-captured stream-json fixtures, as a list of events."""
+    with open(BENCH_FIXTURES / f"stream-{name}.jsonl") as fh:
+        return [json.loads(ln) for ln in fh if ln.strip()]
+
+
+def bench_mixed_stream():
+    """A run where one dispatch rerouted and one stayed native, silently.
+
+    Real and reachable: hookroute.route() returns None — no rewrite, and no
+    notice either, because missed_reroute_notice() also stays silent when the
+    session is healthy — for `fork` subagents, for dispatches already aimed at
+    the bridge, and for blank prompts. The bench scaffold asks for >=2 parallel
+    dispatches, so arm A can genuinely produce one of each.
+
+    Built by splicing the native fixture's Agent dispatch (a distinct
+    tool_use_id) into the rerouted fixture, so every event is one claude
+    really emitted."""
+    rerouted = bench_stream("reroute")
+    native = bench_stream("native")
+    extra = [e for e in native
+             if (e.get("type") == "system" and e.get("subtype") == "task_started"
+                 and e.get("task_type") == "local_agent")
+             or (e.get("type") == "assistant"
+                 and any(b.get("name") in ("Agent", "Task")
+                         for b in (e.get("message") or {}).get("content") or []
+                         if isinstance(b, dict)))]
+    assert len(extra) == 2, extra          # one tool_use + one task_started
+    out = list(rerouted)
+    out[-2:-2] = extra                     # before the trailing result events
+    return out
 
 
 def write_line(path, obj=None, text=None):
@@ -132,6 +211,32 @@ class Env:
                      transcript or self.source_file, engine),
             engine,
         )
+
+
+@pytest.fixture(autouse=True)
+def _no_network_and_a_scratch_bench_cache(tmp_path, monkeypatch):
+    """Every test runs offline, with a throwaway bench cache.
+
+    The bench provisioners download dataset rows and clone repos, so it is one
+    careless fixture away from a unit test that quietly pulls 25MB off GitHub
+    and passes only on a machine with a network — which is exactly what
+    happened the first time bench/tasks.toml's lca rows were pinned and two
+    Task 2 tests kept using them as their "unrunnable task" example.
+
+    urlopen is the chokepoint (bench/family_common.http_get is the only thing
+    in the repo that opens a URL, and nothing under src/tandem does), so
+    failing it loudly here turns "accidentally online" from a silent pass into
+    a named error. BENCH_CACHE_DIR keeps anything a test does provision out of
+    the developer's real bench/work/cache."""
+    monkeypatch.setenv("BENCH_CACHE_DIR", str(tmp_path / "bench-cache"))
+
+    def blocked(*a, **kw):
+        raise AssertionError(
+            "a unit test tried to open a URL. Network access belongs in the "
+            "live-validation scripts, not in tests/ — use a fixture or inject "
+            "a fake fetcher (see family_common.cached_fetch's `fetcher` arg).")
+
+    monkeypatch.setattr("urllib.request.urlopen", blocked)
 
 
 @pytest.fixture
