@@ -31,7 +31,10 @@ def is_plugin_installed() -> bool:
         raw = paths.claude_installed_plugins_path().read_text()
     except FileNotFoundError:
         return False
-    except OSError:
+    # ValueError covers the UnicodeDecodeError read_text() raises when the
+    # file is not UTF-8: it is not an OSError, so without it an undecodable
+    # registry would crash the caller instead of reading as ambiguous.
+    except (OSError, ValueError):
         return True
     try:
         plugins = json.loads(raw)["plugins"]

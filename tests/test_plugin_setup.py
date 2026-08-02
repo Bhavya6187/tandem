@@ -53,3 +53,12 @@ def test_malformed_json_reads_as_installed(homes):
 def test_unexpected_shape_reads_as_installed(homes):
     write_state(homes, {"version": 3, "plugins": "moved-elsewhere"})
     assert plugin_setup.is_plugin_installed() is True
+
+
+def test_undecodable_bytes_read_as_installed(homes):
+    # read_text() raises UnicodeDecodeError (a ValueError, not an OSError)
+    # on a non-UTF-8 registry; that must resolve to silence, not a crash.
+    p = paths.claude_installed_plugins_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"\xff\xfe{")
+    assert plugin_setup.is_plugin_installed() is True
