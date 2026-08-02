@@ -99,6 +99,13 @@ class TestPassthrough:
         assert _route(_payload(subagent_type=BRIDGE_NAME)) is None
         assert _route(_payload(subagent_type=f"other:{BRIDGE_NAME}")) is None
 
+    def test_gpt_alias_loop_guard(self):
+        # tandem:gpt is the user-facing door to the same relay; rewriting it
+        # to codex-worker would work but erase the explicit choice from the
+        # UI and transcript — and the bare name must behave identically
+        assert _route(_payload(subagent_type="tandem:gpt")) is None
+        assert _route(_payload(subagent_type="gpt")) is None
+
     def test_route_off(self):
         assert _route(_payload(), cfg=SubagentsConfig(route="off")) is None
 

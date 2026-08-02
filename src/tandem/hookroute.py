@@ -21,6 +21,13 @@ BRIDGE_NAME = "codex-worker"
 BRIDGE_AGENT = f"tandem:{BRIDGE_NAME}"
 BRIDGE_MODEL = "haiku"
 
+# The user-facing door to the same relay: selectable by the orchestrating
+# model when the user asks for GPT subagents (route="manual" makes that the
+# only path). Same body contract as the bridge; only the description invites
+# selection.
+ALIAS_NAME = "gpt"
+RELAY_NAMES = frozenset({BRIDGE_NAME, ALIAS_NAME})
+
 # Write-consent propagation: these are the two claude permission modes in
 # which the user has already said "apply edits without asking". Every other
 # value — default, plan, and any mode added after this list was written —
@@ -70,11 +77,12 @@ def route(
     if not isinstance(tool_input, dict):
         return None
     subagent_type = tool_input.get("subagent_type") or ""
-    # forks keep claude's native full-context contract; bridge = loop guard.
-    # The guard is scope-insensitive: the model can (and in live traces does)
-    # ask for the bridge by either the plugin-scoped id or the bare name, and
-    # rewriting either one again would re-enter this hook forever.
-    if subagent_type == "fork" or subagent_type.rsplit(":", 1)[-1] == BRIDGE_NAME:
+    # forks keep claude's native full-context contract; the relays = loop
+    # guard. The guard is scope-insensitive: the model can (and in live traces
+    # does) ask for a relay by either the plugin-scoped id or the bare name,
+    # and rewriting either one again would re-enter this hook forever.
+    if subagent_type == "fork" or \
+            subagent_type.rsplit(":", 1)[-1] in RELAY_NAMES:
         return None
     prompt = tool_input.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
