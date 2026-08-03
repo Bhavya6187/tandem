@@ -569,11 +569,27 @@ def sync() -> None:
         click.echo(f"synced {n} new transcript lines from {session.active}.")
 
 
+@main.group()
+def plugin() -> None:
+    """Manage tandem's Claude Code plugin."""
+
+
+@plugin.command(name="install")
+def plugin_install_cmd() -> None:
+    """Install the plugin via claude (marketplace add + plugin install)."""
+    from .plugin_setup import install_plugin
+
+    sys.exit(0 if install_plugin() else 1)
+
+
 def _interactive(active: str) -> None:
     cwd = _cwd()
     _check_versions()  # hard: pairing needs both binaries on PATH
     with StateStore() as store:
         session = _pair_session(store, cwd, active)
+    from .plugin_setup import offer_install
+
+    offer_install()
     sys.exit(_enter_session(session))
 
 

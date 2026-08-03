@@ -177,3 +177,29 @@ def test_one_shot_switch_hints_resume(homes, ok_versions, monkeypatch):
     assert r.exit_code == 0
     assert "tandem resume" in r.output
     assert "Run `tandem` to continue" not in r.output
+
+
+def test_plugin_install_cmd_exit_codes(monkeypatch):
+    from tandem import plugin_setup
+
+    monkeypatch.setattr(plugin_setup, "install_plugin", lambda: True)
+    r = click.testing.CliRunner().invoke(cli.main, ["plugin", "install"])
+    assert r.exit_code == 0
+
+    monkeypatch.setattr(plugin_setup, "install_plugin", lambda: False)
+    r = click.testing.CliRunner().invoke(cli.main, ["plugin", "install"])
+    assert r.exit_code == 1
+
+
+def test_bare_tandem_offers_plugin_after_pairing(
+        homes, ok_versions, entered, monkeypatch):
+    from tandem import plugin_setup
+
+    calls = []
+    monkeypatch.setattr(plugin_setup, "offer_install",
+                        lambda: calls.append(len(entered)))
+    r = click.testing.CliRunner().invoke(cli.main, [])
+    assert r.exit_code == 0
+    # offered exactly once, after pairing but before entering the shell
+    assert calls == [0]
+    assert len(entered) == 1
