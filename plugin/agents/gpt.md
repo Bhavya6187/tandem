@@ -1,6 +1,6 @@
 ---
 name: gpt
-description: "Runs the task on a GPT model via tandem's codex pairing. Select this when the user asks for GPT subagents or to run something on GPT/codex. If the user asked for a specific model, make the first line of the task read tandem-model: NAME and put nothing else on that line, where NAME is the model name the user said written as one hyphenated token with no spaces; tandem translates it to an exact codex model."
+description: "Runs the task on a GPT model via tandem's codex pairing. Select this when the user asks for GPT subagents or to run something on GPT/codex. Only when the user named a specific model — never for a bare 'gpt' or 'codex' — make the first line of the task read tandem-model: NAME and put nothing else on that line, where NAME is the model name the user said written as one hyphenated token with no spaces; tandem translates it to an exact codex model. With no model named there is nothing to translate, so send the task with no such line and tandem picks the configured default; a guessed NAME fails the dispatch."
 model: haiku
 tools: Bash(tandem sub:*)
 ---
