@@ -670,9 +670,11 @@ class TestDoctorAndStatus:
 
     def test_doctor_warns_when_no_model_is_configured(self, env_factory,
                                                       monkeypatch):
-        """The shipped defaults are route="all" + model="" — everything is
-        rerouted, but with no `-m` the worker runs on the codex account's
-        default, which is the frontier tier (S1: gpt-5.6-sol). Silently
+        """The shipped defaults are route="manual" + model="" — nothing is
+        rerouted, so every codex worker is one the user hand-picked. That is
+        exactly why the warning still matters: picking `tandem:gpt` chooses a
+        harness, never a price, and with no `-m` the worker runs on the codex
+        account's default — the frontier tier (S1: gpt-5.6-sol). Silently
         spending frontier money is the one surprise doctor must call out."""
         from tandem import paths
         from tandem.doctor import run_doctor
