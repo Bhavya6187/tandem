@@ -29,7 +29,7 @@ def _payload(subagent_type="Explore", prompt="find the tests", **extra):
             "cwd": "/tmp/x", "tool_input": ti}
 
 
-CFG = SubagentsConfig()
+CFG = SubagentsConfig(route="all")
 
 
 def _route(payload, cfg=CFG, has_session=True, codex_ok=True,
@@ -51,6 +51,16 @@ def _run_hook(payload):
     from tandem import cli
     return click.testing.CliRunner().invoke(
         cli.main, ["hook-route"], input=json.dumps(payload))
+
+
+def _route_all():
+    """Opt the current TANDEM_HOME into all-mode. The CLI tests below
+    exercise rerouting and the missed-reroute notice, both of which are
+    all-mode behavior; the shipped default is manual, and the hook reads its
+    config off disk, so there is no cfg object to pass in."""
+    home = paths.tandem_home()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.toml").write_text('[subagents]\nroute = "all"\n')
 
 
 class TestRewrite:
@@ -177,6 +187,10 @@ class TestManualRoute:
         assert _route(_payload(),
                       cfg=SubagentsConfig(route="manual")) is None
 
+    def test_default_config_never_rewrites(self):
+        # the shipped default IS manual now — no cfg file, no rewrite
+        assert _route(_payload(), cfg=SubagentsConfig()) is None
+
     def test_manual_never_warns(self):
         # like "off": an explicit user choice, so silence is the requested
         # behavior even when nothing could reroute anyway
@@ -223,6 +237,7 @@ class TestCli:
         import click.testing
         from tandem import cli
         env = env_factory(active="claude")
+        _route_all()
         payload = _payload()
         payload["cwd"] = env.cwd
         r = click.testing.CliRunner().invoke(
@@ -261,6 +276,7 @@ class TestCliNotice:
 
     def _unpaired(self, tmp_path, monkeypatch, session_id="s-1"):
         monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+        _route_all()
         payload = _payload()
         payload["cwd"] = str(tmp_path)      # no paired session here
         if session_id is not None:
@@ -303,6 +319,7 @@ class TestCliNotice:
             self, env_factory, monkeypatch):
         from tandem.harness.codex import CodexAdapter
         env = env_factory(active="claude")
+        _route_all()
         monkeypatch.setattr(CodexAdapter, "detect_version", lambda self: None)
         payload = _payload()
         payload["cwd"] = env.cwd
@@ -338,6 +355,7 @@ class TestCliNotice:
         it), exit 0, and write nothing inside or outside TANDEM_HOME."""
         home = tmp_path / "home"            # `warned/../../x` escapes to here
         monkeypatch.setenv("TANDEM_HOME", str(home / ".tandem"))
+        _route_all()
         payload = _payload()
         payload["cwd"] = str(tmp_path)      # no paired session here
         payload["session_id"] = bad_id
@@ -395,6 +413,7 @@ class TestSandboxForMode:
 
 class TestSandboxStamp:
     def _hook(self, env, mode):
+        _route_all()                # the stamp rides along with a reroute
         payload = _payload()
         payload["cwd"] = env.cwd
         payload["session_id"] = "s-1"

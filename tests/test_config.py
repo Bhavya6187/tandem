@@ -7,7 +7,7 @@ def test_defaults_when_file_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
     cfg = load_subagents_config()
     assert cfg == SubagentsConfig()
-    assert (cfg.route, cfg.model, cfg.context) == ("all", "", "match")
+    assert (cfg.route, cfg.model, cfg.context) == ("manual", "", "match")
     assert (cfg.fanout_feature, cfg.keep_forks) == ("", False)
 
 
