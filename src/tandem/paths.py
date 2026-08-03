@@ -64,6 +64,13 @@ def codex_sessions_dir() -> Path:
     return codex_home() / "sessions"
 
 
+def codex_models_cache_path() -> Path:
+    """Codex's on-disk model catalog (observed: codex-cli 0.145.0 writes
+    {fetched_at, etag, client_version, models:[{slug, display_name,
+    visibility, …}]} and refreshes it on every exec)."""
+    return codex_home() / "models_cache.json"
+
+
 _ROLLOUT_RE = re.compile(
     r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([0-9a-f-]{36})\.jsonl$"
 )

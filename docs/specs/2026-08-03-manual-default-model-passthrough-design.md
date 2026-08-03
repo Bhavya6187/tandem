@@ -74,8 +74,13 @@ not the haiku relay — does the parsing.
   set is account- and version-specific (this machine: `gpt-5.6-sol`,
   `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`),
   so no hardcoded alias table can stay fresh. Instead, `tandem sub`
-  resolves the header value against `codex debug models` (local render of
-  the catalog JSON, ~140 ms, run only when a header is present):
+  resolves the header value against **`~/.codex/models_cache.json`** — the
+  same `models` array `codex debug models` renders, but read straight from
+  disk with no subprocess: codex maintains the file (refreshed on every
+  exec), the README already points users at it, and reading the wrapped
+  CLI's own files is tandem's established method (`docs/formats.md`).
+  `codex debug models` remains the human-facing debugging surface for the
+  same data. Resolution (run only when a header is present):
   - Normalize both sides: lowercase, strip non-alphanumerics.
   - Exact normalized match on a slug or display name wins.
   - Else a normalized-substring match (header inside candidate) that hits
@@ -87,9 +92,9 @@ not the haiku relay — does the parsing.
     `[tandem-sub failed]`, so the orchestrating session can retry with a
     valid slug or surface the choice to the user.
   - Hidden catalog entries (`visibility: "hide"`, e.g. `codex-auto-review`)
-    are excluded from matching and from the error listing. If
-    `codex debug models` itself fails, fall back to passing the header
-    value through as `-m` verbatim.
+    are excluded from matching and from the error listing. If the catalog
+    cannot be read (absent, unreadable, malformed JSON, no `models` array),
+    fall back to passing the header value through as `-m` verbatim.
   The description sentence tells the orchestrator to pass the model name
   as the user said it — translation is the CLI's job, not the model's.
 
@@ -108,10 +113,10 @@ untouched — so first-line-only parsing is safe.
 
 - Unit: config default-flip assertions; header parse (match, no-match,
   malformed name), precedence, and trailer cases alongside the existing
-  `sub` tests; catalog resolution against a fixtured `codex debug models`
+  `sub` tests; catalog resolution against a fixtured `models_cache.json`
   payload (exact slug, display-name, case/punctuation-insensitive,
   unique-substring, ambiguous → error listing, no-match → error listing,
-  hidden entries excluded, catalog-command failure → verbatim fallback);
+  hidden entries excluded, unreadable catalog → verbatim fallback);
   manual-mode hook tests already assert never-rewrites / never-warns and
   stay unchanged.
 - Live acceptance: re-run the phrase-lab bed ("ask gpt-5", "ask o3") with a
