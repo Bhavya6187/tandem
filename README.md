@@ -61,10 +61,13 @@ tandem run --on codex "second opinion: why is this test flaky?"
 
 ### 🐣 Subagents on the cheap model.
 
-Load tandem's Claude Code plugin and Claude's subagent dispatches run on
-the codex model you choose instead — automatically, with the task brief
-forwarded verbatim and the result returned through Claude's own machinery.
-Claude orchestrates; codex does the legwork; your Claude quota stays on the
+Load tandem's Claude Code plugin and GPT subagents are one ask away: "ask
+gpt to review this migration" runs the dispatch on a codex model instead of
+Claude's, with the task brief forwarded verbatim. Name a model — "ask
+gpt-5.4-mini to review it" — and the worker runs on exactly that one. Want
+every dispatch rerouted without asking each time? Set `route = "all"`.
+Either way the result comes back through Claude's own machinery. Claude
+orchestrates; codex does the legwork; your Claude quota stays on the
 main thread. Two pieces: the `tandem` binary the hook shells out to, and
 the plugin that registers the hook — the plugin lives in this repo, not in
 the wheel, and without the binary on PATH it is inert.
@@ -87,28 +90,40 @@ behind your back: the first-launch offer asks before touching anything, and
 you pull new versions when you run `claude plugin marketplace update` (or
 `/plugin marketplace update` inside Claude).
 
-Then create `~/.tandem/config.toml` and pick your plan's cheap model (ids
-are listed in `~/.codex/models_cache.json`):
+Then create `~/.tandem/config.toml` and pick your plan's cheap model as the
+worker default — the ids your account can actually use are listed in
+`~/.codex/models_cache.json`, the same catalog a per-dispatch model request
+resolves against:
 
 ```toml
 [subagents]
 model = "gpt-5.6-luna"  # ← the whole point: set this
-route = "all"           # all | manual | off
+route = "manual"        # manual | all | off
 context = "match"       # match | task | full
 keep_forks = false      # keep each worker's rollout for debugging
 ```
 
 **Without `model`, workers run on your codex account's default model —
 probably not the cheap one.** Every other key above is already the default;
-that one is not, and routing is on as soon as the plugin loads, so
-`tandem doctor` warns until you set it.
+that one is not, and an explicitly asked-for gpt subagent bills that
+default just as automatic rerouting would, so `tandem doctor` warns until
+you set it.
 
-- `route = "manual"` turns off automatic rerouting: dispatches stay on
-  Claude until you explicitly ask for the `tandem:gpt` agent — "use gpt
-  subagents for this". (`route = "off"` is the same silence, but `manual`
-  keeps `tandem doctor`'s subagent checks on, since you still send work to
-  codex.) Explicit `tandem:gpt` dispatches work under `route = "all"` too;
-  there they're just not the only way in.
+- `route = "manual"` (the default) keeps dispatches on Claude until you ask
+  for codex — "use gpt subagents for this", "ask codex to review the
+  migration". Name a model in the ask and the request rides along as a
+  `tandem-model:` first line in the brief, which tandem resolves against
+  your codex install's own catalog before codex is ever invoked; say the
+  name however you say it out loud, since matching ignores case and
+  punctuation. A name that resolves to nothing fails fast, listing the
+  slugs your account actually offers, and a reply from a model-pinned
+  dispatch ends with a `[tandem-sub model: …]` trailer naming what ran.
+  (`route = "off"` is the same routing silence, but `manual` keeps `tandem
+  doctor`'s subagent checks on, since you still send work to codex.)
+- `route = "all"` reroutes every native subagent dispatch to codex
+  automatically, no asking. It's all or nothing, though: under `all`, "have
+  Claude and GPT both review this" comes back as codex twice — `manual` is
+  the mode where mix-and-match works.
 - Write access follows your Claude permission mode. Dispatch while you're in
   `acceptEdits` or `bypassPermissions` and the codex worker runs with
   `--sandbox workspace-write`; in any other mode tandem passes no sandbox
@@ -126,11 +141,14 @@ that one is not, and routing is on as soon as the plugin loads, so
   loop guard matches on the last segment of the agent name in any scope — so
   a local `.claude/agents/gpt.md` of yours keeps dispatching natively.
 
-Fork dispatches stay on Claude, each worker's full codex log is kept under
-`~/.tandem/subagents/`, and `tandem status` lists the workers running right
-now. The plugin is installed for every Claude session, so in a directory
-with no paired tandem session, dispatches simply run natively — the first
-one says so once, then the session stays quiet. `claude plugin uninstall
+Fork dispatches stay on Claude even under `route = "all"`, each worker's
+full codex log is kept under `~/.tandem/subagents/`, and `tandem status`
+lists the workers running right now. The plugin is installed for every
+Claude session, but nothing reaches codex from a directory with no paired
+tandem session: dispatches run natively (under `route = "all"` the first
+one says so once, then the session stays quiet), and a hand-picked gpt
+subagent there comes back telling you to run `tandem` in that directory
+first. `claude plugin uninstall
 tandem@tandem` and Claude is stock again — add `claude plugin marketplace
 remove tandem` to also unregister the marketplace.
 
