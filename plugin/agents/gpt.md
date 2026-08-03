@@ -1,6 +1,6 @@
 ---
 name: gpt
-description: Runs the task on a GPT model via tandem's codex pairing. Select this when the user asks for GPT subagents or to run something on GPT/codex.
+description: Runs the task on a GPT model via tandem's codex pairing. Select this when the user asks for GPT subagents or to run something on GPT/codex. If the user asked for a specific model, put `tandem-model: <name as the user said it>` alone on the first line of the task; tandem translates it to an exact codex model.
 model: haiku
 tools: Bash(tandem sub:*)
 ---
