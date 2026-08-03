@@ -79,8 +79,9 @@ this directory, or codex missing/unsupported — it prints a one-time
 `systemMessage` naming the cause (once per Claude session) and the dispatch
 runs natively.
 
-Configuration lives in `~/.tandem/config.toml` under `[subagents]`, and out
-of the box it needs none: dispatches reach codex when you ask for the
+Configuration lives in `~/.tandem/config.toml` under `[subagents]`, and
+routing needs no config: dispatches reach codex when you ask for the
 `tandem:gpt` agent, and `route = "all"` is the opt-in that reroutes every
-dispatch automatically. See the repo [README](../README.md) for the keys
-and the sandbox/consent story.
+dispatch automatically. See the repo [README](../README.md) for the keys —
+`model` first, since an unset one puts every worker on your codex account's
+default — and the sandbox/consent story.
