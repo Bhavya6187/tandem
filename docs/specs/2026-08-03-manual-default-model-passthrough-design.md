@@ -67,28 +67,53 @@ not the haiku relay — does the parsing.
   the relay echoes it verbatim upstream). Non-quiet mode prints
   `worker model: <name>` to stderr. The worker log always records the
   resolved model, header or not.
-- **Unknown models**: passed through verbatim; codex's own error surfaces
-  via the existing nonzero-exit path. No alias table.
+- **Resolution against the live catalog**: codex needs an exact slug —
+  probed live (codex-cli 0.145.0, ChatGPT account): `-m gpt-5` and `-m o3`
+  both 400 with "The '…' model is not supported when using Codex with a
+  ChatGPT account", no suggestions, after a full API round-trip. The valid
+  set is account- and version-specific (this machine: `gpt-5.6-sol`,
+  `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`),
+  so no hardcoded alias table can stay fresh. Instead, `tandem sub`
+  resolves the header value against `codex debug models` (local render of
+  the catalog JSON, ~140 ms, run only when a header is present):
+  - Normalize both sides: lowercase, strip non-alphanumerics.
+  - Exact normalized match on a slug or display name wins.
+  - Else a normalized-substring match (header inside candidate) that hits
+    exactly one visible model wins — "sol" → `gpt-5.6-sol`,
+    "5.4 mini" → `gpt-5.4-mini`.
+  - Else fail fast before invoking codex, nonzero, with an error that
+    lists the visible slugs: `unknown model 'o3'; this codex offers:
+    gpt-5.6-sol, gpt-5.6-terra, …`. The relay returns that verbatim as
+    `[tandem-sub failed]`, so the orchestrating session can retry with a
+    valid slug or surface the choice to the user.
+  - Hidden catalog entries (`visibility: "hide"`, e.g. `codex-auto-review`)
+    are excluded from matching and from the error listing. If
+    `codex debug models` itself fails, fall back to passing the header
+    value through as `-m` verbatim.
+  The description sentence tells the orchestrator to pass the model name
+  as the user said it — translation is the CLI's job, not the model's.
 
-## Section 3 — compatibility
+## Section 3 — versioning
 
-- New plugin + old tandem: the header reaches codex as brief text — a
-  mostly harmless meta line; behavior degrades to today's.
-- Old plugin + new tandem: no headers are ever emitted; nothing changes.
-- Under `route = "all"`, hook rewrites target `codex-worker` (whose
-  description doesn't solicit headers) and explicit `tandem:gpt` dispatches
-  pass the hook untouched, so when a header exists it is always the brief's
-  first line. First-line-only parsing is therefore safe; the hook's
-  agent-body prefixing never lands in front of a header.
-- Version: 0.1.8 in `pyproject.toml` and `plugin/.claude-plugin/plugin.json`
-  in lockstep (drift-guard test enforces).
+Cross-version compatibility is explicitly out of scope for now (operator
+call, 2026-08-03): plugin and CLI are assumed to update together. Version
+goes to 0.1.8 in `pyproject.toml` and `plugin/.claude-plugin/plugin.json`
+in lockstep (drift-guard test enforces). One structural note stands
+because it justifies the parser: when a header exists it is always the
+brief's first line — hook rewrites target `codex-worker`, which never
+solicits headers, and explicit `tandem:gpt` dispatches pass the hook
+untouched — so first-line-only parsing is safe.
 
 ## Section 4 — testing
 
 - Unit: config default-flip assertions; header parse (match, no-match,
   malformed name), precedence, and trailer cases alongside the existing
-  `sub` tests; manual-mode hook tests already assert never-rewrites /
-  never-warns and stay unchanged.
+  `sub` tests; catalog resolution against a fixtured `codex debug models`
+  payload (exact slug, display-name, case/punctuation-insensitive,
+  unique-substring, ambiguous → error listing, no-match → error listing,
+  hidden entries excluded, catalog-command failure → verbatim fallback);
+  manual-mode hook tests already assert never-rewrites / never-warns and
+  stay unchanged.
 - Live acceptance: re-run the phrase-lab bed ("ask gpt-5", "ask o3") with a
   paired session and confirm the header is emitted by the orchestrator,
   `-m` lands in the codex argv, and the trailer comes back — the two runs
