@@ -21,21 +21,40 @@ from . import paths
 # description tells the orchestrator to emit this exact line shape, and
 # dispatching models match on the footer. Change either and instructions rot.
 HEADER_PREFIX = "tandem-model:"
-_HEADER_RE = re.compile(r"^tandem-model:[ \t]*([A-Za-z0-9._/:-]{1,64})$")
+# NAME may carry internal spaces ("5.4 mini") because models get spoken, not
+# typed; resolve() normalizes punctuation and spaces away. It may not start or
+# end with one, and the line's trailing whitespace is stripped before matching
+# — a stray space or a CRLF must not turn a header into task text.
+_NAME = r"[A-Za-z0-9._/:-](?:[A-Za-z0-9._/ :-]{0,62}[A-Za-z0-9._/:-])?"
+_HEADER_RE = re.compile(
+    rf"^{re.escape(HEADER_PREFIX)}[ \t]*({_NAME})$", re.IGNORECASE)
 
 
 class UnknownModel(ValueError):
     """The requested name matched nothing (or too much) in the catalog."""
 
 
+class MalformedHeader(ValueError):
+    """The first line announced a header but the name is unusable."""
+
+
 def split_model_header(task: str) -> tuple[str, str]:
-    """(requested model, task without the header line). A first line that
-    does not full-match the grammar stays in the brief untouched — no
-    guessing, no partial strips."""
+    """(requested model, task without the header line).
+
+    A first line that does not open with `tandem-model:` is ordinary task
+    text and is returned untouched. One that does open with it must parse:
+    a near-miss (decorated name, empty name, an over-long one, prose) raises
+    MalformedHeader rather than silently falling through, because the
+    fall-through is the exact failure this protocol exists to prevent — the
+    worker would run on the config default and the header line would ship to
+    codex as part of the brief, with nothing said to anyone."""
     first, sep, rest = task.partition("\n")
+    first = first.rstrip()
+    if not first.lower().startswith(HEADER_PREFIX):
+        return "", task
     m = _HEADER_RE.match(first)
     if not m:
-        return "", task
+        raise MalformedHeader(f"malformed tandem-model header: {first}")
     return m.group(1), rest if sep else ""
 
 

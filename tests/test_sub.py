@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from tandem import ops, paths, runner
+from tandem import modelcat, ops, paths, runner
 from tandem.runner import await_codex_rollout
 from tandem.util import read_jsonl
 
@@ -611,6 +611,39 @@ class TestSubModelHeader:
             cli.main, ["sub"], input="tandem-model: mystery-model\ntask\n")
         assert r.exit_code == 0
         assert calls["kw"]["model"] == "mystery-model"
+
+    def test_malformed_header_fails_before_catalog_or_session(
+            self, env_factory, monkeypatch):
+        # a near-miss header must never fall through as task text: that is
+        # the silent-wrong-model failure this protocol exists to eliminate
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        # no _catalog(): the failure has to land before any catalog read
+        monkeypatch.setattr(
+            modelcat, "load_catalog",
+            lambda: pytest.fail("catalog read before the header was validated"))
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="tandem-model: <gpt-5.4-mini>\ntask\n")
+        assert r.exit_code == 1
+        assert ("error: malformed tandem-model header: "
+                "tandem-model: <gpt-5.4-mini>") in r.output
+        assert calls == {}
+
+    def test_header_near_misses_still_reach_the_worker(
+            self, env_factory, monkeypatch):
+        # trailing space + CRLF + mixed-case prefix + a spoken name
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="Tandem-Model: 5.4 mini \r\ndo the thing\n")
+        assert r.exit_code == 0
+        assert calls["task"] == "do the thing"
+        assert calls["kw"]["model"] == "gpt-5.4-mini"
 
     def test_header_only_brief_is_an_empty_task_error(
             self, env_factory, monkeypatch):

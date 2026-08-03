@@ -27,21 +27,81 @@ class TestSplitModelHeader:
         task = "review x\ntandem-model: gpt-5.6-sol"
         assert modelcat.split_model_header(task) == ("", task)
 
-    def test_malformed_name_left_in_place(self):
-        # trailing prose after the name is not a header
-        task = "tandem-model: gpt-5.6-sol please\nreview x"
-        assert modelcat.split_model_header(task) == ("", task)
-
-    def test_overlong_name_left_in_place(self):
-        task = f"tandem-model: {'x' * 65}\nreview x"
-        assert modelcat.split_model_header(task) == ("", task)
-
     def test_header_only_brief_yields_empty_task(self):
         assert modelcat.split_model_header("tandem-model: gpt-5.6-sol") == \
             ("gpt-5.6-sol", "")
 
     def test_no_space_after_colon_still_parses(self):
         assert modelcat.split_model_header("tandem-model:sol\nt") == ("sol", "t")
+
+    # --- near-misses that used to fall through as "no header" (live-probed) ---
+
+    def test_trailing_space_still_parses(self):
+        assert modelcat.split_model_header("tandem-model: gpt-5.6-sol  \nreview x") \
+            == ("gpt-5.6-sol", "review x")
+
+    def test_trailing_tab_still_parses(self):
+        assert modelcat.split_model_header("tandem-model: gpt-5.6-sol\t\nreview x") \
+            == ("gpt-5.6-sol", "review x")
+
+    def test_crlf_line_ending_still_parses(self):
+        assert modelcat.split_model_header("tandem-model: gpt-5.6-sol\r\nreview x") \
+            == ("gpt-5.6-sol", "review x")
+
+    def test_mixed_case_prefix_still_parses(self):
+        assert modelcat.split_model_header("Tandem-Model: gpt-5.6-sol\nreview x") \
+            == ("gpt-5.6-sol", "review x")
+        assert modelcat.split_model_header("TANDEM-MODEL:gpt-5.6-sol\nreview x") \
+            == ("gpt-5.6-sol", "review x")
+
+    def test_spoken_multi_word_name_parses_and_resolves(self):
+        # internal spaces are legal; resolve() normalizes them away
+        name, rest = modelcat.split_model_header("tandem-model: 5.4 mini\nreview x")
+        assert (name, rest) == ("5.4 mini", "review x")
+        assert modelcat.resolve(name, CATALOG) == "gpt-5.4-mini"
+
+    def test_prose_after_the_name_parses_and_fails_loudly_at_resolve(self):
+        # with internal spaces legal this is one (unresolvable) name — the
+        # failure is loud at resolve() instead of a silent pass-through
+        name, rest = modelcat.split_model_header(
+            "tandem-model: gpt-5.6-sol please\nreview x")
+        assert (name, rest) == ("gpt-5.6-sol please", "review x")
+        with pytest.raises(modelcat.UnknownModel):
+            modelcat.resolve(name, CATALOG)
+
+    # --- near-misses that are LOUD errors, never silent pass-through ---
+
+    def test_decorated_name_is_malformed(self):
+        with pytest.raises(modelcat.MalformedHeader) as e:
+            modelcat.split_model_header("tandem-model: <gpt-5.4-mini>\nreview x")
+        assert str(e.value) == \
+            "malformed tandem-model header: tandem-model: <gpt-5.4-mini>"
+
+    def test_overlong_name_is_malformed(self):
+        with pytest.raises(modelcat.MalformedHeader):
+            modelcat.split_model_header(f"tandem-model: {'x' * 65}\nreview x")
+
+    def test_empty_name_is_malformed(self):
+        with pytest.raises(modelcat.MalformedHeader):
+            modelcat.split_model_header("tandem-model:\nreview x")
+        with pytest.raises(modelcat.MalformedHeader):
+            modelcat.split_model_header("tandem-model:   \nreview x")
+
+    def test_prose_that_opens_with_the_prefix_is_a_loud_error_by_design(self):
+        # A brief whose first line talks *about* the protocol is rare; a brief
+        # whose first line is a near-miss header is not. Pinned decision: any
+        # first line starting with the prefix must resolve or fail loudly, so
+        # this errors rather than shipping the line to codex as task text.
+        with pytest.raises(modelcat.MalformedHeader):
+            modelcat.split_model_header(
+                "tandem-model: is a protocol, not a topic\nexplain it")
+
+    def test_malformed_header_is_a_value_error(self):
+        assert issubclass(modelcat.MalformedHeader, ValueError)
+
+    def test_line_not_starting_with_the_prefix_is_untouched_task_text(self):
+        task = "the tandem-model: header is documented below\nmore"
+        assert modelcat.split_model_header(task) == ("", task)
 
 
 class TestResolve:

@@ -50,13 +50,29 @@ not the haiku relay — does the parsing.
 
 - **Description** (`plugin/agents/gpt.md` frontmatter only) gains: "If the
   user asked for a specific model, put `tandem-model: <name>` as the first
-  line of the task." Both relay bodies stay byte-for-byte identical to each
-  other; `codex-worker.md` does not solicit headers.
-- **Parsing** (`tandem sub`, quiet or not): if the brief's first line
-  full-matches `tandem-model: <name>` with `<name>` matching
-  `[A-Za-z0-9._/:-]{1,64}`, strip the line and use `<name>` as the codex
-  model. A first line that does not full-match stays in the brief
-  untouched — no guessing, no partial strips.
+  line of the task" — scoped to a *named* model, never a bare "ask gpt",
+  which has no name to translate and would only invent an unresolvable one.
+  Both relay bodies stay byte-for-byte identical to each other;
+  `codex-worker.md` does not solicit headers.
+- **Parsing** (`tandem sub`, quiet or not): the brief's first line is
+  right-stripped (a trailing space, tab, or a CRLF's `\r` must not
+  disqualify it), then matched case-insensitively against
+  `tandem-model:` + optional spaces/tabs + `<name>`, where `<name>` is
+  1–64 chars of `[A-Za-z0-9._/ :-]` that neither starts nor ends with a
+  space. Internal spaces are legal because users *speak* model names
+  ("5.4 mini"); resolution normalizes them away. On a match the line is
+  stripped from the brief and `<name>` is the requested model.
+  - A first line that does not open with the prefix is ordinary task text,
+    returned untouched — no guessing, no partial strips.
+  - A first line that *does* open with the prefix but does not match is a
+    hard failure: `error: malformed tandem-model header: <line>` on
+    stderr, exit 1, before any catalog read or session lookup. Silently
+    passing a near-miss through is the exact bug this section exists to
+    kill — the worker would run the config default while the stray line
+    shipped to codex as task text, with nothing said to anyone. The cost
+    is that a brief whose first line genuinely opens with the literal
+    `tandem-model:` (prose about the protocol) is rejected; that is the
+    accepted trade, and it fails loudly enough to reword.
 - **Precedence**: explicit `-m` flag > header > `[subagents] model` config
   > codex's own default. The flag wins because only a human at the CLI
   types it. A recognized header line is stripped from the brief even when

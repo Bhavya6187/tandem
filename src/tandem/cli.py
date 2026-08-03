@@ -333,15 +333,19 @@ def sub(model: str | None, context_mode: str | None, quiet: bool,
     Used by the tandem plugin's codex-worker bridge; also works manually.
     A brief whose first line is `tandem-model: <name>` picks the codex
     model for this worker: the name is resolved against codex's own model
-    catalog (~/.codex/models_cache.json), and an unresolvable name fails
-    here, before codex is invoked, with the valid slugs listed."""
+    catalog (~/.codex/models_cache.json), and a malformed or unresolvable
+    name fails here, before codex is invoked, with the valid slugs listed."""
     from . import modelcat, ops
     from .config import load_subagents_config
 
     if task is None or task == "-":
         task = sys.stdin.read()
     task = task.strip()
-    requested, task = modelcat.split_model_header(task)
+    try:
+        requested, task = modelcat.split_model_header(task)
+    except modelcat.MalformedHeader as e:
+        click.secho(f"error: {e}", fg="red", err=True)
+        sys.exit(1)
     task = task.strip()
     if not task:
         click.secho("error: empty task brief.", fg="red", err=True)
