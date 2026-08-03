@@ -330,22 +330,38 @@ def sub(model: str | None, context_mode: str | None, quiet: bool,
         sandbox: str | None, task: str | None) -> None:
     """Run one delegated subagent task on codex (task argument or stdin).
 
-    Used by the tandem plugin's codex-worker bridge; also works manually."""
-    from . import ops
+    Used by the tandem plugin's codex-worker bridge; also works manually.
+    A brief whose first line is `tandem-model: <name>` picks the codex
+    model for this worker: the name is resolved against codex's own model
+    catalog (~/.codex/models_cache.json), and an unresolvable name fails
+    here, before codex is invoked, with the valid slugs listed."""
+    from . import modelcat, ops
     from .config import load_subagents_config
 
     if task is None or task == "-":
         task = sys.stdin.read()
     task = task.strip()
+    requested, task = modelcat.split_model_header(task)
+    task = task.strip()
     if not task:
         click.secho("error: empty task brief.", fg="red", err=True)
         sys.exit(1)
+    resolved = ""
+    if requested:
+        try:
+            resolved = modelcat.resolve(requested, modelcat.load_catalog())
+        except modelcat.UnknownModel as e:
+            click.secho(f"error: {e}", fg="red", err=True)
+            sys.exit(1)
     cfg = load_subagents_config()
+    worker_model = model if model is not None else (resolved or cfg.model)
+    if requested and not quiet:
+        click.secho(f"worker model: {worker_model}", err=True)
     with StateStore() as store:
         session = _require_session(store)
         code = ops.run_sub(
             store, session, task,
-            model=model if model is not None else cfg.model,
+            model=worker_model,
             context=context_mode or ("full" if cfg.context == "full" else "task"),
             fanout_feature=cfg.fanout_feature,
             keep_forks=cfg.keep_forks,
@@ -353,6 +369,9 @@ def sub(model: str | None, context_mode: str | None, quiet: bool,
             sandbox=sandbox if sandbox is not None
                     else _read_sandbox_stamp(session.tandem_id),
         )
+    if requested and quiet:
+        sys.stdout.write("\n" + modelcat.model_footer(worker_model) + "\n")
+        sys.stdout.flush()
     sys.exit(code)
 
 
