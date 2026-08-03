@@ -42,7 +42,11 @@ def split_model_header(task: str) -> tuple[str, str]:
 def load_catalog() -> list[dict] | None:
     """The catalog's models array, or None when it cannot be read — the
     caller then passes the requested name through verbatim rather than
-    refusing to dispatch over bookkeeping."""
+    refusing to dispatch over bookkeeping.
+
+    A catalog with no usable entries is None, not []: an empty list is a
+    catalog that answers "no such model" to everything, which would refuse
+    every dispatch with an error listing nothing."""
     try:
         data = json.loads(paths.codex_models_cache_path().read_text())
     except (OSError, ValueError):
@@ -50,7 +54,7 @@ def load_catalog() -> list[dict] | None:
     models = data.get("models") if isinstance(data, dict) else None
     if not isinstance(models, list):
         return None
-    return [m for m in models if isinstance(m, dict)]
+    return [m for m in models if isinstance(m, dict)] or None
 
 
 def _norm(s: str) -> str:

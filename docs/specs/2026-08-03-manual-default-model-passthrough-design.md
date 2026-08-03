@@ -93,8 +93,9 @@ not the haiku relay — does the parsing.
     valid slug or surface the choice to the user.
   - Hidden catalog entries (`visibility: "hide"`, e.g. `codex-auto-review`)
     are excluded from matching and from the error listing. If the catalog
-    cannot be read (absent, unreadable, malformed JSON, no `models` array),
-    fall back to passing the header value through as `-m` verbatim.
+    cannot be read (absent, unreadable, malformed JSON, no `models` array,
+    or no usable entries in it), fall back to passing the header value
+    through as `-m` verbatim.
   The description sentence tells the orchestrator to pass the model name
   as the user said it — translation is the CLI's job, not the model's.
 

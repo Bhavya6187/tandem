@@ -97,6 +97,18 @@ class TestLoadCatalog:
         (tmp_path / "models_cache.json").write_text(json.dumps({"models": 7}))
         assert modelcat.load_catalog() is None
 
+    def test_empty_models_array_is_none(self, tmp_path, monkeypatch):
+        # an empty catalog is as unusable as a missing one: [] would make
+        # every dispatch fail with "this codex offers: " and nothing after it
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        (tmp_path / "models_cache.json").write_text(json.dumps({"models": []}))
+        assert modelcat.load_catalog() is None
+
+    def test_models_without_objects_is_none(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+        (tmp_path / "models_cache.json").write_text(json.dumps({"models": ["junk"]}))
+        assert modelcat.load_catalog() is None
+
 
 def test_model_footer_exact_text():
     assert modelcat.model_footer("gpt-5.6-sol") == "[tandem-sub model: gpt-5.6-sol]"
