@@ -14,19 +14,20 @@ from . import paths
 
 @dataclass(frozen=True)
 class SubagentsConfig:
-    route: str = "all"          # "all" | "manual" | "off"
+    route: str = "manual"       # "manual" | "all" | "off"
     model: str = ""             # "" -> omit -m; codex's configured default
     context: str = "match"      # "match" | "task" | "full"
     fanout_feature: str = ""    # --enable <name>; "" -> flag not passed
     keep_forks: bool = False
 
 
-# "manual": no auto-reroute and no missed-reroute notice — dispatch to codex
-# only when the model/user explicitly picks a bridge agent (`tandem:gpt`,
-# `tandem:codex-worker`). The hook treats it exactly like "off"; the rest of
-# tandem does not — `doctor._subagent_checks` silences its subagent billing
-# warnings only under "off", because a manual user still dispatches to codex
-# and still wants to know the worker model is unset.
+# "manual" — the default: no auto-reroute and no missed-reroute notice —
+# dispatch to codex only when the model/user explicitly picks a bridge agent
+# (`tandem:gpt`, `tandem:codex-worker`). The hook treats it exactly like
+# "off"; the rest of tandem does not — `doctor._subagent_checks` silences
+# its subagent billing warnings only under "off", because a manual user
+# still dispatches to codex and still wants to know the worker model is
+# unset. "all" opts back in to rerouting every native dispatch.
 _ROUTES = ("all", "manual", "off")
 _CONTEXTS = ("match", "task", "full")
 

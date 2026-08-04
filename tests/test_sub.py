@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from tandem import ops, paths, runner
+from tandem import modelcat, ops, paths, runner
 from tandem.runner import await_codex_rollout
 from tandem.util import read_jsonl
 
@@ -500,6 +500,165 @@ class TestSubCli:
         assert "empty task" in r.output
 
 
+class TestSubModelHeader:
+    def _cli_env(self, env, monkeypatch):
+        from tandem import cli
+        monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
+        monkeypatch.setattr(
+            cli, "_check_versions",
+            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+        )
+        return cli
+
+    def _catalog(self):
+        from tandem import paths
+        p = paths.codex_models_cache_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"models": [
+            {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol",
+             "visibility": "list"},
+            {"slug": "gpt-5.4-mini", "display_name": "GPT-5.4-Mini",
+             "visibility": "list"},
+        ]}))
+
+    def _capture(self, monkeypatch):
+        calls = {}
+        monkeypatch.setattr(
+            ops, "run_sub",
+            lambda store, session, task, **kw: calls.update(
+                task=task, kw=kw) or 0,
+        )
+        return calls
+
+    def test_header_resolves_and_is_stripped(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="tandem-model: sol\ndo the thing\n")
+        assert r.exit_code == 0
+        assert calls["task"] == "do the thing"
+        assert calls["kw"]["model"] == "gpt-5.6-sol"
+
+    def test_flag_beats_header_but_header_still_stripped(
+            self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "-m", "flag-model"],
+            input="tandem-model: sol\ntask\n")
+        assert r.exit_code == 0
+        assert calls["task"] == "task"
+        assert calls["kw"]["model"] == "flag-model"
+
+    def test_unknown_model_fails_before_codex(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="tandem-model: o3\ntask\n")
+        assert r.exit_code == 1
+        assert "unknown model 'o3'" in r.output
+        assert "gpt-5.6-sol" in r.output
+        assert calls == {}          # codex was never invoked
+
+    def test_quiet_appends_model_footer(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "-q"], input="tandem-model: sol\ntask\n")
+        assert r.output.rstrip().endswith("[tandem-sub model: gpt-5.6-sol]")
+
+    def test_no_header_no_footer(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "-q"], input="just a task\n")
+        assert "[tandem-sub model:" not in r.output
+        assert calls["kw"]["model"] == ""   # config default: unset
+
+    def test_non_quiet_announces_worker_model(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="tandem-model: sol\ntask\n")
+        assert "worker model: gpt-5.6-sol" in r.output
+
+    def test_missing_catalog_passes_name_verbatim(
+            self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        # no _catalog() call: CODEX_HOME has no models_cache.json
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="tandem-model: mystery-model\ntask\n")
+        assert r.exit_code == 0
+        assert calls["kw"]["model"] == "mystery-model"
+
+    def test_malformed_header_fails_before_catalog_or_session(
+            self, env_factory, monkeypatch):
+        # a near-miss header must never fall through as task text: that is
+        # the silent-wrong-model failure this protocol exists to eliminate
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        # no _catalog(): the failure has to land before any catalog read
+        monkeypatch.setattr(
+            modelcat, "load_catalog",
+            lambda: pytest.fail("catalog read before the header was validated"))
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="tandem-model: <gpt-5.4-mini>\ntask\n")
+        assert r.exit_code == 1
+        assert ("error: malformed tandem-model header: "
+                "tandem-model: <gpt-5.4-mini>") in r.output
+        assert calls == {}
+
+    def test_header_near_misses_still_reach_the_worker(
+            self, env_factory, monkeypatch):
+        # trailing space + CRLF + mixed-case prefix + a spoken name
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="Tandem-Model: 5.4 mini \r\ndo the thing\n")
+        assert r.exit_code == 0
+        assert calls["task"] == "do the thing"
+        assert calls["kw"]["model"] == "gpt-5.4-mini"
+
+    def test_header_only_brief_is_an_empty_task_error(
+            self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="tandem-model: sol\n")
+        assert r.exit_code == 1
+        assert "empty task brief" in r.output
+        assert calls == {}
+
+
 class TestDoctorAndStatus:
     def test_doctor_warns_on_api_key_env(self, env_factory, monkeypatch):
         from tandem.doctor import run_doctor
@@ -511,9 +670,11 @@ class TestDoctorAndStatus:
 
     def test_doctor_warns_when_no_model_is_configured(self, env_factory,
                                                       monkeypatch):
-        """The shipped defaults are route="all" + model="" — everything is
-        rerouted, but with no `-m` the worker runs on the codex account's
-        default, which is the frontier tier (S1: gpt-5.6-sol). Silently
+        """The shipped defaults are route="manual" + model="" — nothing is
+        rerouted, so every codex worker is one the user hand-picked. That is
+        exactly why the warning still matters: picking `tandem:gpt` chooses a
+        harness, never a price, and with no `-m` the worker runs on the codex
+        account's default — the frontier tier (S1: gpt-5.6-sol). Silently
         spending frontier money is the one surprise doctor must call out."""
         from tandem import paths
         from tandem.doctor import run_doctor

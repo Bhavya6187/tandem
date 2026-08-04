@@ -234,9 +234,11 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
 
 
 def _subagent_checks(report: DoctorReport, session) -> None:
-    """Subagent routing hygiene: routing is on by default but the model is
-    not chosen for you, billing follows codex auth, and codex workers only
-    see CLAUDE.md content inside the tandem:shared block."""
+    """Subagent hygiene for everyone who has not turned routing off. Under
+    the manual default nothing reaches codex unless the user picks a bridge
+    agent, but every dispatch they do make still runs on a model nobody
+    chose for them, still bills whatever codex is authed as, and still sees
+    only the CLAUDE.md content inside the tandem:shared block."""
     from . import paths
     from .config import load_subagents_config
 
@@ -244,10 +246,12 @@ def _subagent_checks(report: DoctorReport, session) -> None:
     if cfg.route == "off":
         return
     # model="" means no `-m`, i.e. the codex account default — the frontier
-    # tier on every plan seen so far. Combined with the route="all" default
-    # that silently sends every dispatch to the most expensive model, so it
-    # is a warning, not a note. The dataclass default stays empty on
-    # purpose: a baked-in id would 400 on accounts that lack it.
+    # tier on every plan seen so far. Picking `tandem:gpt` is a choice about
+    # which harness runs the task, never a choice to pay top tier for it, so
+    # a manual user with [subagents] model unset is billed the most
+    # expensive option on every worker without having asked for it: a
+    # warning, not a note. The dataclass default stays empty on purpose: a
+    # baked-in id would 400 on accounts that lack it.
     if not cfg.model:
         report.warn(
             "subagents: no model configured — workers will use your codex "

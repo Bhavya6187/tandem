@@ -7,7 +7,7 @@ def test_defaults_when_file_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
     cfg = load_subagents_config()
     assert cfg == SubagentsConfig()
-    assert (cfg.route, cfg.model, cfg.context) == ("all", "", "match")
+    assert (cfg.route, cfg.model, cfg.context) == ("manual", "", "match")
     assert (cfg.fanout_feature, cfg.keep_forks) == ("", False)
 
 
@@ -27,12 +27,20 @@ def test_reads_values(tmp_path, monkeypatch):
     assert cfg.keep_forks is True
 
 
-def test_route_manual_is_accepted(tmp_path, monkeypatch):
-    # unlisted values degrade to "all", so a supported name has to be listed
+def test_routes_are_accepted_not_just_defaulted(tmp_path, monkeypatch):
+    # Unlisted values degrade to the default, which is now "manual" — so
+    # `route = "manual"` alone proves nothing: it passes even if "manual"
+    # were dropped from _ROUTES. Pin the listing itself, and read back a
+    # non-default name that only survives by being listed.
+    from tandem import config
+
+    assert set(config._ROUTES) == {"all", "manual", "off"}
     home = tmp_path / ".tandem"
     home.mkdir()
-    (home / "config.toml").write_text('[subagents]\nroute = "manual"\n')
     monkeypatch.setenv("TANDEM_HOME", str(home))
+    (home / "config.toml").write_text('[subagents]\nroute = "all"\n')
+    assert load_subagents_config().route == "all"
+    (home / "config.toml").write_text('[subagents]\nroute = "manual"\n')
     assert load_subagents_config().route == "manual"
 
 

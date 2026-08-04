@@ -40,11 +40,14 @@ open a fresh session.
   the orchestrating model not to select it by hand.
 - **`agents/gpt.md`** — the same relay, with a user-facing description
   ("Runs the task on a GPT model via tandem's codex pairing"). This is the
-  agent to select when you ask for GPT subagents by name — and with
-  `[subagents] route = "manual"`, selecting it is how anything reaches codex
-  at all, since nothing is rerouted for you. The body is identical to
-  `codex-worker.md`; only the description differs, so both agents behave
-  the same once dispatched.
+  agent to select when you ask for GPT subagents by name, and under the
+  `route = "manual"` default it is the normal path to codex — nothing is
+  rerouted for you. A brief whose first line is `tandem-model: <name>`
+  picks the worker's model: the description asks the orchestrating model to
+  emit that line (one space-free token) whenever you name a model, and
+  `tandem sub` resolves the name against codex's own catalog. The body is
+  identical to `codex-worker.md`; only the description differs, so both
+  agents behave the same once dispatched.
 
 Both relay names are in the hook's loop guard, matched on the last segment
 of the agent name in any scope — a dispatch that already names a relay
@@ -62,18 +65,23 @@ session, it:
   relay's `tandem sub` reads it. Stamped whatever the route setting is: a
   hand-picked `tandem:gpt` dispatch consents through your permission mode
   just the same;
-- with `route = "all"` (the default) and a supported codex, rewrites the
-  dispatch to `tandem:codex-worker` on `haiku`, prefixing the dispatched
-  agent's own definition — when it is a file-defined one, from
-  `.claude/agents/` here or under `~/.claude/` — to the brief, so the codex
-  worker gets the same instructions the native agent would have;
-- with `route = "manual"` or `"off"`, rewrites nothing; explicitly selected
-  relay agents still reach codex.
+- with `route = "all"` (opt-in; the default is `"manual"`) and a supported
+  codex, rewrites the dispatch to `tandem:codex-worker` on `haiku`,
+  prefixing the dispatched agent's own definition — when it is a
+  file-defined one, from `.claude/agents/` here or under `~/.claude/` — to
+  the brief, so the codex worker gets the same instructions the native
+  agent would have;
+- with `route = "manual"` (the default) or `"off"`, rewrites nothing;
+  explicitly selected relay agents still reach codex.
 
 When `route = "all"` but nothing can be rerouted — no paired session for
 this directory, or codex missing/unsupported — it prints a one-time
 `systemMessage` naming the cause (once per Claude session) and the dispatch
 runs natively.
 
-Configuration lives in `~/.tandem/config.toml` under `[subagents]` — see
-the repo [README](../README.md) for the keys and the sandbox/consent story.
+Configuration lives in `~/.tandem/config.toml` under `[subagents]`, and
+routing needs no config: dispatches reach codex when you ask for the
+`tandem:gpt` agent, and `route = "all"` is the opt-in that reroutes every
+dispatch automatically. See the repo [README](../README.md) for the keys —
+`model` first, since an unset one puts every worker on your codex account's
+default — and the sandbox/consent story.
