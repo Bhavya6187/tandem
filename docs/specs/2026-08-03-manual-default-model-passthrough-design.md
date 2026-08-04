@@ -140,3 +140,28 @@ untouched — so first-line-only parsing is safe.
   paired session and confirm the header is emitted by the orchestrator,
   `-m` lands in the codex argv, and the trailer comes back — the two runs
   that failed in the research become the acceptance test.
+
+## Addendum (2026-08-04) — generic-name standins, ships as 0.1.9
+
+Operator decision after 0.1.8 merged: a requested model name that
+normalizes to `gpt` or `codex` is a **standin for "no preference"** — it
+resolves to the empty model and falls through the existing precedence
+chain (`[subagents] model`, else codex's own default) instead of failing
+as ambiguous. Rationale: the description's "never emit a header for a
+bare 'gpt'" clause is prompt-level guidance the CLI cannot enforce; with
+the standin, an orchestrator that obeys and one that emits
+`tandem-model: gpt` converge on identical behavior, and the 0.1.8
+residual (bare "ask gpt" hard-failing where 0.1.7 just ran) disappears.
+
+- Ordering: exact catalog match wins over the standin (a future literal
+  `gpt` slug resolves exactly); the standin wins over substring matching
+  (which is what made `gpt` ambiguous-fail). With an unreadable catalog
+  the standin still applies — `gpt` must never reach `codex -m` verbatim.
+- Feedback: when a header was present but the model that runs is the
+  empty fallback, the quiet trailer and the non-quiet announcement say
+  `codex default` instead of naming a slug (also fixes the empty
+  `[tandem-sub model: ]` cosmetic when `-m ""` co-occurs with a header).
+  When `[subagents] model` fills the fallback, they name that model.
+- The `gpt.md` description is unchanged: not emitting a header for a bare
+  "gpt" remains the instructed behavior; the standin is the enforcement
+  backstop, not the new contract.
