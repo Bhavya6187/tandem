@@ -141,6 +141,8 @@ def _pair_session(store: StateStore, cwd: str, active: str) -> PairedSession:
 @main.command()
 def status() -> None:
     """Show the paired session for this directory."""
+    from . import modelcat
+
     with StateStore() as store:
         session = _require_session(store)
         versions = _check_versions(warn_only=True)
@@ -182,8 +184,11 @@ def status() -> None:
                     continue
                 if not isinstance(d, dict):
                     continue  # non-object marker: skip it, never traceback
+                # One wording owns "nobody picked a model" — the same phrase
+                # the sub trailer and announcement use, so status and a
+                # relayed reply describe the same worker the same way.
                 click.echo(
-                    f"  subagent running: {d.get('model') or 'default-model'} "
+                    f"  subagent running: {modelcat.model_label(d.get('model') or '')} "
                     f"({d.get('context')}) {d.get('task_preview', '')}"
                 )
         kept = sorted(sub_root.glob("rollout-*.jsonl")) if sub_root.is_dir() else []
@@ -334,7 +339,9 @@ def sub(model: str | None, context_mode: str | None, quiet: bool,
     A brief whose first line is `tandem-model: <name>` picks the codex
     model for this worker: the name is resolved against codex's own model
     catalog (~/.codex/models_cache.json), and a malformed or unresolvable
-    name fails here, before codex is invoked, with the valid slugs listed."""
+    name fails here, before codex is invoked, with the valid slugs listed.
+    A generic name (`gpt`, `codex`) asks for no particular model and runs
+    the configured default."""
     from . import modelcat, ops
     from .config import load_subagents_config
 
@@ -358,9 +365,12 @@ def sub(model: str | None, context_mode: str | None, quiet: bool,
             click.secho(f"error: {e}", fg="red", err=True)
             sys.exit(1)
     cfg = load_subagents_config()
+    # A standin header ("gpt") resolves to "" and falls through to the config
+    # default here, exactly like no header at all; the flag still outranks both.
     worker_model = model if model is not None else (resolved or cfg.model)
     if requested and not quiet:
-        click.secho(f"worker model: {worker_model}", err=True)
+        click.secho(f"worker model: {modelcat.model_label(worker_model)}",
+                    err=True)
     with StateStore() as store:
         session = _require_session(store)
         code = ops.run_sub(
