@@ -658,6 +658,91 @@ class TestSubModelHeader:
         assert "empty task brief" in r.output
         assert calls == {}
 
+    # --- generic-name standins: "gpt"/"codex" mean "no preference" ---
+
+    def test_standin_header_runs_the_codex_default(
+            self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "-q"], input="tandem-model: gpt\ndo the thing\n")
+        assert r.exit_code == 0
+        assert calls["task"] == "do the thing"
+        assert calls["kw"]["model"] == ""     # no -m: codex's own default
+        assert r.output.rstrip().endswith("[tandem-sub model: codex default]")
+
+    def test_standin_header_uses_the_configured_model(
+            self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        (paths.tandem_home() / "config.toml").write_text(
+            '[subagents]\nmodel = "gpt-5.4-mini"\n')
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "-q"], input="tandem-model: codex\ntask\n")
+        assert r.exit_code == 0
+        assert calls["kw"]["model"] == "gpt-5.4-mini"
+        assert r.output.rstrip().endswith("[tandem-sub model: gpt-5.4-mini]")
+
+    def test_standin_header_announces_codex_default_non_quiet(
+            self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="tandem-model: GPT\ntask\n")
+        assert r.exit_code == 0
+        assert "worker model: codex default" in r.output
+
+    def test_flag_beats_standin_header(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "-m", "gpt-5.6-sol"],
+            input="tandem-model: gpt\ntask\n")
+        assert r.exit_code == 0
+        assert calls["task"] == "task"
+        assert calls["kw"]["model"] == "gpt-5.6-sol"
+        assert "worker model: gpt-5.6-sol" in r.output
+
+    def test_standin_without_a_catalog_still_runs_the_default(
+            self, env_factory, monkeypatch):
+        # `gpt` must never reach `codex -m` verbatim, even unreadable-catalog
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        # no _catalog(): CODEX_HOME has no models_cache.json
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "-q"], input="tandem-model: codex\ntask\n")
+        assert r.exit_code == 0
+        assert calls["kw"]["model"] == ""
+        assert r.output.rstrip().endswith("[tandem-sub model: codex default]")
+
+    def test_family_name_still_fails_loudly(self, env_factory, monkeypatch):
+        # the standin is exactly `gpt`/`codex`, not a prefix rule
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="tandem-model: gpt-5\ntask\n")
+        assert r.exit_code == 1
+        assert "unknown model 'gpt-5'" in r.output
+        assert "gpt-5.6-sol" in r.output and "gpt-5.4-mini" in r.output
+        assert calls == {}
+
 
 class TestDoctorAndStatus:
     def test_doctor_warns_on_api_key_env(self, env_factory, monkeypatch):

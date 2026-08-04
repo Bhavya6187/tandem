@@ -14,6 +14,13 @@ CATALOG = [
      "visibility": "hide"},
 ]
 
+# Purpose-built: a codex that really does ship a model *named* `gpt`. The
+# standin must never shadow an exact catalog match.
+CATALOG_WITH_LITERAL_GPT = [
+    {"slug": "gpt", "display_name": "GPT", "visibility": "list"},
+    {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list"},
+]
+
 
 class TestSplitModelHeader:
     def test_header_is_stripped_and_returned(self):
@@ -116,10 +123,13 @@ class TestResolve:
         assert modelcat.resolve("5.4 mini", CATALOG) == "gpt-5.4-mini"
 
     def test_ambiguous_lists_visible_slugs(self):
+        # `gpt-5` is a family, not a model: it substring-hits every slug here.
+        # Only the exact names `gpt`/`codex` are standins — not a prefix rule —
+        # so this still fails loudly with the choices spelled out.
         with pytest.raises(modelcat.UnknownModel) as e:
-            modelcat.resolve("gpt", CATALOG)
+            modelcat.resolve("gpt-5", CATALOG)
         msg = str(e.value)
-        assert "unknown model 'gpt'" in msg
+        assert "unknown model 'gpt-5'" in msg
         assert "gpt-5.6-sol" in msg and "gpt-5.4-mini" in msg
         assert "codex-auto-review" not in msg
 
@@ -134,6 +144,52 @@ class TestResolve:
 
     def test_none_catalog_passes_name_through(self):
         assert modelcat.resolve("anything-goes", None) == "anything-goes"
+
+
+class TestGenericNameStandins:
+    """`gpt`/`codex` name the harness, not a model: they mean "no
+    preference", so they resolve to the empty model and fall through the
+    normal precedence (`[subagents] model`, else codex's own default)
+    instead of failing as ambiguous."""
+
+    def test_gpt_is_a_standin_for_the_default(self):
+        assert modelcat.resolve("gpt", CATALOG) == ""
+
+    def test_codex_is_a_standin_for_the_default(self):
+        assert modelcat.resolve("codex", CATALOG) == ""
+
+    def test_standin_beats_substring_ambiguity(self):
+        # pre-0.1.9 this raised UnknownModel: "gpt" is inside every slug
+        assert modelcat.resolve("gpt", CATALOG) == ""
+        assert modelcat.resolve("codex", CATALOG + [
+            {"slug": "codex-mini", "display_name": "Codex Mini",
+             "visibility": "list"}]) == ""
+
+    def test_exact_catalog_match_beats_the_standin(self):
+        assert modelcat.resolve("gpt", CATALOG_WITH_LITERAL_GPT) == "gpt"
+
+    def test_exact_display_name_match_beats_the_standin(self):
+        assert modelcat.resolve("G.P.T.", CATALOG_WITH_LITERAL_GPT) == "gpt"
+
+    def test_standin_applies_without_a_catalog(self):
+        # `gpt` must never reach `codex -m` verbatim, catalog or not
+        assert modelcat.resolve("gpt", None) == ""
+        assert modelcat.resolve("codex", None) == ""
+
+    def test_standin_is_case_and_punctuation_insensitive(self):
+        for name in ("GPT", "Gpt", " gpt ", "g.p.t", "CODEX", "Codex!"):
+            assert modelcat.resolve(name, CATALOG) == "", name
+
+    def test_standin_is_exact_not_a_prefix_rule(self):
+        # "gpt-5.4-mini" resolves as itself; "gpt 5" is still ambiguous
+        assert modelcat.resolve("gpt-5.4-mini", CATALOG) == "gpt-5.4-mini"
+        with pytest.raises(modelcat.UnknownModel):
+            modelcat.resolve("gpt 5", CATALOG)
+        with pytest.raises(modelcat.UnknownModel):
+            modelcat.resolve("gptx", CATALOG)
+
+    def test_standin_set_is_public_and_normalized(self):
+        assert modelcat.STANDIN_MODELS == frozenset({"gpt", "codex"})
 
 
 class TestLoadCatalog:
@@ -172,3 +228,13 @@ class TestLoadCatalog:
 
 def test_model_footer_exact_text():
     assert modelcat.model_footer("gpt-5.6-sol") == "[tandem-sub model: gpt-5.6-sol]"
+
+
+def test_model_footer_names_the_empty_model_codex_default():
+    # an empty model is not a name to print: codex picks, so say so
+    assert modelcat.model_footer("") == "[tandem-sub model: codex default]"
+
+
+def test_model_label_is_the_shared_name_for_what_ran():
+    assert modelcat.model_label("gpt-5.4-mini") == "gpt-5.4-mini"
+    assert modelcat.model_label("") == "codex default"

@@ -30,6 +30,20 @@ _HEADER_RE = re.compile(
     rf"^{re.escape(HEADER_PREFIX)}[ \t]*({_NAME})$", re.IGNORECASE)
 
 
+# Names that pick a *harness*, not a model. "ask gpt" names nothing to
+# translate, so a header carrying one is a standin for "no preference": it
+# resolves to the empty model and falls through the usual precedence
+# (`[subagents] model`, else codex's own default). The gpt agent description
+# still tells the orchestrator not to emit a header for a bare "gpt" — this is
+# the backstop for the ones that do, so obeying and not obeying converge
+# instead of one of them hard-failing. Compared against _norm()'d names, so
+# entries here are normalized (lowercase, alphanumerics only).
+STANDIN_MODELS = frozenset({"gpt", "codex"})
+# What to call the empty model in user-facing feedback: nothing was picked
+# here, so naming a slug would be a lie and "" reads as a bug.
+DEFAULT_MODEL_LABEL = "codex default"
+
+
 class UnknownModel(ValueError):
     """The requested name matched nothing (or too much) in the catalog."""
 
@@ -81,22 +95,31 @@ def _norm(s: str) -> str:
 
 
 def resolve(name: str, models: list[dict] | None) -> str:
-    """The exact slug for a user-worded model name.
+    """The exact slug for a user-worded model name, or "" for no preference.
 
-    Exact normalized match on slug or display name wins; else a normalized
+    Exact normalized match on slug or display name wins; else a generic
+    standin (STANDIN_MODELS) resolves to the empty model; else a normalized
     substring match that hits exactly one visible model; else UnknownModel
     listing the visible slugs — raised before codex is invoked, so the
-    round-trip that would 400 is never spent."""
+    round-trip that would 400 is never spent.
+
+    The standin sits after exact matching so a codex that really ships a
+    model named `gpt` still resolves it, and before substring matching
+    because substrings are what made `gpt` ambiguous-fail in the first
+    place. It applies with no catalog too: `gpt` must never reach
+    `codex -m` verbatim, which 400s after a full round-trip."""
+    n = _norm(name)
     if models is None:
-        return name
+        return "" if n in STANDIN_MODELS else name
     visible = [m for m in models
                if m.get("visibility") != "hide"
                and isinstance(m.get("slug"), str)]
-    n = _norm(name)
     for m in visible:
         if n and (n == _norm(m["slug"])
                   or n == _norm(str(m.get("display_name") or ""))):
             return m["slug"]
+    if n in STANDIN_MODELS:
+        return ""
     hits = {m["slug"] for m in visible
             if n and (n in _norm(m["slug"])
                       or n in _norm(str(m.get("display_name") or "")))}
@@ -107,5 +130,13 @@ def resolve(name: str, models: list[dict] | None) -> str:
         + ", ".join(m["slug"] for m in visible))
 
 
+def model_label(slug: str) -> str:
+    """What to call the model that actually ran, for humans and for the
+    dispatching session. Empty means nobody picked one — a standin header,
+    or no config default — so codex chose, and the feedback says that
+    rather than printing an empty name."""
+    return slug or DEFAULT_MODEL_LABEL
+
+
 def model_footer(slug: str) -> str:
-    return f"[tandem-sub model: {slug}]"
+    return f"[tandem-sub model: {model_label(slug)}]"

@@ -116,8 +116,11 @@ you set it.
   your codex install's own catalog before codex is ever invoked; say the
   name however you say it out loud, since matching ignores case and
   punctuation. A name that resolves to nothing fails fast, listing the
-  slugs your account actually offers, and a reply from a model-pinned
-  dispatch ends with a `[tandem-sub model: …]` trailer naming what ran.
+  slugs your account actually offers, while a generic one ("gpt", "codex")
+  names no model at all and just runs your `model` above — or your codex
+  account's default, reported as `codex default`. A reply from a
+  model-pinned dispatch ends with a `[tandem-sub model: …]` trailer naming
+  what ran.
   (`route = "off"` is the same routing silence, but `manual` keeps `tandem
   doctor`'s subagent checks on, since you still send work to codex.)
 - `route = "all"` reroutes every native subagent dispatch to codex
