@@ -96,7 +96,8 @@ not the haiku relay — does the parsing.
   exec), the README already points users at it, and reading the wrapped
   CLI's own files is tandem's established method (`docs/formats.md`).
   `codex debug models` remains the human-facing debugging surface for the
-  same data. Resolution (run only when a header is present):
+  same data. Resolution (run only when a header is present) — *superseded
+  for the generic names `gpt`/`codex`, see the Addendum below*:
   - Normalize both sides: lowercase, strip non-alphanumerics.
   - Exact normalized match on a slug or display name wins.
   - Else a normalized-substring match (header inside candidate) that hits

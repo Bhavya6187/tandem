@@ -804,6 +804,30 @@ class TestDoctorAndStatus:
         assert "subagent running: gpt-x-mini (task) audit the README" in r.output
         assert "retained forks: 1" in r.output
 
+    def test_status_names_the_empty_model_like_the_trailer(
+            self, env_factory, monkeypatch):
+        """A worker with no model picked is the same state everywhere — one
+        wording owns it, so status must not invent its own name for what the
+        trailer and the announcement call `codex default`."""
+        import click.testing
+        from tandem import cli, modelcat, paths
+        env = env_factory(active="claude")
+        monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
+        monkeypatch.setattr(
+            cli, "_check_versions",
+            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+        )
+        run_dir = (paths.tandem_home() / "subagents" / env.session.tandem_id
+                   / "running")
+        run_dir.mkdir(parents=True)
+        (run_dir / "r1.json").write_text(json.dumps(
+            {"model": "", "context": "task", "task_preview": "audit", "pid": 1}))
+        r = click.testing.CliRunner().invoke(cli.main, ["status"])
+        assert r.exit_code == 0
+        assert f"subagent running: {modelcat.model_label('')} (task) audit" \
+            in r.output
+        assert "codex default" in r.output
+
     def test_doctor_survives_non_object_auth_json(self, env_factory, monkeypatch):
         """auth.json that is valid JSON but not an object must not crash
         doctor: `.get` on a list raises AttributeError, not ValueError."""

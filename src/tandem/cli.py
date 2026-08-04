@@ -141,6 +141,8 @@ def _pair_session(store: StateStore, cwd: str, active: str) -> PairedSession:
 @main.command()
 def status() -> None:
     """Show the paired session for this directory."""
+    from . import modelcat
+
     with StateStore() as store:
         session = _require_session(store)
         versions = _check_versions(warn_only=True)
@@ -182,8 +184,11 @@ def status() -> None:
                     continue
                 if not isinstance(d, dict):
                     continue  # non-object marker: skip it, never traceback
+                # One wording owns "nobody picked a model" — the same phrase
+                # the sub trailer and announcement use, so status and a
+                # relayed reply describe the same worker the same way.
                 click.echo(
-                    f"  subagent running: {d.get('model') or 'default-model'} "
+                    f"  subagent running: {modelcat.model_label(d.get('model') or '')} "
                     f"({d.get('context')}) {d.get('task_preview', '')}"
                 )
         kept = sorted(sub_root.glob("rollout-*.jsonl")) if sub_root.is_dir() else []

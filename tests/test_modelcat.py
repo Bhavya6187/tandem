@@ -15,9 +15,17 @@ CATALOG = [
 ]
 
 # Purpose-built: a codex that really does ship a model *named* `gpt`. The
-# standin must never shadow an exact catalog match.
+# standin must never shadow an exact catalog match. The display name is
+# deliberately NOT "GPT" so the slug arm is the only thing that can match.
 CATALOG_WITH_LITERAL_GPT = [
-    {"slug": "gpt", "display_name": "GPT", "visibility": "list"},
+    {"slug": "gpt", "display_name": "GPT Classic", "visibility": "list"},
+    {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list"},
+]
+
+# The mirror case: no slug normalizes to `gpt`, but a *display name* does.
+# Exact matching covers both arms, so this must resolve too.
+CATALOG_WITH_GENERIC_DISPLAY_NAME = [
+    {"slug": "gpt-legacy", "display_name": "GPT", "visibility": "list"},
     {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list"},
 ]
 
@@ -165,11 +173,19 @@ class TestGenericNameStandins:
             {"slug": "codex-mini", "display_name": "Codex Mini",
              "visibility": "list"}]) == ""
 
-    def test_exact_catalog_match_beats_the_standin(self):
+    def test_exact_slug_match_beats_the_standin(self):
         assert modelcat.resolve("gpt", CATALOG_WITH_LITERAL_GPT) == "gpt"
+        assert modelcat.resolve("G.P.T.", CATALOG_WITH_LITERAL_GPT) == "gpt"
 
     def test_exact_display_name_match_beats_the_standin(self):
-        assert modelcat.resolve("G.P.T.", CATALOG_WITH_LITERAL_GPT) == "gpt"
+        # no slug here normalizes to "gpt" — only the display name does, so
+        # this fails if the standin short-circuits the display-name arm
+        assert not any(m["slug"] == "gpt"
+                       for m in CATALOG_WITH_GENERIC_DISPLAY_NAME)
+        assert modelcat.resolve("gpt", CATALOG_WITH_GENERIC_DISPLAY_NAME) \
+            == "gpt-legacy"
+        assert modelcat.resolve("GPT", CATALOG_WITH_GENERIC_DISPLAY_NAME) \
+            == "gpt-legacy"
 
     def test_standin_applies_without_a_catalog(self):
         # `gpt` must never reach `codex -m` verbatim, catalog or not
