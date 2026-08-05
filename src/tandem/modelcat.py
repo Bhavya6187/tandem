@@ -94,20 +94,38 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
+def _substring_hits(n: str, visible: list[dict]) -> set[str]:
+    """Slugs whose slug or display name contains the normalized query `n`.
+
+    An empty query hits nothing on purpose: "" sits inside every string, so
+    matching it would resolve to whatever the catalog happens to list —
+    a model nobody asked for. The stripped-retry call site guards its own
+    query too — this is the backstop, not the only line of defense."""
+    return {m["slug"] for m in visible
+            if n and (n in _norm(m["slug"])
+                      or n in _norm(str(m.get("display_name") or "")))}
+
+
 def resolve(name: str, models: list[dict] | None) -> str:
     """The exact slug for a user-worded model name, or "" for no preference.
 
     Exact normalized match on slug or display name wins; else a generic
     standin (STANDIN_MODELS) resolves to the empty model; else a normalized
-    substring match that hits exactly one visible model; else UnknownModel
-    listing the visible slugs — raised before codex is invoked, so the
-    round-trip that would 400 is never spent.
+    substring match that hits exactly one visible model; else the same
+    substring match retried with one leading family token stripped; else
+    UnknownModel listing the visible slugs — raised before codex is
+    invoked, so the round-trip that would 400 is never spent.
 
     The standin sits after exact matching so a codex that really ships a
     model named `gpt` still resolves it, and before substring matching
     because substrings are what made `gpt` ambiguous-fail in the first
     place. It applies with no catalog too: `gpt` must never reach
-    `codex -m` verbatim, which 400s after a full round-trip."""
+    `codex -m` verbatim, which 400s after a full round-trip.
+
+    The stripped retry sits last so nothing it can do changes an answer the
+    earlier passes already gave, and it keeps the one-hit rule: `gpt-5`
+    strips to `5`, still hits several models, and still fails loudly. No
+    pass resolves to a model the user did not ask for."""
     n = _norm(name)
     if models is None:
         return "" if n in STANDIN_MODELS else name
@@ -120,11 +138,27 @@ def resolve(name: str, models: list[dict] | None) -> str:
             return m["slug"]
     if n in STANDIN_MODELS:
         return ""
-    hits = {m["slug"] for m in visible
-            if n and (n in _norm(m["slug"])
-                      or n in _norm(str(m.get("display_name") or "")))}
+    hits = _substring_hits(n, visible)
     if len(hits) == 1:
         return next(iter(hits))
+    # Observed live: an agent asked for "gpt terra" emits `gpt-terra`, and
+    # normalization keeps that query contiguous — `gptterra` cannot sit
+    # inside `gpt56terra` — so the pass above misses an unambiguous intent.
+    # Strip one leading family token and retry. Longest match wins, so a
+    # standin added later that prefixes another one cannot make the result
+    # depend on the set's iteration order.
+    token = max((t for t in STANDIN_MODELS if n.startswith(t)),
+                key=len, default="")
+    stripped = n[len(token):] if token else ""
+    # An empty remainder is not retried: a query that *was* just the token
+    # already returned at the standin arm above, so this is unreachable —
+    # but an empty query is inside every name, and the one shape where
+    # that resolves instead of erroring (a single-model catalog) is the
+    # shape where silently running the wrong model is least visible.
+    if stripped:
+        hits = _substring_hits(stripped, visible)
+        if len(hits) == 1:
+            return next(iter(hits))
     raise UnknownModel(
         f"unknown model {name!r}; this codex offers: "
         + ", ".join(m["slug"] for m in visible))

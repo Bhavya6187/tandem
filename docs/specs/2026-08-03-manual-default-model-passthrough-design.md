@@ -166,3 +166,24 @@ residual (bare "ask gpt" hard-failing where 0.1.7 just ran) disappears.
 - The `gpt.md` description is unchanged: not emitting a header for a bare
   "gpt" remains the instructed behavior; the standin is the enforcement
   backstop, not the new contract.
+
+## Addendum 2 (2026-08-04) — family-prefix stripping, ships as 0.1.10
+
+Observed live: agents asked for "gpt terra" emit `tandem-model: gpt-terra`,
+which fails resolution — normalization keeps the query contiguous
+(`gptterra` cannot sit inside `gpt56terra`) even though the intent is
+unambiguous. Fix: one more resolution pass. After the full-query substring
+match fails, strip a single leading `gpt` or `codex` token from the
+*normalized* query and retry the same visible-substring match:
+`gpt-terra` → `terra` → `gpt-5.6-terra`; `gpt-mini`/`codex-mini` →
+`gpt-5.4-mini`.
+
+- Ordering (unchanged guarantees, one new step): exact slug/display match
+  → standin (`gpt`/`codex` alone still mean "default") → full-query
+  substring → **stripped-query substring** → loud `unknown model` listing.
+- Ambiguity stays loud: `gpt-5` strips to `5`, which hits several models,
+  so it still fails with the slug listing. A stripped query that is empty
+  is not retried (that case is the standin). No path resolves silently to
+  something the user did not ask for.
+- The strip operates in normalized space, so `gpt terra`, `GPT.Terra`,
+  and `gpt-terra` behave identically.
