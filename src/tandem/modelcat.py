@@ -99,8 +99,8 @@ def _substring_hits(n: str, visible: list[dict]) -> set[str]:
 
     An empty query hits nothing on purpose: "" sits inside every string, so
     matching it would resolve to whatever the catalog happens to list —
-    a model nobody asked for. That guard is what makes the callers below
-    safe to write branchlessly."""
+    a model nobody asked for. The stripped-retry call site guards its own
+    query too — this is the backstop, not the only line of defense."""
     return {m["slug"] for m in visible
             if n and (n in _norm(m["slug"])
                       or n in _norm(str(m.get("display_name") or "")))}
@@ -144,15 +144,21 @@ def resolve(name: str, models: list[dict] | None) -> str:
     # Observed live: an agent asked for "gpt terra" emits `gpt-terra`, and
     # normalization keeps that query contiguous — `gptterra` cannot sit
     # inside `gpt56terra` — so the pass above misses an unambiguous intent.
-    # Strip one leading family token and retry. At most one standin can
-    # prefix a given query, so the set's iteration order cannot matter, and
-    # a query that *was* just the token already returned at the standin arm
-    # — the remainder here is never empty, and an empty one would hit
-    # nothing anyway.
-    stripped = next((n[len(t):] for t in STANDIN_MODELS if n.startswith(t)), "")
-    hits = _substring_hits(stripped, visible)
-    if len(hits) == 1:
-        return next(iter(hits))
+    # Strip one leading family token and retry. Longest match wins, so a
+    # standin added later that prefixes another one cannot make the result
+    # depend on the set's iteration order.
+    token = max((t for t in STANDIN_MODELS if n.startswith(t)),
+                key=len, default="")
+    stripped = n[len(token):] if token else ""
+    # An empty remainder is not retried: a query that *was* just the token
+    # already returned at the standin arm above, so this is unreachable —
+    # but an empty query is inside every name, and the one shape where
+    # that resolves instead of erroring (a single-model catalog) is the
+    # shape where silently running the wrong model is least visible.
+    if stripped:
+        hits = _substring_hits(stripped, visible)
+        if len(hits) == 1:
+            return next(iter(hits))
     raise UnknownModel(
         f"unknown model {name!r}; this codex offers: "
         + ", ".join(m["slug"] for m in visible))

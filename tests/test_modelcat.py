@@ -37,6 +37,17 @@ CATALOG_WITH_LITERAL_GPT_TERRA = CATALOG + [
     {"slug": "gpt-terra", "display_name": "Terra Classic", "visibility": "list"},
 ]
 
+# One visible model — the shape that turns a missing empty-query guard into
+# a *silent* wrong answer instead of a loud ambiguity. "" is inside every
+# name, so an unguarded empty query hits every visible model; with three of
+# them that raises anyway and proves nothing, with one it resolves. Every
+# no-match assertion that exists to pin a guard runs against this.
+CATALOG_ONE_VISIBLE = [
+    {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list"},
+    {"slug": "codex-auto-review", "display_name": "Codex Auto Review",
+     "visibility": "hide"},
+]
+
 
 class TestSplitModelHeader:
     def test_header_is_stripped_and_returned(self):
@@ -205,7 +216,11 @@ class TestGenericNameStandins:
             assert modelcat.resolve(name, CATALOG) == "", name
 
     def test_standin_is_exact_not_a_prefix_rule(self):
-        # "gpt-5.4-mini" resolves as itself; "gpt 5" is still ambiguous
+        # The standin arm matches `gpt`/`codex` whole: a longer name is a
+        # request to resolve, never a request for the default. Since 0.1.10
+        # the two failures below get one more chance at the family-prefix
+        # strip and still fail on their own merits — `5` hits every model
+        # here, `x` hits none — so neither quietly becomes "codex default".
         assert modelcat.resolve("gpt-5.4-mini", CATALOG) == "gpt-5.4-mini"
         with pytest.raises(modelcat.UnknownModel):
             modelcat.resolve("gpt 5", CATALOG)
@@ -284,9 +299,19 @@ class TestFamilyPrefixStripping:
         with pytest.raises(modelcat.UnknownModel):
             modelcat.resolve("gpt-codex-mini", CATALOG)
 
+    def test_an_unprefixed_miss_is_never_retried_as_an_empty_query(self):
+        # `banana` has no family token to strip, so the retry query would
+        # be "" — which is inside every name. Against a one-model catalog
+        # an unguarded retry resolves *silently* to that model instead of
+        # raising, so this is the assertion that pins the guard.
+        with pytest.raises(modelcat.UnknownModel):
+            modelcat.resolve("banana", CATALOG_ONE_VISIBLE)
+
     def test_a_query_that_normalizes_to_nothing_matches_nothing(self):
-        # "" is inside every string; a query of pure punctuation must fail
-        # loudly rather than resolve to whatever sorts first
+        # same hole one pass earlier: pure punctuation normalizes to "",
+        # which the full-query pass must not treat as a match either
+        with pytest.raises(modelcat.UnknownModel):
+            modelcat.resolve("...", CATALOG_ONE_VISIBLE)
         with pytest.raises(modelcat.UnknownModel):
             modelcat.resolve("...", CATALOG)
 
