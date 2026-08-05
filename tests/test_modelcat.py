@@ -29,6 +29,14 @@ CATALOG_WITH_GENERIC_DISPLAY_NAME = [
     {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list"},
 ]
 
+# Same purpose as CATALOG_WITH_LITERAL_GPT, one rung down: a codex that
+# really ships `gpt-terra`. Prefix stripping must never shadow it. The
+# display name deliberately does not contain "GPT Terra", so the exact slug
+# arm is the only thing that can match.
+CATALOG_WITH_LITERAL_GPT_TERRA = CATALOG + [
+    {"slug": "gpt-terra", "display_name": "Terra Classic", "visibility": "list"},
+]
+
 
 class TestSplitModelHeader:
     def test_header_is_stripped_and_returned(self):
@@ -206,6 +214,81 @@ class TestGenericNameStandins:
 
     def test_standin_set_is_public_and_normalized(self):
         assert modelcat.STANDIN_MODELS == frozenset({"gpt", "codex"})
+
+
+class TestFamilyPrefixStripping:
+    """Live-observed wording: an agent asked for "gpt terra" emits
+    `tandem-model: gpt-terra`. Normalization keeps the query contiguous, so
+    `gptterra` cannot sit inside `gpt56terra` and the full-query substring
+    pass misses. One leading `gpt`/`codex` token is stripped and the same
+    visible-substring match is retried."""
+
+    def test_family_prefixed_name_resolves(self):
+        assert modelcat.resolve("gpt-terra", CATALOG) == "gpt-5.6-terra"
+
+    def test_either_family_token_strips(self):
+        # the token names the harness, not the family the model is in:
+        # asking codex for "mini" lands on the same model as asking gpt
+        assert modelcat.resolve("gpt-mini", CATALOG) == "gpt-5.4-mini"
+        assert modelcat.resolve("codex-mini", CATALOG) == "gpt-5.4-mini"
+
+    def test_strip_happens_in_normalized_space(self):
+        # spoken, typed and punctuated forms are the same query
+        assert modelcat.resolve("gpt terra", CATALOG) == "gpt-5.6-terra"
+        assert modelcat.resolve("GPT.Terra", CATALOG) == "gpt-5.6-terra"
+
+    def test_exact_match_beats_the_strip(self):
+        # a codex that ships a literal `gpt-terra` resolves it as itself,
+        # never as the stripped-retry hit
+        assert modelcat.resolve("gpt-terra", CATALOG_WITH_LITERAL_GPT_TERRA) \
+            == "gpt-terra"
+
+    def test_full_query_substring_beats_the_strip(self):
+        # `gptterra` sits whole inside `gpt-terra-x`, so the full query wins
+        # outright — the stripped retry would be ambiguous (two terras) and
+        # raise, which is what a wrong pass order would produce here
+        catalog = CATALOG + [
+            {"slug": "gpt-terra-x", "display_name": "GPT Terra X",
+             "visibility": "list"}]
+        assert modelcat.resolve("gpt-terra", catalog) == "gpt-terra-x"
+
+    def test_ambiguous_stripped_query_still_fails_loudly(self):
+        # `gpt-5` strips to `5`, which hits every model here: the family
+        # name stays a loud error with the choices spelled out
+        with pytest.raises(modelcat.UnknownModel) as e:
+            modelcat.resolve("gpt-5", CATALOG)
+        msg = str(e.value)
+        assert "unknown model 'gpt-5'" in msg
+        assert "gpt-5.6-sol" in msg and "gpt-5.4-mini" in msg
+
+    def test_stripped_query_that_hits_nothing_still_fails_loudly(self):
+        with pytest.raises(modelcat.UnknownModel) as e:
+            modelcat.resolve("gpt-o3", CATALOG)
+        assert "unknown model 'gpt-o3'; this codex offers: gpt-5.6-sol" \
+            in str(e.value)
+
+    def test_hidden_models_never_match_the_stripped_query(self):
+        # `codex-auto-review` is hidden; `gpt-auto-review` must not reach it
+        with pytest.raises(modelcat.UnknownModel):
+            modelcat.resolve("gpt-auto-review", CATALOG)
+
+    def test_bare_standins_are_untouched(self):
+        # the standin arm answers first, so no strip ever sees an empty
+        # remainder
+        assert modelcat.resolve("gpt", CATALOG) == ""
+        assert modelcat.resolve("codex", CATALOG) == ""
+
+    def test_only_one_token_is_stripped(self):
+        # `gpt-codex-mini` strips to `codexmini`, which matches nothing —
+        # loud, not a second strip down to `mini`
+        with pytest.raises(modelcat.UnknownModel):
+            modelcat.resolve("gpt-codex-mini", CATALOG)
+
+    def test_a_query_that_normalizes_to_nothing_matches_nothing(self):
+        # "" is inside every string; a query of pure punctuation must fail
+        # loudly rather than resolve to whatever sorts first
+        with pytest.raises(modelcat.UnknownModel):
+            modelcat.resolve("...", CATALOG)
 
 
 class TestLoadCatalog:

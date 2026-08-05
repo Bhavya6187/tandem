@@ -517,6 +517,8 @@ class TestSubModelHeader:
         p.write_text(json.dumps({"models": [
             {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol",
              "visibility": "list"},
+            {"slug": "gpt-5.6-terra", "display_name": "GPT-5.6-Terra",
+             "visibility": "list"},
             {"slug": "gpt-5.4-mini", "display_name": "GPT-5.4-Mini",
              "visibility": "list"},
         ]}))
@@ -728,6 +730,22 @@ class TestSubModelHeader:
         assert r.exit_code == 0
         assert calls["kw"]["model"] == ""
         assert r.output.rstrip().endswith("[tandem-sub model: codex default]")
+
+    def test_family_prefixed_header_resolves(self, env_factory, monkeypatch):
+        # live-observed wording: an agent asked for "gpt terra" emits
+        # `tandem-model: gpt-terra`, which failed resolution before 0.1.10
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "-q"],
+            input="tandem-model: gpt-terra\ndo the thing\n")
+        assert r.exit_code == 0
+        assert calls["task"] == "do the thing"
+        assert calls["kw"]["model"] == "gpt-5.6-terra"
+        assert r.output.rstrip().endswith("[tandem-sub model: gpt-5.6-terra]")
 
     def test_family_name_still_fails_loudly(self, env_factory, monkeypatch):
         # the standin is exactly `gpt`/`codex`, not a prefix rule
