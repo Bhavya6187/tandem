@@ -299,17 +299,33 @@ class PtyControl:
     def attached(self) -> bool:
         return self._child is not None or self._proc is not None
 
-    def terminate(self, grace: float = 3.0) -> None:
+    def terminate(self, grace: float = 3.0,
+                  soft_exit: bytes | None = None) -> None:
+        """Escalation ladder: app-level quit keystroke (tty path only, so
+        the harness finalizes its own transcript) -> SIGTERM to the
+        process group -> SIGKILL. Each rung waits `grace` seconds."""
         if not self.attached():
             return
+        if soft_exit and self._child is not None:
+            try:
+                self._child.write(soft_exit)
+            except Exception:
+                pass
+            if self._wait_dead(grace):
+                return
         self._signal(signal.SIGTERM)
+        if self._wait_dead(grace):
+            return
+        self.forced = True
+        self._signal(signal.SIGKILL)
+
+    def _wait_dead(self, grace: float) -> bool:
         deadline = time.time() + grace
         while time.time() < deadline:
             if not self._alive():
-                return
+                return True
             time.sleep(0.05)
-        self.forced = True
-        self._signal(signal.SIGKILL)
+        return not self._alive()
 
     def _alive(self) -> bool:
         try:
@@ -569,7 +585,10 @@ In `InteractiveRunner`:
                             loop.drain()
                         if monitor.should_fire(_marker_mtime(sentinel)):
                             self.switch_requested = True
-                            control.terminate()
+                            # \x04 = Ctrl+D: both harnesses quit on an empty
+                            # composer, finalizing their own transcript before
+                            # signals enter the picture.
+                            control.terminate(soft_exit=b"\x04")
                             break
                         watcher.wait()
 ```
@@ -1190,7 +1209,13 @@ codex plugin marketplace add /Users/bhavya/git/tandem && codex plugin add tandem
 In a scratch repo: `tandem`, ask claude something trivial, then type `/tandem:switch`.
 Expected: claude replies one line, exits within ~3 s, codex resumes showing the same conversation. Then `/tandem:switch` in codex flips back (codex → claude). Record both.
 
-- [ ] **Step 3: Pin the real transcript forms**
+- [ ] **Step 3: Pin the real transcript forms (RELEASE GATE)**
+
+This step is a release gate: do not tag/release the feature until the
+observed slash-command transcript form on BOTH harnesses is confirmed to
+hit the matcher (sol review finding 3, 2026-08-05 — ordinary codex
+prompts are confirmed `event_msg`/`user_message`; the slash-command form
+is not yet captured).
 
 Open the claude session jsonl (`~/.claude/projects/<cwd-slug>/<session-id>.jsonl`) and the codex rollout (`~/.codex/sessions/**/rollout-*.jsonl`) from Step 2. Find the user entry for the typed `/tandem:switch`. Verify `switch_signal`'s matcher hit the actual form (raw command, `<command-name>` tag, or `[tandem-switch-request]` token). If the real form differs, update the adapter matcher and the fixtures in `tests/test_switch_signal.py` to the observed shape, rerun `uv run pytest`, and commit `fix: match observed transcript form for /tandem:switch`.
 
@@ -1202,8 +1227,9 @@ Expected: if the second prompt was submitted before termination, the switch canc
 - [ ] **Step 5: Edge cases**
 
 - Plain `claude` (no wrapper) in the scratch repo: `/tandem:switch` → model's one-liner says nothing will happen without the wrapper; nothing else occurs.
-- `/tandem:status` and `/tandem:doctor` inside the wrapper session: output relayed, no permission prompt on claude; on codex, note whether the state-store read triggered an approval (spec's open verification — record the answer in the spec's plan-time note).
+- `/tandem:status` and `/tandem:doctor` inside the wrapper session: output relayed, no permission prompt on claude; on codex, verify the Task 10 writable-root grant lets `tandem status` run without an escalation approval.
 - Two `tandem` sessions in one directory: `/tandem:status` in each reports its own session id (env pinning).
+- Soft-exit ladder: during a switch, confirm the harness exited on the Ctrl+D rung (no `forced` handoff) in the common case.
 
 - [ ] **Step 6: Commit the record**
 
@@ -1216,8 +1242,65 @@ git commit -m "docs: live-validation record for in-session switch"
 
 ---
 
+### Task 10: Codex sandbox access for in-session tandem commands
+
+Runs any time after Task 3; required before Task 9's codex `status` check.
+
+**Files:**
+- Modify: `src/tandem/harness/codex.py` (launch argv)
+- Test: `tests/test_switch_signal.py` is the wrong home — add to whichever file already tests codex `interactive_argv`/`hook_argv_extra` (locate: `grep -rn "hook_argv_extra\|interactive_argv" tests/`); if none, create `tests/test_codex_launch_argv.py`.
+
+**Interfaces:**
+- Consumes: `paths.tandem_home()`.
+- Produces: codex launch argv grants `~/.tandem` as a writable sandbox root, so `tandem status`/`doctor` (which WRITE: `StateStore.__init__` runs the schema script + commit on every open, and `status` updates `last_used_at`) run without escalation approvals.
+
+- [ ] **Step 1: Pin the codex flag**
+
+Run: `codex --help | grep -A2 add-dir` (and `codex -c 'sandbox_workspace_write.writable_roots=["/tmp/x"]' --help` to confirm the config key parses).
+Expected: `--add-dir <path>` exists on codex-cli 0.145 as an additive writable-root flag. If it does, use it (additive — no clobber concern). If it does not, fall back to reading the user's `~/.codex/config.toml` `sandbox_workspace_write.writable_roots`, appending `~/.tandem`, and passing the merged list via `-c` — mirroring `hook_argv_extra`'s notify non-clobber pattern exactly.
+
+- [ ] **Step 2: Write the failing test** (assuming `--add-dir`; adapt to the fallback if Step 1 requires it)
+
+```python
+def test_codex_launch_grants_tandem_home_as_writable_root(monkeypatch, tmp_path):
+    from tandem import paths
+    from tandem.harness import get_adapter
+
+    monkeypatch.setattr(paths, "tandem_home", lambda: tmp_path / ".tandem")
+    argv = get_adapter("codex").interactive_argv(None, fresh=True)
+    i = argv.index("--add-dir")
+    assert argv[i + 1] == str(tmp_path / ".tandem")
+```
+
+- [ ] **Step 3: Run test to verify it fails**
+
+Run: `uv run pytest -k grants_tandem_home -v`
+Expected: FAIL — `ValueError: '--add-dir' is not in list`.
+
+- [ ] **Step 4: Implement**
+
+In `src/tandem/harness/codex.py`, in `interactive_argv` (read it first; append to the argv it builds, for both fresh and resume paths):
+
+```python
+        # In-session /tandem:status|doctor shell out to `tandem`, which
+        # writes under ~/.tandem on every state-store open; grant it as a
+        # writable root so those commands never need an escalation approval.
+        argv += ["--add-dir", str(paths.tandem_home())]
+```
+
+- [ ] **Step 5: Run tests to verify they pass, then commit**
+
+Run: `uv run pytest`
+
+```bash
+git add src/tandem/harness/codex.py tests/
+git commit -m "feat: grant ~/.tandem as codex writable root for in-session commands"
+```
+
+---
+
 ## Self-Review (completed)
 
-- **Spec coverage:** trigger/detector → Task 1+3; turn marker + quiescence + termination hardening → Tasks 2-3; flip/re-enter chain → Task 4; session pinning → Task 5; plugin commands + codex packaging → Task 6; install flow → Task 7; doctor floor/presence → Task 8; the spec's three plan-time verifications → Task 9 Steps 3 and 5 (transcript forms, codex sandbox behavior) and the floor constant in Task 8. Escape-hatch behavior needs no task (unchanged paths).
+- **Spec coverage:** trigger/detector → Task 1+3; turn marker + quiescence + termination hardening (incl. soft-exit ladder) → Tasks 2-3; flip/re-enter chain → Task 4; session pinning → Task 5; plugin commands + codex packaging → Task 6; install flow → Task 7; doctor floor/presence → Task 8; codex sandbox writable-root grant → Task 10; the spec's plan-time verifications → Task 9 Steps 3 (release gate) and 5, Task 10 Step 1, and the floor constant in Task 8. Escape-hatch behavior needs no task (unchanged paths).
 - **Placeholder scan:** none; the two "read the file first" notes (TailLoop drain placement, test fixture idioms) point at exact locations with the code to insert given.
 - **Type consistency:** `switch_signal` tuple contract (Task 1) matches `SwitchMonitor.note_line` consumption (Task 3); `run_harness -> tuple[int, bool]` (Task 4) matches the runner attribute (Task 3); `CODEX_PLUGIN_ID` (Task 7) matches doctor usage (Task 8); `SWITCH_TOKEN` literal in switch.md (Task 6) is asserted equal to the constant by test.

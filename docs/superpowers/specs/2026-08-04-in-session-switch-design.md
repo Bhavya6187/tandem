@@ -65,10 +65,16 @@ completed.
 harness is actually running in — pinned via environment, not guessed
 from cwd — and relay the output. Their command frontmatter allowlists
 exactly `Bash(tandem status:*)` / `Bash(tandem doctor:*)`, so they
-prompt for nothing on claude; on codex they are ordinary sandboxed
-read-only commands (plan-time verification: whether reading the state
-store under codex's sandbox needs lock-file writes and therefore a
-one-time approval).
+prompt for nothing on claude. The frontmatter is **claude-only
+enforcement** — codex's permission model is sandbox/approval-based and
+ignores it. On codex the commands need `~/.tandem` writable inside the
+sandbox: every `StateStore` open runs the idempotent schema script and
+commits, and `status` updates `last_used_at` — these are writes, not
+reads. The wrapper therefore grants `~/.tandem` as an additional
+writable root when launching codex (additively — never clobbering
+user-configured roots, the same courtesy the notify injection shows;
+exact flag pinned at implementation: `--add-dir` if available, else a
+merged `sandbox_workspace_write.writable_roots` override).
 
 ### The escape hatch stays
 
@@ -89,11 +95,14 @@ history on the shadow side cannot re-trigger it, and sessions not
 running under the wrapper have no detector at all (the feature's exact
 scope; no stale state can exist).
 
-Plan-time verification: what each harness writes to its transcript for a
-typed plugin slash command (raw text, expanded content, or command-name
-metadata). Whatever the form, it is deterministic per harness version;
-if it is the expanded content, the command file embeds a fixed trigger
-token and the matcher targets that.
+Plan-time verification (**release gate** — sol's review, 2026-08-05):
+what each harness writes to its transcript for a typed plugin slash
+command (raw text, expanded content, or command-name metadata). Ordinary
+codex prompts are confirmed to land as `event_msg`/`user_message` lines
+with top-level ISO timestamps; the slash-command form specifically must
+be captured live before release. Whatever the form, it is deterministic
+per harness version; if it is the expanded content, the command file
+embeds a fixed trigger token and the matcher targets that.
 
 ### Turn boundary: the existing turn marker
 
@@ -110,10 +119,16 @@ quiescence) means the turn is complete and durable.
 
 On turn-complete with an armed flag, the runner waits for transcript
 quiescence (stable size, complete final line), then terminates the
-harness through the PTY layer: `run_in_pty` grows a small control handle;
-SIGTERM to the child's process group (harness tool children die with
-it), SIGKILL after a bounded timeout, and the handoff records whether it
-was graceful. The runner's existing exit path then runs unchanged —
+harness through the PTY layer: `run_in_pty` grows a small control
+handle. Escalation ladder: first a soft app-level exit (the wrapper owns
+the PTY stdin, so it writes the harness's quit keystroke — Ctrl+D on an
+empty composer — letting the CLI finalize its own transcript; codex
+rollouts killed mid-lifecycle have known resume-repair gaps upstream),
+then SIGTERM to the child's process group (harness tool children die
+with it), then SIGKILL after a bounded timeout; the handoff records
+whether it was graceful. Post-flip rollout health is already surfaced:
+`ops.switch_session` returns problems that print with the existing
+"may not resume cleanly; run `tandem doctor`" advisory. The runner's existing exit path then runs unchanged —
 stop and join the tail thread, final locked drain (this ordering already
 exists in `InteractiveRunner.run`) — and it surfaces "switch requested"
 alongside the exit code. `run_shell` sees it and reuses the existing
