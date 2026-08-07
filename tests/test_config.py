@@ -1,6 +1,6 @@
-"""[subagents] config: defaults on missing/broken file, validated values."""
+"""config.toml: defaults on missing/broken file, validated values."""
 
-from tandem.config import SubagentsConfig, load_subagents_config
+from tandem.config import SubagentsConfig, load_harness_args, load_subagents_config
 
 
 def test_defaults_when_file_missing(tmp_path, monkeypatch):
@@ -69,3 +69,39 @@ def test_non_utf8_falls_back(tmp_path, monkeypatch):
     (home / "config.toml").write_bytes(b'[subagents]\nmodel = "caf\xe9"\n')
     monkeypatch.setenv("TANDEM_HOME", str(home))
     assert load_subagents_config() == SubagentsConfig()
+
+
+def test_harness_args_reads_lists(tmp_path, monkeypatch):
+    home = tmp_path / ".tandem"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        '[claude]\nargs = ["--dangerously-skip-permissions"]\n\n'
+        '[codex]\nargs = ["--dangerously-bypass-approvals-and-sandbox"]\n'
+    )
+    monkeypatch.setenv("TANDEM_HOME", str(home))
+    assert load_harness_args("claude") == ["--dangerously-skip-permissions"]
+    assert load_harness_args("codex") == [
+        "--dangerously-bypass-approvals-and-sandbox"
+    ]
+
+
+def test_harness_args_empty_when_file_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+    assert load_harness_args("claude") == []
+
+
+def test_harness_args_invalid_shapes_fall_back(tmp_path, monkeypatch):
+    home = tmp_path / ".tandem"
+    home.mkdir()
+    monkeypatch.setenv("TANDEM_HOME", str(home))
+    cases = (
+        '[claude]\nargs = "--not-a-list"\n',      # scalar, not a list
+        '[claude]\nargs = ["--ok", 7]\n',         # non-string element
+        '[claude]\nargs = ["--ok", ""]\n',        # empty string element
+        '[claude]\nargs = ["--x\\u0000y"]\n',     # NUL: exec would raise
+        '[subagents]\nroute = "manual"\n',        # table absent entirely
+        "[claude\nnot toml",                      # broken TOML
+    )
+    for body in cases:
+        (home / "config.toml").write_text(body)
+        assert load_harness_args("claude") == [], body
