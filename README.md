@@ -144,6 +144,25 @@ you set it.
   loop guard matches on the last segment of the agent name in any scope — so
   a local `.claude/agents/gpt.md` of yours keeps dispatching natively.
 
+Optional per-harness tables add flags to every interactive session tandem
+opens (`tandem`, `tandem resume`) — one-off relays (`tandem run`),
+subagent dispatch, and doctor probes are unaffected:
+
+```toml
+[claude]
+args = ["--dangerously-skip-permissions"]
+
+[codex]
+args = ["--dangerously-bypass-approvals-and-sandbox"]
+```
+
+The flags shown disable the harnesses' own permission prompts for
+sessions tandem launches — set them only if that is what you want.
+The list is passed to the harness raw: a flag that expects a value can
+swallow the settings tandem appends after it and break turn tracking.
+Malformed values (a non-list, empty or non-string elements) are
+silently ignored rather than failing the launch.
+
 Fork dispatches stay on Claude even under `route = "all"`, each worker's
 full codex log is kept under `~/.tandem/subagents/`, and `tandem status`
 lists the workers running right now. The plugin is installed for every

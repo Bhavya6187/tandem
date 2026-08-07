@@ -1,8 +1,11 @@
-"""User configuration: $TANDEM_HOME/config.toml, [subagents] table only.
+"""User configuration: $TANDEM_HOME/config.toml.
+
+[subagents] controls codex subagent routing; [claude] / [codex] hold an
+`args` list appended to every interactive launch of that harness.
 
 Unknown keys are ignored and every error yields defaults — configuration
-must never be the reason subagent routing breaks (the hook's failure mode
-is 'dispatch natively', and this module upholds it)."""
+must never be the reason a launch breaks or subagent routing stops (the
+hook's failure mode is 'dispatch natively', and this module upholds it)."""
 
 from __future__ import annotations
 
@@ -32,15 +35,19 @@ _ROUTES = ("all", "manual", "off")
 _CONTEXTS = ("match", "task", "full")
 
 
-def load_subagents_config() -> SubagentsConfig:
+def _read_config() -> dict:
+    """Parsed config.toml, or {} when unreadable in any way."""
     try:
         with open(paths.tandem_home() / "config.toml", "rb") as f:
-            data = tomllib.load(f)
+            return tomllib.load(f)
     # ValueError covers TOMLDecodeError (a subclass), the UnicodeDecodeError
     # tomllib raises when the file is not UTF-8, and open()'s embedded-NUL path.
     except (OSError, ValueError):
-        return SubagentsConfig()
-    raw = data.get("subagents")
+        return {}
+
+
+def load_subagents_config() -> SubagentsConfig:
+    raw = _read_config().get("subagents")
     if not isinstance(raw, dict):
         return SubagentsConfig()
     d = SubagentsConfig()
@@ -58,3 +65,17 @@ def load_subagents_config() -> SubagentsConfig:
         fanout_feature=pick("fanout_feature", str, d.fanout_feature),
         keep_forks=pick("keep_forks", bool, d.keep_forks),
     )
+
+
+def load_harness_args(harness: str) -> list[str]:
+    """`args` from the [claude] / [codex] table: extra argv appended to
+    every interactive launch of that harness. Anything malformed -> []."""
+    table = _read_config().get(harness)
+    args = table.get("args") if isinstance(table, dict) else None
+    # Empty and NUL-bearing strings can't be real flags but would make the
+    # exec fail; one bad element rejects the list, like non-strings do.
+    if not isinstance(args, list) or not all(
+        isinstance(a, str) and a and "\x00" not in a for a in args
+    ):
+        return []
+    return args

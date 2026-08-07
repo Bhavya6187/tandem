@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from . import paths
+from .config import load_harness_args
 from .events import SessionContext
 from .harness import get_adapter
 from .ptyrun import run_in_pty
@@ -189,6 +190,7 @@ class InteractiveRunner:
         sentinel = paths.tandem_home() / "tmp" / f"{session.tandem_id}-{active}.turn"
         sentinel.parent.mkdir(parents=True, exist_ok=True)
         argv = adapter.interactive_argv(active_sid, fresh)
+        argv += load_harness_args(active)
         argv += adapter.hook_argv_extra(sentinel)
 
         stop = threading.Event()
