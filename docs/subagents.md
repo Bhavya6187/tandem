@@ -1,7 +1,7 @@
 # GPT subagents
 
-Dispatch delegated tasks from Claude Code to a GPT model — the full
-setup, configuration, and routing reference. (Back to the
+Dispatch delegated tasks from Claude Code to a GPT model. Basic setup
+first; the full configuration and routing reference after. (Back to the
 [README](../README.md).)
 
 Load tandem's Claude Code plugin and GPT subagents are one ask away: "ask
@@ -15,7 +15,10 @@ main thread. Two pieces: the `tandem` binary the hook shells out to, and
 the plugin that registers the hook — the plugin lives in this repo, not in
 the wheel, and without the binary on PATH it is inert.
 
-## Install the plugin
+## Basic setup
+
+No config file needed: routing is manual by default. All the basics need
+is the `codex` CLI installed and signed in, plus tandem and its plugin:
 
 ```bash
 uv tool install tandem-cli   # the binary the hook drives
@@ -30,14 +33,22 @@ tandem plugin install   # = claude plugin marketplace add Bhavya6187/tandem
                         #   + claude plugin install tandem@tandem
 ```
 
+That's it. In any tandem-paired Claude session, ask: "ask gpt to review
+this migration", or pin a model by name: "ask sol to review it". The
+worker runs on your codex account's default model, read-only, and its
+answer comes back like any subagent's. Everything below is optional
+tuning.
+
 The marketplace tracks this repo's default branch, but nothing updates
 behind your back: the first-launch offer asks before touching anything, and
 you pull new versions when you run `claude plugin marketplace update` (or
 `/plugin marketplace update` inside Claude).
 
-## Pick the worker model
+## Advanced
 
-Then create `~/.tandem/config.toml` and pick your plan's cheap model as the
+### Pick the worker model
+
+Create `~/.tandem/config.toml` and pick your plan's cheap model as the
 worker default — the ids your account can actually use are listed in
 `~/.codex/models_cache.json`, the same catalog a per-dispatch model request
 resolves against:
@@ -56,7 +67,7 @@ that one is not, and an explicitly asked-for gpt subagent bills that
 default just as automatic rerouting would, so `tandem doctor` warns until
 you set it.
 
-## Routing modes
+### Routing modes
 
 - `route = "manual"` (the default) keeps dispatches on Claude until you ask
   for codex — "use gpt subagents for this", "ask codex to review the
@@ -77,7 +88,7 @@ you set it.
   Claude and GPT both review this" comes back as codex twice — `manual` is
   the mode where mix-and-match works.
 
-## Write access and the sandbox
+### Write access and the sandbox
 
 - Write access follows your Claude permission mode. Dispatch while you're in
   `acceptEdits` or `bypassPermissions` and the codex worker runs with
@@ -96,27 +107,6 @@ you set it.
   loop guard matches on the last segment of the agent name in any scope — so
   a local `.claude/agents/gpt.md` of yours keeps dispatching natively.
 
-## Per-harness startup args
-
-Optional per-harness tables add flags to every interactive session tandem
-opens (`tandem`, `tandem resume`) — one-off relays (`tandem run`),
-subagent dispatch, and doctor probes are unaffected:
-
-```toml
-[claude]
-args = ["--dangerously-skip-permissions"]
-
-[codex]
-args = ["--dangerously-bypass-approvals-and-sandbox"]
-```
-
-The flags shown disable the harnesses' own permission prompts for
-sessions tandem launches — set them only if that is what you want.
-The list is passed to the harness raw: a flag that expects a value can
-swallow the settings tandem appends after it and break turn tracking.
-Malformed values (a non-list, empty or non-string elements) are
-silently ignored rather than failing the launch.
-
 ## Day to day
 
 Fork dispatches stay on Claude even under `route = "all"`, each worker's
@@ -132,3 +122,7 @@ remove tandem` to also unregister the marketplace.
 
 Hacking on the plugin itself? Skip the marketplace and point Claude at your
 clone: `claude --plugin-dir /path/to/tandem/plugin`.
+
+Startup flags for the harnesses themselves (`[claude]` / `[codex]` args)
+are not a subagent setting; they live in the
+[configuration reference](configuration.md).
