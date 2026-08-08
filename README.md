@@ -11,8 +11,7 @@ main thread.
 
 ![gpt subagent demo — ask for a GPT review in Claude Code, tandem dispatches a codex worker, the verdict comes back, fixes get committed](https://raw.githubusercontent.com/Bhavya6187/tandem/main/docs/gpt-subagent.gif)
 
-Setup and the full routing story:
-[Subagents on the cheap model](#-subagents-on-the-cheap-model).
+Setup and the full routing story: [GPT subagents guide](https://github.com/Bhavya6187/tandem/blob/main/docs/subagents.md).
 
 ---
 
@@ -80,120 +79,18 @@ tandem run --on codex "second opinion: why is this test flaky?"
 ### 🐣 Subagents on the cheap model.
 
 Load tandem's Claude Code plugin and GPT subagents are one ask away: "ask
-gpt to review this migration" runs the dispatch on a codex model instead of
-Claude's, with the task brief forwarded verbatim. Name a model — "ask
-gpt-5.4-mini to review it" — and the worker runs on exactly that one. Want
-every dispatch rerouted without asking each time? Set `route = "all"`.
-Either way the result comes back through Claude's own machinery. Claude
-orchestrates; codex does the legwork; your Claude quota stays on the
-main thread. Two pieces: the `tandem` binary the hook shells out to, and
-the plugin that registers the hook — the plugin lives in this repo, not in
-the wheel, and without the binary on PATH it is inert.
+gpt to review this migration" runs the dispatch on a codex model instead
+of Claude's, with the task brief forwarded verbatim. Name a model to pin
+one, or set `route = "all"` to reroute every dispatch without asking.
+Claude orchestrates; codex does the legwork; your Claude quota stays on
+the main thread.
 
 ```bash
-uv tool install tandem-cli   # the binary the hook drives
-tandem                       # first launch offers the plugin install — hit enter
+tandem plugin install
 ```
 
-Said no at the prompt, or running non-interactively? One command performs
-both marketplace steps whenever you're ready:
-
-```bash
-tandem plugin install   # = claude plugin marketplace add Bhavya6187/tandem
-                        #   + claude plugin install tandem@tandem
-```
-
-The marketplace tracks this repo's default branch, but nothing updates
-behind your back: the first-launch offer asks before touching anything, and
-you pull new versions when you run `claude plugin marketplace update` (or
-`/plugin marketplace update` inside Claude).
-
-Then create `~/.tandem/config.toml` and pick your plan's cheap model as the
-worker default — the ids your account can actually use are listed in
-`~/.codex/models_cache.json`, the same catalog a per-dispatch model request
-resolves against:
-
-```toml
-[subagents]
-model = "gpt-5.6-luna"  # ← the whole point: set this
-route = "manual"        # manual | all | off
-context = "match"       # match | task | full
-keep_forks = false      # keep each worker's rollout for debugging
-```
-
-**Without `model`, workers run on your codex account's default model —
-probably not the cheap one.** Every other key above is already the default;
-that one is not, and an explicitly asked-for gpt subagent bills that
-default just as automatic rerouting would, so `tandem doctor` warns until
-you set it.
-
-- `route = "manual"` (the default) keeps dispatches on Claude until you ask
-  for codex — "use gpt subagents for this", "ask codex to review the
-  migration". Name a model in the ask and the request rides along as a
-  `tandem-model:` first line in the brief, which tandem resolves against
-  your codex install's own catalog before codex is ever invoked; say the
-  name however you say it out loud, since matching ignores case and
-  punctuation. A name that resolves to nothing fails fast, listing the
-  slugs your account actually offers, while a generic one ("gpt", "codex")
-  names no model at all and just runs your `model` above — or your codex
-  account's default, reported as `codex default`. A reply from a
-  model-pinned dispatch ends with a `[tandem-sub model: …]` trailer naming
-  what ran.
-  (`route = "off"` is the same routing silence, but `manual` keeps `tandem
-  doctor`'s subagent checks on, since you still send work to codex.)
-- `route = "all"` reroutes every native subagent dispatch to codex
-  automatically, no asking. It's all or nothing, though: under `all`, "have
-  Claude and GPT both review this" comes back as codex twice — `manual` is
-  the mode where mix-and-match works.
-- Write access follows your Claude permission mode. Dispatch while you're in
-  `acceptEdits` or `bypassPermissions` and the codex worker runs with
-  `--sandbox workspace-write`; in any other mode tandem passes no sandbox
-  flag at all, so the worker gets codex's own default — read-only, unless
-  you configured codex otherwise. A read-only worker that tried to edit
-  files comes back with a `[tandem-sub blocked: write]` trailer naming the
-  rejected paths; then it's your call — have it rerun with `tandem sub -q
-  --sandbox workspace-write`, or apply what it returned yourself.
-- Know the trust boundary: `--sandbox` on `tandem sub` overrides whatever
-  consent your permission mode stamped, and the only thing stopping a task
-  brief from talking the relay into adding that flag is the relay's own
-  instructions — so dispatching a task brief you don't trust is handing that
-  text the relay's privileges.
-- Your own agents named `gpt` or `codex-worker` are never rerouted — the
-  loop guard matches on the last segment of the agent name in any scope — so
-  a local `.claude/agents/gpt.md` of yours keeps dispatching natively.
-
-Optional per-harness tables add flags to every interactive session tandem
-opens (`tandem`, `tandem resume`) — one-off relays (`tandem run`),
-subagent dispatch, and doctor probes are unaffected:
-
-```toml
-[claude]
-args = ["--dangerously-skip-permissions"]
-
-[codex]
-args = ["--dangerously-bypass-approvals-and-sandbox"]
-```
-
-The flags shown disable the harnesses' own permission prompts for
-sessions tandem launches — set them only if that is what you want.
-The list is passed to the harness raw: a flag that expects a value can
-swallow the settings tandem appends after it and break turn tracking.
-Malformed values (a non-list, empty or non-string elements) are
-silently ignored rather than failing the launch.
-
-Fork dispatches stay on Claude even under `route = "all"`, each worker's
-full codex log is kept under `~/.tandem/subagents/`, and `tandem status`
-lists the workers running right now. The plugin is installed for every
-Claude session, but nothing reaches codex from a directory with no paired
-tandem session: dispatches run natively (under `route = "all"` the first
-one says so once, then the session stays quiet), and a hand-picked gpt
-subagent there comes back telling you to run `tandem` in that directory
-first. `claude plugin uninstall
-tandem@tandem` and Claude is stock again — add `claude plugin marketplace
-remove tandem` to also unregister the marketplace.
-
-Hacking on the plugin itself? Skip the marketplace and point Claude at your
-clone: `claude --plugin-dir /path/to/tandem/plugin`.
+Config reference, routing modes, and the sandbox rules:
+[GPT subagents guide](https://github.com/Bhavya6187/tandem/blob/main/docs/subagents.md).
 
 ### 🏠 Every model in its native harness.
 
@@ -259,106 +156,17 @@ check: verifies both sessions are resumable), `tandem sync` (manual
 catch-up translation), and `tandem sync-mcp` (share MCP server configs
 between the tools).
 
-## How it works
+## Docs
 
-- **One model per command — always.** Only the active harness's model is
-  ever invoked (or, for `run --on`, the target's). The shadow side is pure
-  local file I/O: tandem tails the active transcript, translates each
-  entry, and appends it to the shadow's session file. The shadow's model
-  is never called to "catch up".
-- **A persistent prompt, not the OS shell.** Leaving the harness lands you
-  at `tandem (claude)>`. There, `switch` flips roles and drops you
-  straight into the other tool, Enter re-enters the current one, and
-  `status` / `sync` / `doctor` / `run --on` / `sync-mcp` all run against
-  this session. `exit` (or Ctrl-D) returns to your shell and prints the
-  resume hint. Every command also works one-shot from your shell,
-  targeting the directory's most recently used session.
-- **PTY passthrough.** tandem launches the real CLI on a pty (raw mode,
-  resize forwarding, signals through the line discipline) and never
-  scrapes terminal output — the transcript files are the source of truth.
-  Turn-complete hooks (`claude --settings` Stop hook, `codex -c
-  notify=[…]`) are wired per-invocation as wake-up signals, with
-  fs-watching as the data path and fallback. If your codex config already
-  sets `notify`, tandem leaves it alone.
-- **Append-only, crash-safe sync.** Each transcript entry is translated as
-  it lands — no bulk re-export at switch time. Appends are whole-line +
-  fsync, and a write-ahead intent in the sync cursor makes translation
-  exactly-once across crashes; on restart, sync resumes from the last
-  confirmed entry.
-- **Tool calls translate natively.** The harnesses speak different tool
-  vocabularies, so each completed call+result pair is re-expressed in the
-  shadow's own terms — `Bash` ↔ `exec_command`, `Edit`/`Write` ↔
-  `apply_patch`, `TodoWrite` ↔ `update_plan` — and lands as a real
-  tool-call record, so shadow history reads as the shadow's own work.
-  Anything that wouldn't map truthfully passes through verbatim; a call
-  whose result never arrived is closed with a `(tool result not recorded)`
-  placeholder at handoff, since both replay APIs reject dangling calls.
-- **Attribution stays legible.** Every synced *text* message is tagged
-  `[via claude-code]` / `[via codex]` (tandem's own notes use `[tandem]`),
-  so interleaved histories make sense to you and to the models. Tool
-  activity is untagged — it's mirrored as native records, not prose.
-- **Errors are contained.** An entry that fails translation becomes a
-  single per-turn placeholder in the shadow, with the raw entry
-  quarantined under `~/.tandem/quarantine/…` — and sync continues. The
-  shadow is never corrupted or truncated.
-- **Memory files stay in step.** Fresh launches and every switch sync
-  CLAUDE.md ↔ AGENTS.md: shared content lives in a
-  `<!-- tandem:shared:begin/end -->` block (newer file wins),
-  tool-specific text outside the block is preserved, and a file without
-  markers is read from but never rewritten. Git state is never touched.
-
-## Compatibility
-
-Session formats are internal to the CLIs and drift between releases.
-tandem pins what it was built against (observed formats documented in
-[docs/formats.md](https://github.com/Bhavya6187/tandem/blob/main/docs/formats.md)):
-
-| CLI | Tested | Accepted range |
-| --- | --- | --- |
-| Claude Code | 2.1.220 | ≥ 2.0, < 3 |
-| Codex CLI | 0.145.0 | ≥ 0.140, < 0.150 |
-
-Outside the range, tandem warns and asks you to run `tandem doctor`.
-Format knowledge is isolated per tool in
-`src/tandem/harness/claude_code.py` and `src/tandem/harness/codex.py`.
-
-## Where your data lives
-
-- `~/.tandem/state.db` — SQLite: session pairing + per-source sync cursors
-  (override the directory with `TANDEM_HOME`)
-- `~/.tandem/quarantine/<session>/` — raw entries that failed translation
-- `~/.claude/projects/<munged-cwd>/<session-id>.jsonl` — claude transcript
-- `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<session-id>.jsonl` — codex
-  rollout (`CLAUDE_CONFIG_DIR` / `CODEX_HOME` honored)
-
-Claude session ids are minted by tandem (`claude --session-id`); codex
-mints its own on first run and tandem captures it from the new rollout
-file.
-
-## Extending tandem
-
-The sync engine talks to a small adapter interface
-(`tandem.converter.TraceConverter`):
-
-```python
-class TraceConverter(Protocol):
-    def translate_entry(entry, direction, ctx) -> list[TargetEntry] | TranslationError
-```
-
-`ReferenceConverter` implements it via a normalized event model
-(`tandem/events.py`) derived from the observed formats. Pass your own
-converter to `SyncEngine(store, session, source, converter=...)`.
-
-## Development
-
-```bash
-uv sync && uv run pytest
-pipx install .        # or: uv tool install .
-```
-
-Dependencies are deliberately small: `click` (CLI), `pydantic` v2 (event
-schema), `watchdog` (transcript tailing), `pexpect`/ptyprocess (PTY
-passthrough); state is stdlib `sqlite3`.
+- [GPT subagents — install, config & routing](https://github.com/Bhavya6187/tandem/blob/main/docs/subagents.md) —
+  plugin install, `config.toml` reference, routing modes, sandbox & trust
+  boundary
+- [How tandem works](https://github.com/Bhavya6187/tandem/blob/main/docs/how-it-works.md) — sync engine, PTY
+  passthrough, compatibility ranges, where your data lives
+- [Developing tandem](https://github.com/Bhavya6187/tandem/blob/main/docs/development.md) — dev setup and the
+  converter adapter interface
+- [Observed session formats](https://github.com/Bhavya6187/tandem/blob/main/docs/formats.md) — the claude/codex
+  transcript details tandem is pinned against
 
 ## License
 
