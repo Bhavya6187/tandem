@@ -4,7 +4,7 @@ Ask for a second opinion without leaving Claude Code. Type "get the code
 reviewed by gpt" like you'd ask for anything else — tandem's plugin
 dispatches a codex worker with the full task brief, GPT's verdict lands
 back in your Claude session, and Claude applies the fixes. Name any model
-your codex account offers ("ask gpt-5.4-mini to review it"), or set a
+your codex account offers ("ask sol to review it"), or set a
 cheap default once and let every dispatch ride on it: Claude
 orchestrates, codex does the legwork, and your Claude quota stays on the
 main thread.
