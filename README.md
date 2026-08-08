@@ -1,13 +1,11 @@
 ## 🆕 New in 0.2 — GPT subagents
 
-Ask for a second opinion without leaving Claude Code. Type "get the code
-reviewed by gpt" like you'd ask for anything else — tandem's plugin
-dispatches a codex worker with the full task brief, GPT's verdict lands
-back in your Claude session, and Claude applies the fixes. Name any model
-your codex account offers ("ask sol to review it"), or set a
-cheap default once and let every dispatch ride on it: Claude
-orchestrates, codex does the legwork, and your Claude quota stays on the
-main thread.
+Call another model family without leaving Claude Code. Type "get the
+code reviewed by gpt" and tandem's plugin hands the task to a local
+codex worker. GPT's verdict lands back in your Claude session, and
+Claude applies the fixes. Pin any model your codex account offers ("ask
+sol to review it") or set a cheap default once. Your Claude quota stays
+on the main thread.
 
 ![gpt subagent demo — ask for a GPT review in Claude Code, tandem dispatches a codex worker, the verdict comes back, fixes get committed](https://raw.githubusercontent.com/Bhavya6187/tandem/main/docs/gpt-subagent.gif)
 
@@ -76,20 +74,21 @@ text between terminals:
 tandem run --on codex "second opinion: why is this test flaky?"
 ```
 
-### 🐣 Subagents on the cheap model.
+### 🐣 Other model families, inside Claude Code.
 
-Load tandem's Claude Code plugin and GPT subagents are one ask away: "ask
-gpt to review this migration" runs the dispatch on a codex model instead
-of Claude's, with the task brief forwarded verbatim. Name a model to pin
-one, or set `route = "all"` to reroute every dispatch without asking.
-Claude orchestrates; codex does the legwork; your Claude quota stays on
-the main thread.
+Claude Code dispatches subagents on Claude models only. tandem's plugin
+lifts that limit: say "ask gpt to review this migration" and the task
+runs on a local codex worker instead, with the brief forwarded verbatim
+and the result returned through Claude's own machinery. Name a model to
+pin one, or set `route = "all"` to reroute every dispatch. Claude
+orchestrates; codex does the legwork; your Claude quota stays on the
+main thread.
 
 ```bash
 tandem plugin install
 ```
 
-Config reference, routing modes, and the sandbox rules:
+Basic setup, routing modes, and the sandbox rules:
 [GPT subagents guide](https://github.com/Bhavya6187/tandem/blob/main/docs/subagents.md).
 
 ### 🏠 Every model in its native harness.
@@ -158,9 +157,11 @@ between the tools).
 
 ## Docs
 
-- [GPT subagents — install, config & routing](https://github.com/Bhavya6187/tandem/blob/main/docs/subagents.md) —
-  plugin install, `config.toml` reference, routing modes, sandbox & trust
-  boundary
+- [GPT subagents — basic setup & routing](https://github.com/Bhavya6187/tandem/blob/main/docs/subagents.md) —
+  plugin install, worker model, routing modes, sandbox & trust boundary
+- [Configuration](https://github.com/Bhavya6187/tandem/blob/main/docs/configuration.md) —
+  the optional `~/.tandem/config.toml`: subagent worker settings,
+  per-harness startup args
 - [How tandem works](https://github.com/Bhavya6187/tandem/blob/main/docs/how-it-works.md) — sync engine, PTY
   passthrough, compatibility ranges, where your data lives
 - [Developing tandem](https://github.com/Bhavya6187/tandem/blob/main/docs/development.md) — dev setup and the
