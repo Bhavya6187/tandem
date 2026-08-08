@@ -7,7 +7,7 @@ setup, configuration, and routing reference. (Back to the
 Load tandem's Claude Code plugin and GPT subagents are one ask away: "ask
 gpt to review this migration" runs the dispatch on a codex model instead of
 Claude's, with the task brief forwarded verbatim. Name a model — "ask
-gpt-5.4-mini to review it" — and the worker runs on exactly that one. Want
+sol to review it" — and the worker runs on exactly that one. Want
 every dispatch rerouted without asking each time? Set `route = "all"`.
 Either way the result comes back through Claude's own machinery. Claude
 orchestrates; codex does the legwork; your Claude quota stays on the
@@ -76,6 +76,7 @@ you set it.
   automatically, no asking. It's all or nothing, though: under `all`, "have
   Claude and GPT both review this" comes back as codex twice — `manual` is
   the mode where mix-and-match works.
+
 ## Write access and the sandbox
 
 - Write access follows your Claude permission mode. Dispatch while you're in
