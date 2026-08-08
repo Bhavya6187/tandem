@@ -85,7 +85,8 @@ orchestrates; codex does the legwork; your Claude quota stays on the
 main thread.
 
 ```bash
-tandem plugin install
+tandem                  # first launch offers the plugin install — hit enter
+tandem plugin install   # or install it explicitly, anytime
 ```
 
 Basic setup, routing modes, and the sandbox rules:
@@ -148,7 +149,7 @@ tandem resume a1b2c3d4e5f6   # a specific one (id from the exit hint)
 | `tandem run --on codex "…"` | One-off prompt to the *other* agent, with full context |
 | `tandem sub "…"` | Run one delegated task on a codex model (used by the plugin's reroute hook; `--sandbox read-only\|workspace-write` overrides the dispatching session's write consent) |
 | `tandem status` | Show pairing, roles, and sync position |
-| `tandem plugin install` | Install the tandem Claude Code plugin through claude's own CLI (marketplace add + install) |
+| `tandem plugin install` | Install the Claude Code plugin through claude's own CLI (also offered automatically on first `tandem` launch) |
 
 There are also three maintenance commands — `tandem doctor` (health
 check: verifies both sessions are resumable), `tandem sync` (manual
