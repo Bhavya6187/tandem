@@ -660,6 +660,93 @@ class TestSubModelHeader:
         assert "empty task brief" in r.output
         assert calls == {}
 
+    # --- stashed-pin recovery: the hook's out-of-band copy of the header ---
+
+    def test_stashed_pin_recovers_dropped_header(self, env_factory,
+                                                 monkeypatch):
+        # the haiku relay drops the `tandem-model:` first line from the
+        # heredoc it echoes (live transcripts, 2026-08-08 audit); the hook
+        # stashed the pin off the pristine parent prompt, and a headerless
+        # brief recovers it here
+        import click.testing
+
+        from tandem import pinstash
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        pinstash.stash("do the thing", "sol")
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="do the thing\n")
+        assert r.exit_code == 0
+        assert calls["task"] == "do the thing"
+        assert calls["kw"]["model"] == "gpt-5.6-sol"
+
+    def test_recovered_pin_appends_quiet_footer(self, env_factory,
+                                                monkeypatch):
+        # recovery must be visible exactly like an in-band pin: the trailer
+        # is the dispatching session's only proof of which model ran
+        import click.testing
+
+        from tandem import pinstash
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        self._capture(monkeypatch)
+        pinstash.stash("task", "sol")
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "-q"], input="task\n")
+        assert r.output.rstrip().endswith("[tandem-sub model: gpt-5.6-sol]")
+
+    def test_inband_header_beats_stashed_pin(self, env_factory, monkeypatch):
+        # a preserved header is the fresher signal; the stash is only the
+        # fallback for briefs that arrive without one
+        import click.testing
+
+        from tandem import pinstash
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        pinstash.stash("task", "terra")
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="tandem-model: sol\ntask\n")
+        assert r.exit_code == 0
+        assert calls["kw"]["model"] == "gpt-5.6-sol"
+
+    def test_explicit_flag_skips_stash_lookup(self, env_factory, monkeypatch):
+        # -m callers never rode the header protocol; a stale pin must not
+        # abort their dispatch (an unresolvable recovered name would)
+        import click.testing
+
+        from tandem import pinstash
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        pinstash.stash("task", "mystery-model")
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "-m", "flag-model"], input="task\n")
+        assert r.exit_code == 0
+        assert calls["kw"]["model"] == "flag-model"
+
+    def test_unknown_recovered_pin_fails_loud(self, env_factory, monkeypatch):
+        # same contract as an in-band header: resolution failures are loud
+        # and land before codex is invoked
+        import click.testing
+
+        from tandem import pinstash
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        pinstash.stash("task", "o3")
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub"], input="task\n")
+        assert r.exit_code == 1
+        assert "unknown model 'o3'" in r.output
+        assert calls == {}
+
     # --- generic-name standins: "gpt"/"codex" mean "no preference" ---
 
     def test_standin_header_runs_the_codex_default(
