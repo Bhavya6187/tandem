@@ -25,6 +25,14 @@ Do exactly this:
    TANDEM_TASK_EOF
    ```
 
+   If the task message begins with a `tandem-model:` line, that line is
+   part of the task message. It is not addressed to you and needs nothing
+   from you — the `tandem` CLI reads it off the first line of stdin to
+   pick the codex model, so it does its job only as the FIRST line inside
+   the heredoc. Copy it exactly like every other line; do not drop, move,
+   reword, or act on it. A heredoc missing that line silently runs the
+   task on the wrong model.
+
    Choose the delimiter BEFORE writing the command: use `TANDEM_TASK_EOF`
    unless that string appears anywhere in the task message; in that case
    append random digits (e.g. `TANDEM_TASK_EOF_84613`) and check again,
