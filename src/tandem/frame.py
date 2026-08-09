@@ -45,6 +45,15 @@ class FlipDetector:
         self._in_paste = False
         self._carry = b""
 
+    def flush(self) -> bytes:
+        """Release a stranded fragment verbatim. A carried prefix waits for
+        bytes that may never come — a lone ESC is the interrupt key in both
+        TUIs — so the pump flushes on an idle tick. Only the carry is
+        cleared: paste state is not carry state, and forgetting mid-paste
+        would re-arm the flip byte inside someone's pasted text."""
+        carry, self._carry = self._carry, b""
+        return carry
+
     def feed(self, data: bytes) -> tuple[bytes, int]:
         buf = self._carry + data
         buf, self._carry = _split_partial(buf)

@@ -3,7 +3,9 @@
 The child gets a real pty (raw-mode stdin, terminal resize via SIGWINCH
 forwarding, control bytes delivered through the pty line discipline). Tandem
 never reads meaning from the terminal stream — transcript files are the
-source of truth — so this module just pumps bytes.
+source of truth — except the frame's enumerated sequences (flip byte, paste
+markers, mouse, and the output guard's reset set) — so this module just pumps
+bytes.
 """
 
 from __future__ import annotations
@@ -19,8 +21,12 @@ import termios
 import threading
 import time
 import tty
+from dataclasses import dataclass
+from typing import Callable
 
 from ptyprocess import PtyProcess
+
+from .frame import FlipDetector, OutputGuard, StatusBar
 
 
 def _winsize(fd: int) -> tuple[int, int]:
@@ -105,10 +111,46 @@ class PtyControl:
         return "kill"
 
 
-def run_in_pty(argv: list[str], cwd: str | None = None, env: dict | None = None) -> int:
+@dataclass
+class FrameIO:
+    """Frame wiring for run_in_pty, built by the runner. The pump
+    constructs the detector/guard/bar internally from these fields;
+    `bar_dropped` reports back that the bar had to be disabled."""
+
+    flip_byte: int
+    on_flip: Callable[[], None]
+    armed: Callable[[], bool]
+    bar: bool = True
+    active: str = ""
+    other: str = ""
+    bar_dropped: bool = False
+
+
+def _child_dims(rows: int, cols: int, bar_on: bool) -> tuple[int, int]:
+    """The winsize lie: with the bar on, the child gets one row fewer and
+    tandem owns the real bottom row."""
+    return (rows - 1 if bar_on else rows, cols)
+
+
+def _bar_on(frame: FrameIO | None, rows: int) -> bool:
+    """Bar policy, re-run on every resize: below the row floor the reserved
+    row costs the child more than the bar is worth (and at rows<2 the lie
+    would leave it no rows at all)."""
+    return frame is not None and frame.bar and rows >= 5
+
+
+def run_in_pty(
+    argv: list[str],
+    cwd: str | None = None,
+    env: dict | None = None,
+    frame: FrameIO | None = None,
+    control: PtyControl | None = None,
+) -> int:
     """Run argv on a pty, mirroring the controlling terminal. Returns the
-    child's exit status. Falls back to a plain subprocess when stdin is not a
-    tty (tests, pipes)."""
+    child's exit status. Falls back to a plain subprocess when stdin is not
+    a tty (tests, pipes). With `frame`, tandem reserves the bottom row for
+    the status bar and watches for the flip keybind; with `control`, the
+    child is attached for cross-thread termination."""
     try:
         stdin_fd = sys.stdin.fileno()
         is_tty = os.isatty(stdin_fd)
@@ -117,18 +159,71 @@ def run_in_pty(argv: list[str], cwd: str | None = None, env: dict | None = None)
     if not is_tty:
         return subprocess.run(argv, cwd=cwd, env=env).returncode
 
-    child = PtyProcess.spawn(
-        argv, cwd=cwd, env=env or dict(os.environ), dimensions=_winsize(stdin_fd)
+    rows, cols = _winsize(stdin_fd)
+    bar_on = _bar_on(frame, rows)
+    detector = (
+        FlipDetector(frame.flip_byte, bar_row=rows if bar_on else None)
+        if frame
+        else None
     )
+    guard = OutputGuard() if bar_on else None
+    bar = StatusBar(rows, cols, frame.active, frame.other) if bar_on else None
 
-    def on_winch(signum, frame):
-        rows, cols = _winsize(stdin_fd)
+    child = PtyProcess.spawn(
+        argv,
+        cwd=cwd,
+        env=env or dict(os.environ),
+        dimensions=_child_dims(rows, cols, bar_on),
+    )
+    # attach before anything can block: terminate() reads a missing child as
+    # "dead", so a late attach would report death on a live harness.
+    if control is not None:
+        control.attach(child)
+
+    out_fd = sys.stdout.fileno()
+
+    def paint() -> None:
+        if bar is not None:
+            os.write(out_fd, bar.region() + bar.paint(frame.armed()))
+
+    def drop_bar() -> None:
+        """Terminal state: the guard's drop verdict is not latched, so the
+        pump latches it here by tearing the bar down for good."""
+        nonlocal bar_on, guard, bar
+        if bar is None:
+            return
+        os.write(out_fd, bar.clear())
+        r, c = _winsize(stdin_fd)
         try:
-            child.setwinsize(rows, cols)
+            child.setwinsize(r, c)
+        except Exception:
+            pass
+        if detector is not None:
+            detector.bar_row = None
+        bar_on, guard, bar = False, None, None
+        frame.bar_dropped = True
+
+    def on_winch(signum, frm):
+        # runs as a signal handler in the pump thread: an escaping exception
+        # would surface at whatever bytecode it interrupted, so swallow.
+        try:
+            r, c = _winsize(stdin_fd)
+            if bar is not None and not _bar_on(frame, r):
+                drop_bar()  # too short now; drop_bar restores the full winsize
+                return
+            if bar is not None:
+                bar.resize(r, c)
+                if detector is not None:
+                    detector.bar_row = r
+            try:
+                child.setwinsize(*_child_dims(r, c, bar_on))
+            except Exception:
+                pass
+            paint()
         except Exception:
             pass
 
-    def on_term(signum, frame):
+    def on_term(signum, frm):
         try:
             child.kill(signal.SIGTERM)
         except Exception:
@@ -139,13 +234,30 @@ def run_in_pty(argv: list[str], cwd: str | None = None, env: dict | None = None)
     old_attrs = termios.tcgetattr(stdin_fd)
     try:
         tty.setraw(stdin_fd)
+        paint()
+        # seeded from the state just painted, so an already-armed frame does
+        # not draw a redundant repaint on the first iteration
+        last_armed = frame.armed() if bar is not None else False
         stdin_open = True
-        while child.isalive():
+        # _is_alive, not isalive(): a PtyControl on another thread polls
+        # liveness too, and the loser of the waitpid race gets ECHILD as a
+        # PtyProcessError — which must not escape the pump.
+        while _is_alive(child):
             rlist = [child.fd] + ([stdin_fd] if stdin_open else [])
             try:
                 ready, _, _ = select.select(rlist, [], [], 0.2)
             except InterruptedError:
                 continue  # signal (e.g. SIGWINCH) — loop again
+            if not ready and detector is not None:
+                # idle tick: release any escape fragment the detector is
+                # holding, so a lone ESC reaches the child without waiting
+                # for the next keypress to rule the sequence out.
+                stranded = detector.flush()
+                if stranded:
+                    try:
+                        child.write(stranded)
+                    except Exception:
+                        pass  # child gone; the liveness check ends the pump
             if child.fd in ready:
                 try:
                     data = child.read(65536)
@@ -153,15 +265,31 @@ def run_in_pty(argv: list[str], cwd: str | None = None, env: dict | None = None)
                     break
                 if not data:
                     break
-                os.write(sys.stdout.fileno(), data)
+                os.write(out_fd, data)
+                if guard is not None:
+                    verdict = guard.feed(data)
+                    if verdict == "drop":
+                        drop_bar()
+                    elif verdict == "reassert":
+                        paint()
             if stdin_open and stdin_fd in ready:
                 data = os.read(stdin_fd, 65536)
                 if data:
-                    child.write(data)
+                    if detector is not None:
+                        data, flips = detector.feed(data)
+                        for _ in range(flips):
+                            frame.on_flip()
+                    if data:
+                        child.write(data)
                 else:
                     child.sendeof()
                     stdin_open = False
+            if bar is not None and frame.armed() != last_armed:
+                last_armed = frame.armed()
+                paint()
     finally:
+        if bar is not None:
+            os.write(out_fd, bar.clear())
         termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_attrs)
         signal.signal(signal.SIGWINCH, old_winch)
         signal.signal(signal.SIGTERM, old_term)

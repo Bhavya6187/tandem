@@ -1,6 +1,6 @@
 import sys
 
-from tandem.ptyrun import PtyControl, run_in_pty
+from tandem.ptyrun import FrameIO, PtyControl, _bar_on, _child_dims, run_in_pty
 
 
 def test_non_tty_fallback_runs_subprocess(capfd):
@@ -103,3 +103,53 @@ def test_terminate_survives_reap_race_mid_ladder():
     c = PtyControl()
     c.attach(_ReapedChild(alive_checks_before_raise=1))
     assert c.terminate([b"\x04"], soft_timeout=0.2, term_timeout=0.2) == "soft"
+
+
+def test_child_dims_reserves_bottom_row_when_bar_on():
+    assert _child_dims(40, 120, bar_on=True) == (39, 120)
+    assert _child_dims(40, 120, bar_on=False) == (40, 120)
+
+
+def test_bar_activation_policy():
+    frame = FrameIO(flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False)
+    assert _bar_on(frame, rows=40) is True
+    assert _bar_on(frame, rows=4) is False      # too small
+    assert _bar_on(None, rows=40) is False      # no frame wiring
+    frame_off = FrameIO(
+        flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False, bar=False
+    )
+    assert _bar_on(frame_off, rows=40) is False  # [frame] bar = false
+
+
+def test_bar_policy_leaves_the_child_at_least_one_row_at_every_size():
+    # on_winch re-runs _bar_on precisely so the winsize lie can never hand the
+    # child a 0-row terminal: wherever the policy allows the bar, the reserved
+    # row still leaves the child rows to live on; where it doesn't, the child
+    # gets the terminal whole.
+    frame = FrameIO(flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False)
+    for rows in range(0, 12):
+        if _bar_on(frame, rows):
+            assert _child_dims(rows, 80, bar_on=True)[0] >= 1
+        else:
+            assert _child_dims(rows, 80, bar_on=False) == (rows, 80)
+
+
+def test_frame_io_defaults():
+    frame = FrameIO(flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False)
+    assert frame.bar is True
+    assert (frame.active, frame.other) == ("", "")
+    assert frame.bar_dropped is False
+
+
+def test_non_tty_fallback_ignores_frame_and_control(capfd):
+    from tandem.ptyrun import PtyControl
+
+    frame = FrameIO(flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False)
+    code = run_in_pty(
+        [sys.executable, "-c", "print('fallback-ok')"],
+        frame=frame,
+        control=PtyControl(),
+    )
+    assert code == 0
+    assert "fallback-ok" in capfd.readouterr().out
+    assert frame.bar_dropped is False        # nothing to drop off-tty

@@ -331,3 +331,39 @@ def test_bar_region_and_clear_track_resize():
     bar.resize(rows=30, cols=50)
     assert bar.region() == b"\x1b7\x1b[1;29r\x1b8"
     assert bar.clear() == b"\x1b7\x1b[r\x1b[30;1H\x1b[2K\x1b8"
+
+
+def test_flush_returns_and_clears_carry():
+    # a lone ESC sits in the carry until the next keypress rules the sequence
+    # out — and ESC is the interrupt key in both TUIs, so the pump flushes the
+    # carry on an idle tick rather than making the user press another key
+    d = FlipDetector(FLIP)
+    out, flips = d.feed(b"\x1b")
+    assert out == b"" and flips == 0
+    assert d.flush() == b"\x1b"
+    assert d.flush() == b""                  # carry is cleared, not re-emitted
+
+
+def test_flush_empty_when_nothing_carried():
+    d = FlipDetector(FLIP)
+    d.feed(b"hello")
+    assert d.flush() == b""
+
+
+def test_flush_preserves_paste_state():
+    # paste state is not carry state: flushing a stranded fragment must not
+    # reopen the flip keybind in the middle of someone's paste
+    d = FlipDetector(FLIP)
+    d.feed(b"\x1b[200~abc")
+    d.feed(b"\x1b")
+    assert d.flush() == b"\x1b"
+    out, flips = d.feed(b"\x1d")
+    assert out == b"\x1d" and flips == 0     # still inside the paste
+
+
+def test_feed_after_flush_starts_clean():
+    d = FlipDetector(FLIP)
+    d.feed(b"\x1b[2")                        # possible paste marker, carried
+    assert d.flush() == b"\x1b[2"
+    out, flips = d.feed(b"00~\x1d")          # no longer a paste-begin
+    assert out == b"00~" and flips == 1
