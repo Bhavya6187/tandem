@@ -111,3 +111,55 @@ class OutputGuard:
             if m.end() > base:
                 return "reassert"
         return ""
+
+
+class StatusBar:
+    """Composes the bar's paint/region/clear byte strings for the real
+    bottom terminal row. The child is told the terminal is one row shorter
+    (identity row mapping for everything it can address); DECSTBM keeps
+    normal-buffer scrolling above the bar."""
+
+    def __init__(self, rows: int, cols: int, active: str, other: str):
+        self.rows = rows
+        self.cols = cols
+        self.active = active
+        self.other = other
+
+    def resize(self, rows: int, cols: int) -> None:
+        self.rows = rows
+        self.cols = cols
+
+    def line(self, armed: bool) -> str:
+        # padded and truncated by character count, so every glyph here must be
+        # one terminal cell wide: a two-cell glyph (any with East_Asian_Width
+        # W/F, e.g. ⏳ U+23F3) makes the painted row cols+1 cells and wraps off
+        # the last line. ● │ ○ ◐ are 'A' (ambiguous) — one cell outside
+        # CJK-wide terminal configs.
+        if armed:
+            text = f" {self.active} ◐ flipping at turn end…  ^] cancels"
+        else:
+            text = f" {self.active} ● │ {self.other} ○   ^] flips"
+        return text[: self.cols].ljust(self.cols)
+
+    def paint(self, armed: bool) -> bytes:
+        return (
+            b"\x1b7"
+            + f"\x1b[{self.rows};1H".encode()
+            + b"\x1b[7m"
+            + self.line(armed).encode()
+            + b"\x1b[0m\x1b8"
+        )
+
+    def region(self) -> bytes:
+        # DECSTBM homes the cursor, so save/restore around it. The bottom is
+        # floored at row 1: ioctl reports rows=0 when the size is unknown and
+        # 1-row panes exist, and `\x1b[1;0r` / `\x1b[1;-1r` would be ignored or
+        # malformed — leaving the previous region in force under the bar.
+        return b"\x1b7" + f"\x1b[1;{max(1, self.rows - 1)}r".encode() + b"\x1b8"
+
+    def clear(self) -> bytes:
+        return (
+            b"\x1b7\x1b[r"
+            + f"\x1b[{self.rows};1H".encode()
+            + b"\x1b[2K\x1b8"
+        )
