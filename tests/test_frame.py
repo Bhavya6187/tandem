@@ -1,6 +1,6 @@
 """Frame state machines: pure bytes-in/bytes-out, no PTY, no threads."""
 
-from tandem.frame import FlipDetector
+from tandem.frame import FlipDetector, OutputGuard
 
 FLIP = 0x1D  # Ctrl-]
 
@@ -126,3 +126,91 @@ def test_flip_after_dead_escape_fragment_still_fires():
     out2, f2 = d.feed(b"\x1d")
     assert out1 + out2 == b"\x1b[<"
     assert f1 + f2 == 1
+
+
+def test_guard_plain_output_no_verdict():
+    assert OutputGuard().feed(b"hello \x1b[31mred\x1b[0m") == ""
+
+
+def test_guard_clear_screen_triggers_reassert():
+    assert OutputGuard().feed(b"\x1b[2J") == "reassert"
+
+
+def test_guard_alt_screen_enter_and_leave_trigger_reassert():
+    g = OutputGuard()
+    assert g.feed(b"\x1b[?1049h") == "reassert"
+    assert g.feed(b"\x1b[?1049l") == "reassert"
+
+
+def test_guard_ris_triggers_reassert():
+    assert OutputGuard().feed(b"\x1bc") == "reassert"
+
+
+def test_guard_bare_region_reset_triggers_reassert():
+    assert OutputGuard().feed(b"\x1b[r") == "reassert"
+
+
+def test_guard_parameterized_region_triggers_drop():
+    # the child drives its own scroll regions: the bar cannot coexist
+    assert OutputGuard().feed(b"\x1b[5;40r") == "drop"
+
+
+def test_guard_drop_wins_over_reassert():
+    assert OutputGuard().feed(b"\x1b[2J\x1b[5;40r") == "drop"
+
+
+def test_guard_sequence_split_across_feeds():
+    g = OutputGuard()
+    assert g.feed(b"text\x1b[?10") == ""
+    assert g.feed(b"49h more") == "reassert"
+
+
+def test_guard_does_not_double_count_carry():
+    g = OutputGuard()
+    assert g.feed(b"\x1b[2J") == "reassert"
+    # the sequence sits inside the carry window now; a new feed with no
+    # fresh trigger must not re-fire it
+    assert g.feed(b"quiet") == ""
+
+
+def test_guard_bare_region_reset_followed_by_digit_still_fires():
+    # \x1b[r is a complete bare DECSTBM no matter what follows it, and it can
+    # never be the front of a parameterized one (those put the digits *before*
+    # the r). Suppressing it when a digit follows makes the verdict depend on
+    # where the read boundary fell: split right after the r it fires, unsplit
+    # it never does — the same child output, two different frames.
+    assert OutputGuard().feed(b"\x1b[r5 lines") == "reassert"
+    g = OutputGuard()
+    assert g.feed(b"\x1b[r") == "reassert"
+    assert g.feed(b"5 lines") == ""      # already fired; not re-fired either
+
+
+def test_guard_widest_watched_sequence_split_across_feeds():
+    # the longest watched sequence is 12 bytes (\x1b[1234;5678r), so the carry
+    # window has to span it; a window sized to the common \x1b[5;40r would drop
+    # the verdict whenever a read boundary lands near its head
+    g = OutputGuard()
+    assert g.feed(b"tail\x1b[1234;5678") == ""
+    assert g.feed(b"r") == "drop"
+
+
+def test_guard_ignores_lookalike_sequences():
+    # 256-colour SGR (digits and a ; but terminates in m), a cursor position
+    # report (capital R, not r) and erase-below (no parameter) are all routine
+    # output that must not cost the bar
+    assert OutputGuard().feed(b"\x1b[38;5;196mhi\x1b[0m\x1b[24;80R\x1b[J") == ""
+
+
+def test_guard_refires_once_the_carry_window_has_scrolled_past():
+    # suppression is "already reported", not "seen once": a second clear must
+    # still be reported
+    g = OutputGuard()
+    assert g.feed(b"\x1b[2J") == "reassert"
+    assert g.feed(b"z" * 20) == ""
+    assert g.feed(b"\x1b[2J") == "reassert"
+
+
+def test_guard_empty_feed_is_inert():
+    g = OutputGuard()
+    assert g.feed(b"\x1b[2J") == "reassert"
+    assert g.feed(b"") == ""

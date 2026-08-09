@@ -78,3 +78,36 @@ class FlipDetector:
             out.append(buf[i])
             i += 1
         return bytes(out), flips
+
+
+_DROP_RE = re.compile(rb"\x1b\[\d{1,4}(;\d{1,4})?r")     # child's own DECSTBM
+# bare `\x1b[r` needs no guard against half-matching a parameterized region:
+# that form spells its digits *before* the r, so the two can never share a
+# prefix. `_DROP_RE` is scanned first regardless, so drop still wins.
+_REASSERT_RE = re.compile(rb"\x1bc|\x1b\[\?1049[hl]|\x1b\[[23]J|\x1b\[r")
+
+
+class OutputGuard:
+    """Output-side watcher for the handful of sequences that clobber the
+    reserved row or scroll region. Returns a verdict; never alters bytes.
+    A small carry window handles sequences split across read chunks; only
+    matches ending beyond the carry count (earlier ones fired last feed)."""
+
+    # >= the longest watched sequence (12 bytes: ESC [ 1234 ;5678 r), so no
+    # split point can hide one from both feeds it straddles
+    CARRY = 15
+
+    def __init__(self):
+        self._carry = b""
+
+    def feed(self, data: bytes) -> str:
+        buf = self._carry + data
+        base = len(self._carry)
+        self._carry = buf[max(0, len(buf) - self.CARRY):]
+        for m in _DROP_RE.finditer(buf):
+            if m.end() > base:
+                return "drop"
+        for m in _REASSERT_RE.finditer(buf):
+            if m.end() > base:
+                return "reassert"
+        return ""
