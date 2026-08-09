@@ -1,22 +1,28 @@
 # tandem's Claude Code plugin
 
-Static registration only — no code lives here. The plugin registers one
-PreToolUse hook and two relay agents; all of the work happens in the
+Lets Claude Code dispatch subagents to GPT models: in a tandem-paired
+session, "ask gpt to review this migration" runs the task on a local
+codex worker and the result comes back like any subagent's.
+
+```bash
+tandem plugin install   # = claude plugin marketplace add Bhavya6187/tandem
+                        #   + claude plugin install tandem@tandem
+```
+
+Setup and usage: the [GPT subagents guide](../docs/subagents.md). The
+plugin is static registration only — all the work happens in the
 `tandem` binary the hook shells out to (`uv tool install tandem-cli`).
 Without that binary on PATH the plugin is inert: the hook command exits
 nonzero, `|| true` swallows it, and every dispatch runs natively.
 
-```bash
-claude plugin marketplace add Bhavya6187/tandem   # this repo, as a marketplace
-claude plugin install tandem@tandem
-```
+## Internals
 
 Hacking on the plugin itself? Point Claude at your clone instead:
 `claude --plugin-dir /path/to/tandem/plugin`. Either way, hooks and agents
 register when a Claude session starts, so install or update first, then
 open a fresh session.
 
-## What's in here
+### What's in here
 
 - **`.claude-plugin/plugin.json`** — manifest. `name` is `tandem`, and it
   is load-bearing: Claude resolves a plugin's agents as
@@ -54,7 +60,7 @@ of the agent name in any scope — a dispatch that already names a relay
 (`gpt`, `tandem:gpt`, `codex-worker`, `tandem:codex-worker`) is passed
 through untouched instead of being rewritten into itself.
 
-## What the hook does
+### What the hook does
 
 For each `Agent`/`Task` dispatch, in any directory that has a paired tandem
 session, it:
@@ -82,6 +88,7 @@ runs natively.
 Configuration lives in `~/.tandem/config.toml` under `[subagents]`, and
 routing needs no config: dispatches reach codex when you ask for the
 `tandem:gpt` agent, and `route = "all"` is the opt-in that reroutes every
-dispatch automatically. See the repo [README](../README.md) for the keys —
-`model` first, since an unset one puts every worker on your codex account's
-default — and the sandbox/consent story.
+dispatch automatically. The keys are in the
+[configuration reference](../docs/configuration.md) — `model` first, since
+an unset one puts every worker on your codex account's default — and the
+sandbox/consent story is in the [GPT subagents guide](../docs/subagents.md).
