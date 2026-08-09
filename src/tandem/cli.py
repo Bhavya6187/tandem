@@ -342,7 +342,7 @@ def sub(model: str | None, context_mode: str | None, quiet: bool,
     name fails here, before codex is invoked, with the valid slugs listed.
     A generic name (`gpt`, `codex`) asks for no particular model and runs
     the configured default."""
-    from . import modelcat, ops
+    from . import modelcat, ops, pinstash
     from .config import load_subagents_config
 
     if task is None or task == "-":
@@ -357,6 +357,13 @@ def sub(model: str | None, context_mode: str | None, quiet: bool,
     if not task:
         click.secho("error: empty task brief.", fg="red", err=True)
         sys.exit(1)
+    if not requested and model is None:
+        # A headerless brief may be a relay echo that dropped the pin — the
+        # known lossy hop — so consult the hook's out-of-band copy, keyed by
+        # this exact body. A miss changes nothing; a hit rejoins the normal
+        # header path below (resolution, announcement, trailer). -m callers
+        # never rode the header protocol, so they skip the lookup.
+        requested = pinstash.lookup(task)
     resolved = ""
     if requested:
         try:
@@ -508,8 +515,10 @@ def hook_route_cmd() -> None:
     hook MUST be registered as `tandem hook-route || true`; that shell guard
     is what makes exit 2 unreachable in practice."""
     try:
+        from . import pinstash
         from .config import load_subagents_config
-        from .hookroute import missed_reroute_notice, route, sandbox_for_mode
+        from .hookroute import (missed_reroute_notice, relay_pin, route,
+                                sandbox_for_mode)
 
         payload = json.loads(sys.stdin.read() or "{}")
         cwd = payload.get("cwd") or _cwd()
@@ -523,6 +532,15 @@ def hook_route_cmd() -> None:
         if session is not None and payload.get("tool_name") in ("Agent", "Task"):
             _stamp_sandbox(session.tandem_id,
                            sandbox_for_mode(payload.get("permission_mode")))
+        # The model pin travels the same out-of-band road as the consent
+        # stamp, for the same reason: it rides the brief, and the relay's
+        # echo of the brief is lossy (live transcripts show the
+        # `tandem-model:` line dropped from the heredoc). Stash it while
+        # the prompt is still pristine; `tandem sub` recovers it when its
+        # stdin arrives headerless.
+        pin = relay_pin(payload)
+        if pin is not None:
+            pinstash.stash(body=pin[1], requested=pin[0])
         codex_ok = False
         if session is not None:
             adapter = get_adapter("codex")

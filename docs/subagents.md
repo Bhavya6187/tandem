@@ -80,7 +80,11 @@ you set it.
   names no model at all and just runs your `model` above — or your codex
   account's default, reported as `codex default`. A reply from a
   model-pinned dispatch ends with a `[tandem-sub model: …]` trailer naming
-  what ran.
+  what ran. The pin is also stashed out-of-band at dispatch time (keyed by
+  a hash of the brief body, expiring after an hour), so `tandem sub`
+  recovers it even when the relay's echo of the brief loses the header
+  line — the trailer tells you either way. Mechanism and rationale:
+  [model-pin recovery design](specs/2026-08-09-model-pin-recovery-design.md).
   (`route = "off"` is the same routing silence, but `manual` keeps `tandem
   doctor`'s subagent checks on, since you still send work to codex.)
 - `route = "all"` reroutes every native subagent dispatch to codex

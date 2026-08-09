@@ -116,6 +116,12 @@ def test_bridge_agent_definition():
     # a fixed heredoc delimiter is a shell-injection hazard: a task message
     # containing that line truncates the brief and runs the rest as shell
     assert "TANDEM_TASK_EOF_" in body
+    # live transcripts (2026-08-08 audit): with no explicit rule, the haiku
+    # relay dropped a `tandem-model:` first line from the heredoc in 5 of 6
+    # dispatches — it reads the header as envelope metadata already consumed,
+    # not as task content. The explicit first-line rule is the fix.
+    assert re.search(r"tandem-model.*\n.*part of the task message", body)
+    assert re.search(r"FIRST line inside\s+the heredoc", body)
     assert re.search(r"unless .*appears|appears .*in the task", body)
     assert "[tandem-sub blocked: write]" in body
     assert "--sandbox workspace-write" in body
@@ -136,7 +142,8 @@ def test_gpt_alias_agent_definition():
     # same relay contract as codex-worker
     body = text.split("---", 2)[2]
     for marker in ("tandem sub -q", "TANDEM_TASK_EOF_", "verbatim",
-                   "[tandem-sub failed]", "[tandem-sub blocked: write]",
+                   "tandem-model", "[tandem-sub failed]",
+                   "[tandem-sub blocked: write]",
                    "--sandbox workspace-write"):
         assert marker in body, marker
     assert re.search(r"never do the task yourself", body, re.I)

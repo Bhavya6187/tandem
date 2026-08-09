@@ -36,6 +36,42 @@ RELAY_NAMES = frozenset({BRIDGE_NAME, ALIAS_NAME})
 WRITE_MODES = frozenset({"acceptEdits", "bypassPermissions"})
 
 
+def relay_pin(payload: dict) -> tuple[str, str] | None:
+    """(requested model, brief body) when this dispatch both targets a relay
+    and opens with a well-formed `tandem-model:` header; None otherwise.
+
+    The pin rides the brief, and the relay's echo of the brief into
+    `tandem sub` is lossy — live transcripts show the header line dropped
+    from the heredoc. This hook is the last place the prompt is pristine,
+    so the CLI stashes the pair (pinstash) for the relay's `tandem sub` to
+    recover. Relay-only on purpose: a native agent's brief never reaches
+    `tandem sub` under manual routing, and the route="all" rewrite prepends
+    agent instructions, so a body captured here would not match what that
+    relay echoes anyway. A malformed header is not stashed — if the relay
+    preserves it, `tandem sub` fails loudly on its own, and the stash must
+    not launder a name the header parser rejects."""
+    from . import modelcat
+
+    if payload.get("tool_name") not in ("Agent", "Task"):
+        return None
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+    subagent_type = tool_input.get("subagent_type") or ""
+    if subagent_type.rsplit(":", 1)[-1] not in RELAY_NAMES:
+        return None
+    prompt = tool_input.get("prompt")
+    if not isinstance(prompt, str):
+        return None
+    try:
+        requested, body = modelcat.split_model_header(prompt.strip())
+    except modelcat.MalformedHeader:
+        return None
+    if not requested:
+        return None
+    return requested, body
+
+
 def sandbox_for_mode(permission_mode) -> str:
     """The codex --sandbox value a dispatch from this claude permission
     mode has consented to, or "" for 'pass no flag'."""

@@ -16,6 +16,7 @@ from tandem.hookroute import (
     NOTICE_NO_SESSION,
     find_agent_body,
     missed_reroute_notice,
+    relay_pin,
     route,
     sandbox_for_mode,
 )
@@ -213,6 +214,70 @@ class TestManualRoute:
         assert r.output == ""            # no rewrite, no notice
         assert (paths.tandem_home() / "sandbox"
                 / env.session.tandem_id).read_text() == "workspace-write"
+
+
+class TestRelayPin:
+    """relay_pin: which dispatches get their model pin stashed.
+
+    The pin rides the brief as a `tandem-model:` first line, but the haiku
+    relay drops that line from the heredoc it echoes into `tandem sub`
+    (live transcripts, 2026-08-08 audit). The hook sees the pristine parent
+    prompt, so it captures the pin here for `tandem sub` to recover."""
+
+    def test_relay_dispatch_with_header_is_pinned(self):
+        p = _payload(subagent_type="tandem:gpt",
+                     prompt="tandem-model: sol\ndo the thing")
+        assert relay_pin(p) == ("sol", "do the thing")
+
+    def test_bare_relay_name_is_pinned(self):
+        # same scope-insensitivity as the loop guard: the model can dispatch
+        # a relay by bare name or plugin-scoped id
+        p = _payload(subagent_type="gpt", prompt="tandem-model: sol\ntask")
+        assert relay_pin(p) == ("sol", "task")
+
+    def test_bridge_door_is_pinned_too(self):
+        p = _payload(subagent_type="tandem:codex-worker",
+                     prompt="tandem-model: terra\ntask")
+        assert relay_pin(p) == ("terra", "task")
+
+    def test_non_relay_dispatch_is_not_pinned(self):
+        # a native agent's brief starting with the header is not a relay
+        # dispatch; stashing it would leak pins into unrelated `tandem sub`
+        # runs that happen to share a body
+        p = _payload(prompt="tandem-model: sol\ntask")   # Explore
+        assert relay_pin(p) is None
+
+    def test_headerless_relay_dispatch_is_not_pinned(self):
+        p = _payload(subagent_type="tandem:gpt", prompt="just a task")
+        assert relay_pin(p) is None
+
+    def test_malformed_header_is_not_pinned(self):
+        # sub fails loudly on a malformed header IF the relay preserves it;
+        # the stash must not launder a name the header parser rejects
+        p = _payload(subagent_type="tandem:gpt",
+                     prompt="tandem-model: <sol>\ntask")
+        assert relay_pin(p) is None
+
+    def test_other_tools_and_garbage_are_not_pinned(self):
+        assert relay_pin({"tool_name": "Bash"}) is None
+        assert relay_pin({"tool_name": "Agent", "tool_input": "nope"}) is None
+        assert relay_pin({}) is None
+
+    def test_cli_stashes_pin_for_manual_gpt_dispatch(self, env_factory):
+        # mirrors test_manual_still_stamps_sandbox: manual mode never
+        # rewrites, but the pin must still be written before the relay
+        # spawns, or a dropped header is unrecoverable
+        from tandem import pinstash
+        env = env_factory(active="claude")
+        (paths.tandem_home() / "config.toml").write_text(
+            '[subagents]\nroute = "manual"\n')
+        payload = _payload(subagent_type="tandem:gpt",
+                           prompt="tandem-model: sol\ndo the thing")
+        payload["cwd"] = env.cwd
+        r = _run_hook(payload)
+        assert r.exit_code == 0
+        assert r.output == ""            # no rewrite, no notice
+        assert pinstash.lookup("do the thing") == "sol"
 
 
 class TestFindAgentBody:
