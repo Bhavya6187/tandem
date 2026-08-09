@@ -153,3 +153,45 @@ def test_non_tty_fallback_ignores_frame_and_control(capfd):
     assert code == 0
     assert "fallback-ok" in capfd.readouterr().out
     assert frame.bar_dropped is False        # nothing to drop off-tty
+
+
+def test_write_all_finishes_a_short_write(monkeypatch):
+    # os.write returns a short count when a signal lands mid-write (PEP 475
+    # only retries a write that moved nothing), so a repaint interrupted by
+    # SIGWINCH would otherwise leave half an escape sequence on screen
+    import tandem.ptyrun as ptyrun
+
+    seen = []
+
+    def fake_write(fd, data):
+        b = bytes(data)
+        seen.append(b[:3])
+        return min(3, len(b))
+
+    monkeypatch.setattr(ptyrun.os, "write", fake_write)
+    ptyrun._write_all(7, b"abcdefgh")
+    assert b"".join(seen) == b"abcdefgh"
+
+
+def test_write_all_retries_after_interrupted_error(monkeypatch):
+    import tandem.ptyrun as ptyrun
+
+    calls = []
+
+    def fake_write(fd, data):
+        calls.append(bytes(data))
+        if len(calls) == 1:
+            raise InterruptedError
+        return len(data)
+
+    monkeypatch.setattr(ptyrun.os, "write", fake_write)
+    ptyrun._write_all(7, b"xy")
+    assert calls == [b"xy", b"xy"]
+
+
+def test_write_all_gives_up_on_a_zero_byte_write(monkeypatch):
+    # a fd that accepts nothing must not spin the pump forever
+    import tandem.ptyrun as ptyrun
+
+    monkeypatch.setattr(ptyrun.os, "write", lambda fd, data: 0)
+    ptyrun._write_all(7, b"abc")   # returns instead of hanging

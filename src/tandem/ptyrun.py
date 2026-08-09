@@ -40,6 +40,27 @@ def _winsize(fd: int) -> tuple[int, int]:
         return (24, 80)
 
 
+# seconds of keyboard quiet after which the detector's carried escape
+# fragment is released to the child (a lone ESC must not wait for a key)
+_IDLE_FLUSH_S = 0.2
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """Write every byte. os.write comes back short when a signal lands
+    mid-write — PEP 475 only retries a write that transferred nothing — and
+    this module writes under SIGWINCH by design, so a plain os.write can
+    strand half a repaint (raw escape bytes) on the user's screen."""
+    view = memoryview(data)
+    while view:
+        try:
+            n = os.write(fd, view)
+        except InterruptedError:
+            continue
+        if n <= 0:
+            break
+        view = view[n:]
+
+
 def _is_alive(child) -> bool:
     """isalive() is not thread-safe: it reaps via waitpid, so whichever of the
     pump thread and the terminating thread loses the race gets ECHILD back as a
@@ -184,7 +205,7 @@ def run_in_pty(
 
     def paint() -> None:
         if bar is not None:
-            os.write(out_fd, bar.region() + bar.paint(frame.armed()))
+            _write_all(out_fd, bar.region() + bar.paint(frame.armed()))
 
     def drop_bar() -> None:
         """Terminal state: the guard's drop verdict is not latched, so the
@@ -192,16 +213,23 @@ def run_in_pty(
         nonlocal bar_on, guard, bar
         if bar is None:
             return
-        os.write(out_fd, bar.clear())
+        # State down before any syscall. Drops and resizes are causally
+        # correlated (a child sets DECSTBM *because* the terminal resized,
+        # and a drag-resize bursts SIGWINCH), so a handler landing inside the
+        # writes below must already see bar is None — otherwise it repaints
+        # the region and bar *after* the clear and nothing is left to remove
+        # them, corrupting the terminal past tandem's exit.
+        dying, bar = bar, None
+        bar_on, guard = False, None
+        frame.bar_dropped = True
+        if detector is not None:
+            detector.bar_row = None
+        _write_all(out_fd, dying.clear())
         r, c = _winsize(stdin_fd)
         try:
             child.setwinsize(r, c)
         except Exception:
             pass
-        if detector is not None:
-            detector.bar_row = None
-        bar_on, guard, bar = False, None, None
-        frame.bar_dropped = True
 
     def on_winch(signum, frm):
         # runs as a signal handler in the pump thread: an escaping exception
@@ -238,6 +266,7 @@ def run_in_pty(
         # seeded from the state just painted, so an already-armed frame does
         # not draw a redundant repaint on the first iteration
         last_armed = frame.armed() if bar is not None else False
+        last_stdin = time.monotonic()
         stdin_open = True
         # _is_alive, not isalive(): a PtyControl on another thread polls
         # liveness too, and the loser of the waitpid race gets ECHILD as a
@@ -248,10 +277,16 @@ def run_in_pty(
                 ready, _, _ = select.select(rlist, [], [], 0.2)
             except InterruptedError:
                 continue  # signal (e.g. SIGWINCH) — loop again
-            if not ready and detector is not None:
-                # idle tick: release any escape fragment the detector is
-                # holding, so a lone ESC reaches the child without waiting
-                # for the next keypress to rule the sequence out.
+            if (
+                detector is not None
+                and stdin_fd not in ready
+                and time.monotonic() - last_stdin >= _IDLE_FLUSH_S
+            ):
+                # Idle *keyboard*, not idle loop: gating on an empty select
+                # would never fire against a child that streams (a spinner is
+                # enough), and streaming output is exactly when the user
+                # reaches for ESC. Release the fragment the detector is
+                # holding so a lone ESC lands without a second keypress.
                 stranded = detector.flush()
                 if stranded:
                     try:
@@ -265,7 +300,7 @@ def run_in_pty(
                     break
                 if not data:
                     break
-                os.write(out_fd, data)
+                _write_all(out_fd, data)
                 if guard is not None:
                     verdict = guard.feed(data)
                     if verdict == "drop":
@@ -274,6 +309,7 @@ def run_in_pty(
                         paint()
             if stdin_open and stdin_fd in ready:
                 data = os.read(stdin_fd, 65536)
+                last_stdin = time.monotonic()
                 if data:
                     if detector is not None:
                         data, flips = detector.feed(data)
@@ -282,16 +318,32 @@ def run_in_pty(
                     if data:
                         child.write(data)
                 else:
+                    if detector is not None:
+                        # anything still carried belongs before the EOF
+                        stranded = detector.flush()
+                        if stranded:
+                            try:
+                                child.write(stranded)
+                            except Exception:
+                                pass
                     child.sendeof()
                     stdin_open = False
             if bar is not None and frame.armed() != last_armed:
                 last_armed = frame.armed()
                 paint()
     finally:
-        if bar is not None:
-            os.write(out_fd, bar.clear())
-        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_attrs)
+        # SIGWINCH goes back first: its handler is the one that paints, and
+        # both the clear and tcsetattr (which blocks until the tty drains)
+        # are long windows for it to land in — a repaint after the final
+        # clear would outlive tandem with nothing left to remove it.
+        # Restoring the handler shuts that window, where clearing `bar`
+        # afterwards would still race the write itself. SIGTERM's handler
+        # only signals the child, never the terminal, so it stays installed
+        # until the terminal is whole again.
         signal.signal(signal.SIGWINCH, old_winch)
+        if bar is not None:
+            _write_all(out_fd, bar.clear())
+        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_attrs)
         signal.signal(signal.SIGTERM, old_term)
     try:
         child.wait()
