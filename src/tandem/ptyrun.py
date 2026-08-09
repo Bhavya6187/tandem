@@ -16,6 +16,8 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
+import time
 import tty
 
 from ptyprocess import PtyProcess
@@ -30,6 +32,77 @@ def _winsize(fd: int) -> tuple[int, int]:
         return (rows or 24, cols or 80)
     except OSError:
         return (24, 80)
+
+
+def _is_alive(child) -> bool:
+    """isalive() is not thread-safe: it reaps via waitpid, so whichever of the
+    pump thread and the terminating thread loses the race gets ECHILD back as a
+    PtyProcessError. A child we can no longer ask about is a child that is
+    gone."""
+    try:
+        return child.isalive()
+    except Exception:
+        return False
+
+
+def _wait_dead(child, timeout: float) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not _is_alive(child):
+            return True
+        time.sleep(0.05)
+    return not _is_alive(child)
+
+
+class PtyControl:
+    """Cross-thread termination handle. run_in_pty attaches the live child;
+    terminate() runs the escalation ladder from any other thread: soft quit
+    keystrokes (the CLI finalizes its own transcript), SIGTERM to the
+    process group, SIGKILL. Every rung tolerates a child that is already
+    gone."""
+
+    def __init__(self):
+        self._child = None
+        self._attached = threading.Event()
+
+    def attach(self, child) -> None:
+        self._child = child
+        self._attached.set()
+
+    def terminate(
+        self,
+        soft: list[bytes],
+        soft_timeout: float = 3.0,
+        term_timeout: float = 2.0,
+        attach_timeout: float = 5.0,
+    ) -> str:
+        self._attached.wait(timeout=attach_timeout)
+        child = self._child
+        if child is None or not _is_alive(child):
+            return "dead"
+        for chunk in soft:
+            try:
+                child.write(chunk)
+            except Exception:
+                break
+            time.sleep(0.25)
+        if _wait_dead(child, soft_timeout):
+            return "soft"
+        # ptyprocess spawns the child with setsid, so the child's pid is its
+        # process-group id — killpg(child.pid, …) takes the harness's whole
+        # tool-child tree down with it.
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        if _wait_dead(child, term_timeout):
+            return "term"
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        _wait_dead(child, 1.0)
+        return "kill"
 
 
 def run_in_pty(argv: list[str], cwd: str | None = None, env: dict | None = None) -> int:
