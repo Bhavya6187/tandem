@@ -1,6 +1,12 @@
 """config.toml: defaults on missing/broken file, validated values."""
 
-from tandem.config import SubagentsConfig, load_harness_args, load_subagents_config
+from tandem.config import (
+    FrameConfig,
+    SubagentsConfig,
+    load_frame_config,
+    load_harness_args,
+    load_subagents_config,
+)
 
 
 def test_defaults_when_file_missing(tmp_path, monkeypatch):
@@ -105,3 +111,52 @@ def test_harness_args_invalid_shapes_fall_back(tmp_path, monkeypatch):
     for body in cases:
         (home / "config.toml").write_text(body)
         assert load_harness_args("claude") == [], body
+
+
+def _write_config(tmp_path, monkeypatch, text):
+    """The file's home/config.toml idiom, folded up: the [frame] tests differ
+    only in the table body."""
+    home = tmp_path / ".tandem"
+    home.mkdir(exist_ok=True)
+    (home / "config.toml").write_text(text)
+    monkeypatch.setenv("TANDEM_HOME", str(home))
+
+
+def test_frame_defaults_without_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+    cfg = load_frame_config()
+    assert cfg == FrameConfig(flip_byte=0x1D, bar=True)
+
+
+def test_frame_flip_key_ctrl_name(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, '[frame]\nflip_key = "ctrl-t"\n')
+    assert load_frame_config().flip_byte == 0x14
+
+
+def test_frame_flip_key_hex(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, '[frame]\nflip_key = "0x1e"\n')
+    assert load_frame_config().flip_byte == 0x1E
+
+
+def test_frame_flip_key_printable_rejected(tmp_path, monkeypatch):
+    # a printable key would swallow real typing — fall back to default
+    _write_config(tmp_path, monkeypatch, '[frame]\nflip_key = "a"\n')
+    assert load_frame_config().flip_byte == 0x1D
+
+
+def test_frame_bar_off(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, '[frame]\nbar = false\n')
+    assert load_frame_config().bar is False
+
+
+def test_frame_flip_key_multichar_casefold_does_not_raise(tmp_path, monkeypatch):
+    # "ß".upper() == "SS", so case-folding before ord() raises TypeError and
+    # takes the launch down with it — no [frame] value may ever raise. 0xDF &
+    # 0x1F is a control byte, so this one is accepted rather than defaulted.
+    _write_config(tmp_path, monkeypatch, '[frame]\nflip_key = "ctrl-ß"\n')
+    assert load_frame_config() == FrameConfig(flip_byte=0x1F, bar=True)
+
+
+def test_frame_malformed_values_fall_back(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, '[frame]\nflip_key = 29\nbar = "yes"\n')
+    assert load_frame_config() == FrameConfig()
