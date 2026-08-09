@@ -32,9 +32,12 @@ Decisions made during brainstorming:
 - **Subagents unchanged.** Quick cross-model consults remain the 0.2
   delegation path ("ask gpt to review this"); this feature only changes
   how you move your whole seat between harnesses.
-- **No chrome.** The flip is a screen clear plus the incoming TUI's own
-  redraw. No tab bar or status line; the tab feel comes from speed and
-  continuity, not decoration.
+- **One line of chrome: the tab bar.** tandem reserves the terminal's
+  bottom row for a status bar (`claude ● │ codex ○  ⌃] flips`) and
+  renders no other pixel — conversation UI stays entirely native. The
+  bar also surfaces armed-flip state (`⏳ flipping at turn end…`), which
+  is otherwise invisible. A `[frame] bar = false` kill-switch and
+  graceful auto-drop cap the risk.
 - **The escape hatch stays.** A plain exit (Ctrl-D) still lands at the
   tandem prompt; `exit` there returns to the OS shell with the resume
   hint. One-shot commands from the OS shell are untouched.
@@ -54,6 +57,12 @@ Decisions made during brainstorming:
   wrapper).
 - The flip key is configurable (`[frame] flip_key` in config.toml) for
   anyone who needs the raw byte in their TUI.
+- **The tab bar** sits on the bottom terminal row for the whole session:
+  active harness highlighted, the other dimmed, the flip hint, and —
+  while a mid-turn flip is armed — `⏳ flipping at turn end…`. It
+  repaints on resize and after child screen resets, disables via
+  `[frame] bar = false`, and auto-drops for the session (flip still
+  works) if the terminal can't sustain it.
 
 ## Implementation
 
@@ -88,6 +97,27 @@ SIGKILL after a bounded timeout. Whether the exit was graceful is
 recorded. Transcript appends are whole-line and durable, so even the
 forced path cannot corrupt history.
 
+### Status bar: a reserved bottom row
+
+The child is told the terminal is one row shorter (`rows-1` in the PTY
+winsize, on launch and on every resize), and tandem paints the bar on
+the real bottom row. Bottom — not top — is load-bearing: the child's
+rows 1..rows-1 map to real rows identically, so cursor-position
+reports, mouse coordinates, and absolute addressing all stay truthful
+with zero translation. A scroll region (DECSTBM rows 1..rows-1) keeps
+normal-buffer scrolling (Claude Code scrolls the real buffer) above the
+bar.
+
+The one new touch on the output path: a small state machine scans the
+child's output for the few sequences that would clobber the setup —
+RIS, `CSI r`, alt-screen enter/leave (`CSI ?1049h/l`), full-screen ED —
+and reasserts the scroll region and repaints the bar after each
+(handling sequences split across read chunks). It is a targeted filter,
+not a terminal emulator; all other bytes relay verbatim as today. Keys
+landing on the bar row (mouse reports with the bottom row's coordinate)
+are swallowed. If the filter encounters output it cannot reconcile, the
+bar drops for the session and the frame continues bar-less.
+
 ### Flip and re-enter
 
 The runner's existing exit path runs unchanged (stop and join the tail
@@ -112,6 +142,9 @@ No new sync logic anywhere.
   above.
 - **Marker unavailable or missed:** the quiescence fallback promotes the
   armed flag; worst case the flip lands ~2 s late.
+- **Bar can't be sustained** (irreconcilable child output, exotic
+  terminal): auto-drop the bar for the session, keep flipping; note it
+  in `tandem doctor`. `[frame] bar = false` disables it outright.
 
 ## Testing
 
@@ -125,9 +158,14 @@ No new sync logic anywhere.
   `run_harness` / `input_fn` seams — flip lands back in the loop without
   a prompt stop; plain exit still reaches the prompt.
 - `ops.switch_session` is unchanged and already covered.
+- **Bar:** winsize lie on launch/resize; scroll-region reassert after
+  each watched sequence (including sequences split across chunks); armed
+  state rendering; auto-drop path; kill-switch.
 - **Live validation** (manual, operator-run, as in prior releases):
   flips both directions in a scratch repo; mid-turn arm and cancel; a
-  paste containing 0x1D; resume-failure fallback; unpaired no-op.
+  paste containing 0x1D; resume-failure fallback; unpaired no-op; bar
+  behavior across Terminal.app, iTerm2, and the VS Code terminal
+  (scrollback, resize, alt-screen switches).
 
 ## Docs
 
@@ -142,6 +180,7 @@ becomes the implementation detail rather than the headline.
   deliberately dropped; no design is retained.
 - `/tandem:switch` or any in-session tandem commands (parked branch,
   untouched).
-- Tab-bar or status-line chrome.
+- Richer chrome than the one-row bar (menus, mouse interaction, per-turn
+  stats).
 - Any change to sync/translation, subagents, pairing, or the tandem
   prompt's plain-exit behavior.
