@@ -116,6 +116,7 @@ def wait_until_safe(
     quiesce: float | None = None,
     poll: float = 0.2,
     marker_wired: bool = False,
+    provider: Callable[[], Path | None] | None = None,
 ) -> bool:
     """Block until the turn boundary. The transcript's last append lands
     before the Stop hook / notify touches the sentinel, so idle means the
@@ -126,7 +127,7 @@ def wait_until_safe(
 
     - `marker_wired=True` (the harness was launched with the turn-complete
       hook — the common case): the marker touch is the only normal trigger.
-      Quiescence stays wired as a 30s valve for a marker that never arrives,
+      Quiescence stays wired as a valve for a marker that never arrives,
       never as a turn-pacing signal.
     - `marker_wired=False` (no hook — e.g. codex with a user-configured
       notify handler tandem refuses to clobber): 2s of transcript quiescence
@@ -135,18 +136,41 @@ def wait_until_safe(
     `quiesce=None` takes the mode's default, so the mode alone is enough to
     be safe; pass a number to override (tests scale it down).
 
+    The transcript is re-read every poll through `provider`, because the path
+    is not always known when the wait starts: codex mints its own session id
+    and the runner's tail thread discovers the rollout seconds later. The
+    default provider returns the `transcript` argument forever, which is the
+    standalone (already-known path) contract this function shipped with.
+
+    An unknown transcript is *not* evidence of idleness. `_mtime(None)` is
+    0.0, so the plain `s >= t` test would call every unknown-transcript
+    session idle and fire a flip in the middle of a turn. With the marker
+    wired there is a better answer: nothing is known, so hold and let the
+    valve decide — anchored to the moment the wait began rather than to a
+    file mtime that does not exist. (Marker-less sessions keep the old
+    reading: quiescence is all they have, and their transcript is always
+    known — only codex's fresh-mint path arrives here with None, and that
+    path always wires the marker or falls back to the 2s quiescence over a
+    real file once discovery lands.)
+
     Both clocks here are wall-clock on purpose: the deadline is derived from
     file mtimes, so `time.time()` is the only comparable reading (monotonic
-    would be right for a pure timeout, but there is none in this loop).
-    A missing file reads as mtime 0, which makes a fresh session (no files
-    yet) idle in either mode, and leaves a marker-less session on the
-    quiescence path for as long as it runs."""
+    would be right for a pure timeout, but there is none in this loop)."""
     if quiesce is None:
         quiesce = _quiesce_default(marker_wired)
+    if provider is None:
+        provider = lambda: transcript  # noqa: E731 - back-compat default
+    armed_at = time.time()
     while True:
         if cancelled():
             return False
-        t, s = _mtime(transcript), _mtime(sentinel)
+        path = provider()
+        if path is None and marker_wired:
+            if time.time() - armed_at >= quiesce:
+                return True   # valve, from arm time: no mtime to anchor to
+            time.sleep(poll)
+            continue
+        t, s = _mtime(path), _mtime(sentinel)
         if s >= t:
             return True
         if time.time() - t >= quiesce:
@@ -158,6 +182,13 @@ class FlipMonitor:
     """Owns the flip lifecycle: the armed flag (toggle to cancel), the
     turn-boundary wait, and the termination ladder through the PtyControl.
     One background thread; all public methods are thread-safe.
+
+    `transcript` is a live attribute, not a constructor snapshot: codex mints
+    its own session id, so the runner's tail thread discovers the rollout
+    after launch and publishes it here. The wait loop re-reads it every poll
+    through a provider closure — a plain attribute read/write, which the GIL
+    makes atomic, so no lock is needed (and none may be added: `armed()` runs
+    inside the SIGWINCH handler on the pump thread).
 
     `marker_wired` says whether this launch actually got a turn-complete
     hook, which decides how the wait reads transcript quiescence (see
@@ -233,6 +264,7 @@ class FlipMonitor:
                 quiesce=self.quiesce,
                 poll=self.poll,
                 marker_wired=self.marker_wired,
+                provider=lambda: self.transcript,
             )
             if self._stop.is_set():
                 return
@@ -400,6 +432,13 @@ class InteractiveRunner:
                                 store.set_native_session_id(session.tandem_id, "codex", sid)
                                 current = store.get_session(session.tandem_id) or current
                             path = found
+                            # Publish to the flip monitor: until this lands it
+                            # has no transcript to judge a turn boundary by,
+                            # and holds any armed flip behind its valve. A bare
+                            # attribute write is all the synchronization there
+                            # is or should be — the GIL makes it atomic and the
+                            # monitor's wait re-reads it every poll.
+                            monitor.transcript = path
                             break
                     if path is None:
                         return

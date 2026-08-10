@@ -244,6 +244,135 @@ def test_wait_blocks_midturn_then_marker_releases(tmp_path):
     assert result["ok"] is True
 
 
+def test_wait_unknown_transcript_wired_is_not_read_as_idle(tmp_path):
+    # codex mints its own session id, so the flip monitor starts with no
+    # transcript at all. _mtime(None) is 0.0, which would make `s >= t` true
+    # against any sentinel and fire the flip instantly — mid-turn. No
+    # evidence is not idleness: hold, and let the valve decide.
+    s = tmp_path / "s.turn"
+    _touch(s, time.time() - 30)      # a previous turn's marker exists
+    done = threading.Event()
+    result = {}
+
+    def waiter():
+        result["ok"] = wait_until_safe(None, s, cancelled=lambda: False,
+                                       quiesce=1.0, poll=0.05,
+                                       marker_wired=True)
+        done.set()
+
+    threading.Thread(target=waiter, daemon=True).start()
+    assert not done.wait(timeout=0.5)   # did NOT fire instantly
+    assert done.wait(timeout=3)         # valve, anchored to arm time
+    assert result["ok"] is True
+
+
+def test_wait_provider_publishing_a_path_restores_normal_rules(tmp_path):
+    # The tail thread discovers the rollout mid-wait and publishes it; from
+    # that poll on the ordinary marker/quiescence rules apply.
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    _touch(s, time.time() - 30)
+    published: list = [None]
+    done = threading.Event()
+    result = {}
+
+    def waiter():
+        result["ok"] = wait_until_safe(None, s, cancelled=lambda: False,
+                                       quiesce=30.0, poll=0.05,
+                                       marker_wired=True,
+                                       provider=lambda: published[0])
+        done.set()
+
+    threading.Thread(target=waiter, daemon=True).start()
+    assert not done.wait(timeout=0.3)   # unknown transcript: parked
+    _touch(t, time.time())              # a turn is in flight
+    published[0] = t
+    assert not done.wait(timeout=0.3)   # known now, and mid-turn: still parked
+    _touch(s, time.time() + 1)          # marker closes the turn
+    assert done.wait(timeout=2)
+    assert result["ok"] is True
+
+
+def test_wait_standalone_default_provider_reads_its_argument(tmp_path):
+    # Back-compat: with no provider the positional transcript is what every
+    # poll reads, exactly as before the provider existed.
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    _touch(t, time.time())
+    _touch(s, time.time() - 30)
+    done = threading.Event()
+    result = {}
+
+    def waiter():
+        result["ok"] = wait_until_safe(t, s, cancelled=lambda: False,
+                                       poll=0.05, marker_wired=True)
+        done.set()
+
+    threading.Thread(target=waiter, daemon=True).start()
+    assert not done.wait(timeout=0.3)
+    _touch(s, time.time() + 1)
+    assert done.wait(timeout=2)
+    assert result["ok"] is True
+
+
+def test_monitor_transcript_published_midwait_is_picked_up(tmp_path):
+    # The monitor half of the same story: the runner's tail thread assigns
+    # monitor.transcript once codex's rollout appears, and the live wait sees
+    # it on its next poll.
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    _touch(t, time.time())
+    _touch(s, time.time() - 30)
+    control = _StubControl()
+    m = FlipMonitor(control, [b"\x04"], transcript=None, sentinel=s,
+                    marker_wired=True, quiesce=30.0, poll=0.05)
+    m.start()
+    m.flip_pressed()
+    time.sleep(0.3)
+    assert m.flip_requested is False     # unknown transcript: no instant fire
+    m.transcript = t                     # tail thread discovered the rollout
+    time.sleep(0.2)
+    assert m.flip_requested is False     # mid-turn under the normal rules
+    _touch(s, time.time() + 1)           # marker fires
+    deadline = time.time() + 3
+    while not m.flip_requested and time.time() < deadline:
+        time.sleep(0.05)
+    m.stop()
+    assert m.flip_requested is True
+    assert control.calls == [[b"\x04"]]
+
+
+def test_runner_publishes_the_discovered_codex_rollout_to_the_monitor(
+    env_factory, monkeypatch
+):
+    # Fresh codex (no session id yet): the tail thread finds the rollout and
+    # hands it to the monitor, so an armed flip stops being judged blind.
+    env = env_factory(active="codex")
+    session = env.store.create_session(
+        env.cwd, "codex", env.session.claude_session_id, None
+    )
+    rollout = env.codex_shadow
+    monkeypatch.setattr(
+        runner, "await_codex_rollout",
+        lambda cwd, after, timeout=None: rollout,
+    )
+    made = {}
+    real = runner.FlipMonitor
+
+    def capture(*a, **kw):
+        made["monitor"] = real(*a, **kw)
+        return made["monitor"]
+
+    monkeypatch.setattr(runner, "FlipMonitor", capture)
+
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None):
+        deadline = time.time() + 3
+        while made["monitor"].transcript is None and time.time() < deadline:
+            time.sleep(0.02)
+        return 0
+
+    monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
+    runner.InteractiveRunner(session, lambda st, se, so: _Sink()).run()
+    assert made["monitor"].transcript == rollout
+
+
 def test_wait_cancelled(tmp_path):
     t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
     _touch(t, time.time())
@@ -319,8 +448,9 @@ def test_monitor_passes_mode_through_to_wait(tmp_path, monkeypatch):
     seen = {}
 
     def fake_wait(transcript, sentinel, cancelled, quiesce=None, poll=0.2,
-                  marker_wired=False):
-        seen.update(quiesce=quiesce, poll=poll, marker_wired=marker_wired)
+                  marker_wired=False, provider=None):
+        seen.update(quiesce=quiesce, poll=poll, marker_wired=marker_wired,
+                    provider_reads=provider())
         return True
 
     monkeypatch.setattr(runner, "wait_until_safe", fake_wait)
@@ -335,7 +465,8 @@ def test_monitor_passes_mode_through_to_wait(tmp_path, monkeypatch):
         time.sleep(0.05)
     m.stop()
     assert m.flip_requested is True
-    assert seen == {"quiesce": 30.0, "poll": 0.05, "marker_wired": True}
+    assert seen == {"quiesce": 30.0, "poll": 0.05, "marker_wired": True,
+                    "provider_reads": None}
 
 
 # -- the runner wiring the frame ------------------------------------------
