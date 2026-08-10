@@ -440,16 +440,25 @@ class InteractiveRunner:
 
         frame_cfg = load_frame_config()
         control = PtyControl()
+        def claude_probe() -> str | None:
+            # A raising probe would kill the tandem-flip thread and leave
+            # the bar advertising an armed flip that can never fire (os.kill
+            # raises OverflowError — not OSError — on a pid outside C-long
+            # range, so registry garbage can escape session_status's own
+            # guards). Single tier reads any non-answer as flippable, so an
+            # escape maps to None, never to a dead thread.
+            try:
+                return adapter.session_status(active_sid)
+            except Exception:
+                return None
+
         monitor = FlipMonitor(
             control, adapter.quit_keystrokes(), transcript, sentinel,
             marker_wired=bool(hook_extra),
             # claude only: codex has no session registry, and a probe that
             # answers None would flip eagerly mid-turn — absence, not None
             # answers, is how codex opts out.
-            status_probe=(
-                (lambda: adapter.session_status(active_sid))
-                if active == "claude" else None
-            ),
+            status_probe=claude_probe if active == "claude" else None,
         )
         frame = FrameIO(
             flip_byte=frame_cfg.flip_byte,

@@ -592,3 +592,4 @@ git commit -m "feat: runner wires the claude status probe into the flip"
 - [ ] Flip mid-turn (model generating): bar shows armed state, flip fires at turn end.
 - [ ] Flip while a permission dialog is open: record observed `status`/`waitingFor` in the registry file and decide whether abandoning the in-flight tool call is acceptable.
 - [ ] Second flip-key press while armed still cancels.
+- [ ] After an instant idle flip, the other side has the complete last turn. (The old sentinel rule was ordered-by-construction — Stop fired after the final transcript append; `status: "waiting"` carries no such ordering guarantee. The graceful quit plus the tail thread's final drain should cover it; confirm live.)

@@ -51,7 +51,8 @@ def _pid_alive(pid: int) -> bool:
     cleans up on exit, not on crash). PermissionError means alive but
     not ours — still alive; anything else unreadable counts as dead,
     because trusting a stale entry can freeze the flip on a phantom
-    "busy"."""
+    "busy". Callers must screen out pid <= 0 first: kill(0)/kill(-N)
+    probe process groups and would read as alive."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -169,7 +170,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
             if not isinstance(entry, dict) or entry.get("sessionId") != session_id:
                 continue
             pid = entry.get("pid")
-            if not isinstance(pid, int) or not _pid_alive(pid):
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 \
+                or not _pid_alive(pid):
                 continue
             status = entry.get("status")
             if isinstance(status, str):

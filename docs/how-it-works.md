@@ -28,7 +28,11 @@ compatibility ranges, and where your data lives. (Back to the
   registry (`~/.claude/sessions/<pid>.json`, the data `claude agents
   --json` prints): `busy` holds the flip, anything else fires it — so an
   idle prompt flips instantly even though claude keeps appending
-  housekeeping to its transcript between turns. With codex fronted the
+  housekeeping to its transcript between turns.
+  (The registry appeared in claude 2.1.226; on older claudes the probe
+  finds nothing and every armed flip fires at once, mid-turn included —
+  the deliberate single-tier trade: no silent valve, breakage is loud.)
+  With codex fronted the
   transcript-marker rules stand: where no marker could be wired (codex
   with a `notify` handler of your own, which tandem won't clobber) ~2s of
   transcript quiescence stands in; where one was wired, a 120s valve

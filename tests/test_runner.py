@@ -898,3 +898,41 @@ def test_runner_wires_no_probe_for_codex(env_factory, monkeypatch):
     )
     runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
     assert made["kw"]["status_probe"] is None
+
+
+def test_session_status_rejects_nonpositive_and_bool_pids(tmp_path, monkeypatch):
+    # os.kill(0,0)/os.kill(-N,0) probe process groups and would read
+    # "alive"; with busy-wins and no valve a pid-0 busy entry pins the
+    # flip forever. The guard drops them before _pid_alive runs.
+    _registry(tmp_path, monkeypatch, {
+        "zero.json": {"pid": 0, "sessionId": _SID, "status": "busy"},
+        "neg.json": {"pid": -1, "sessionId": _SID, "status": "busy"},
+        "bool.json": {"pid": True, "sessionId": _SID, "status": "busy"},
+    })
+    assert _claude_adapter().session_status(_SID) is None
+
+
+def test_runner_probe_swallows_raising_session_status(env_factory, monkeypatch):
+    # OverflowError from os.kill on an absurd pid is not an OSError; a
+    # probe that raises would kill the flip thread. The wiring maps any
+    # escape to None (single tier: no answer -> flippable).
+    env = env_factory(active="claude")
+    made = {}
+    real = runner.FlipMonitor
+
+    def capture(*a, **kw):
+        made["kw"] = kw
+        return real(*a, **kw)
+
+    monkeypatch.setattr(runner, "FlipMonitor", capture)
+    monkeypatch.setattr(
+        runner, "run_in_pty",
+        lambda argv, cwd=None, frame=None, control=None: 0,
+    )
+    runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
+    from tandem.harness.claude_code import ClaudeCodeAdapter
+    monkeypatch.setattr(
+        ClaudeCodeAdapter, "session_status",
+        lambda self, sid: (_ for _ in ()).throw(OverflowError()),
+    )
+    assert made["kw"]["status_probe"]() is None
