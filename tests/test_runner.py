@@ -1,5 +1,6 @@
 """InteractiveRunner: user-configured [harness] args land in the spawned argv."""
 
+import json
 import os
 import threading
 import time
@@ -652,3 +653,94 @@ def test_marker_wired_false_when_adapter_injects_no_hook(env_factory, monkeypatc
     monkeypatch.setattr(ClaudeCodeAdapter, "hook_argv_extra", lambda self, s: [])
     monitor = _run_capturing_monitor(env, monkeypatch)
     assert monitor.marker_wired is False
+
+
+# ---- claude session-status probe -------------------------------------------
+
+
+def _registry(tmp_path, monkeypatch, entries):
+    """Fake ~/.claude/sessions with the given {filename: dict-or-raw} files."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    d = tmp_path / ".claude" / "sessions"
+    d.mkdir(parents=True)
+    for name, entry in entries.items():
+        text = entry if isinstance(entry, str) else json.dumps(entry)
+        (d / name).write_text(text)
+    return d
+
+
+_SID = "11111111-1111-4111-8111-111111111111"
+
+
+def _claude_adapter():
+    from tandem.harness import get_adapter
+    return get_adapter("claude")
+
+
+def test_pid_alive_own_pid():
+    from tandem.harness.claude_code import _pid_alive
+    assert _pid_alive(os.getpid()) is True
+
+
+def test_session_status_reads_busy_and_waiting(tmp_path, monkeypatch):
+    me = os.getpid()
+    _registry(tmp_path, monkeypatch, {
+        f"{me}.json": {"pid": me, "sessionId": _SID, "status": "busy"},
+    })
+    assert _claude_adapter().session_status(_SID) == "busy"
+    _registry(tmp_path.joinpath("b"), monkeypatch, {
+        f"{me}.json": {"pid": me, "sessionId": _SID, "status": "waiting",
+                       "waitingFor": "input needed"},
+    })
+    assert _claude_adapter().session_status(_SID) == "waiting"
+
+
+def test_session_status_none_when_no_match(tmp_path, monkeypatch):
+    me = os.getpid()
+    _registry(tmp_path, monkeypatch, {
+        f"{me}.json": {"pid": me, "sessionId": "someone-else", "status": "busy"},
+    })
+    assert _claude_adapter().session_status(_SID) is None
+
+
+def test_session_status_none_when_dir_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    assert _claude_adapter().session_status(_SID) is None
+
+
+def test_session_status_skips_stale_dead_pid_entry(tmp_path, monkeypatch):
+    # A crashed run of this same resumed session leaves a dead-pid file
+    # frozen at "busy"; the live entry must win.
+    from tandem.harness import claude_code
+    me = os.getpid()
+    _registry(tmp_path, monkeypatch, {
+        "99999.json": {"pid": 99999, "sessionId": _SID, "status": "busy"},
+        f"{me}.json": {"pid": me, "sessionId": _SID, "status": "waiting"},
+    })
+    monkeypatch.setattr(claude_code, "_pid_alive", lambda pid: pid == me)
+    assert claude_code.ClaudeCodeAdapter().session_status(_SID) == "waiting"
+    # dead-only: no live entry at all reads as no answer
+    monkeypatch.setattr(claude_code, "_pid_alive", lambda pid: False)
+    assert claude_code.ClaudeCodeAdapter().session_status(_SID) is None
+
+
+def test_session_status_busy_wins_among_live_matches(tmp_path, monkeypatch):
+    from tandem.harness import claude_code
+    me = os.getpid()
+    _registry(tmp_path, monkeypatch, {
+        "11.json": {"pid": 11, "sessionId": _SID, "status": "waiting"},
+        "22.json": {"pid": 22, "sessionId": _SID, "status": "busy"},
+    })
+    monkeypatch.setattr(claude_code, "_pid_alive", lambda pid: True)
+    assert claude_code.ClaudeCodeAdapter().session_status(_SID) == "busy"
+
+
+def test_session_status_tolerates_garbage_files(tmp_path, monkeypatch):
+    me = os.getpid()
+    _registry(tmp_path, monkeypatch, {
+        "junk.json": "not json{",
+        "list.json": '["not", "a", "dict"]',
+        "nopid.json": {"sessionId": _SID, "status": "busy"},
+        f"{me}.json": {"pid": me, "sessionId": _SID, "status": "waiting"},
+    })
+    assert _claude_adapter().session_status(_SID) == "waiting"
