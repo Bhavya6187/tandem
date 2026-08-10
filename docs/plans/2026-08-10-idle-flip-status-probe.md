@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Work directly on branch `meta-harness-frame`. The working tree carries **unrelated uncommitted PR #36 fixes** in `src/tandem/frame.py`, `src/tandem/harness/codex.py`, `src/tandem/ptyrun.py`, `tests/test_frame.py`, `tests/test_ptyrun.py`, `docs/plans/2026-08-09-meta-harness-frame.md`. NEVER run `git add -A`, `git add .`, or `git commit -a`; stage only the explicit paths each commit step lists.
+- Work directly on branch `meta-harness-frame` (the PR #36 live-validation fixes are committed as `cc0321a`/`1623e35`; the tree starts clean). Stage only the explicit paths each commit step lists — no `git add -A`/`git add .`/`git commit -a`.
 - Single tier (operator decision): when the probe is wired, its verdict is final. `"busy"` waits; **anything else — `"waiting"`, no matching entry, unreadable file, unknown status — flips immediately.** No fallback to mtime logic, no valve. Eager failure on registry schema drift is accepted ("if it breaks we'll fix it later").
 - Codex flip behavior must be byte-identical: every existing test in `tests/test_runner.py` stays green unmodified.
 - The Stop hook / sentinel wiring is untouched — the transcript tailer uses the sentinel as its wake signal.
