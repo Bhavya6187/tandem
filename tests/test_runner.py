@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 
 from tandem import paths, runner
 from tandem.runner import FlipMonitor, wait_until_safe
@@ -852,3 +853,48 @@ def test_monitor_probe_waiting_fires_immediately(tmp_path):
     assert m.flip_requested is True
     assert m.how == "soft"
     assert control.calls == [[b"\x04"]]
+
+
+def test_runner_wires_status_probe_for_claude(env_factory, monkeypatch):
+    env = env_factory(active="claude")
+    made = {}
+    real = runner.FlipMonitor
+
+    def capture(*a, **kw):
+        made["kw"] = kw
+        return real(*a, **kw)
+
+    monkeypatch.setattr(runner, "FlipMonitor", capture)
+    monkeypatch.setattr(
+        runner, "run_in_pty",
+        lambda argv, cwd=None, frame=None, control=None: 0,
+    )
+    runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
+    probe = made["kw"]["status_probe"]
+    assert probe is not None
+    # the probe closes over the claude sid: feed the registry and ask it
+    me = os.getpid()
+    d = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{me}.json").write_text(json.dumps(
+        {"pid": me, "sessionId": env.session.claude_session_id,
+         "status": "busy"}))
+    assert probe() == "busy"
+
+
+def test_runner_wires_no_probe_for_codex(env_factory, monkeypatch):
+    env = env_factory(active="codex")
+    made = {}
+    real = runner.FlipMonitor
+
+    def capture(*a, **kw):
+        made["kw"] = kw
+        return real(*a, **kw)
+
+    monkeypatch.setattr(runner, "FlipMonitor", capture)
+    monkeypatch.setattr(
+        runner, "run_in_pty",
+        lambda argv, cwd=None, frame=None, control=None: 0,
+    )
+    runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
+    assert made["kw"]["status_probe"] is None

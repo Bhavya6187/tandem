@@ -443,6 +443,13 @@ class InteractiveRunner:
         monitor = FlipMonitor(
             control, adapter.quit_keystrokes(), transcript, sentinel,
             marker_wired=bool(hook_extra),
+            # claude only: codex has no session registry, and a probe that
+            # answers None would flip eagerly mid-turn — absence, not None
+            # answers, is how codex opts out.
+            status_probe=(
+                (lambda: adapter.session_status(active_sid))
+                if active == "claude" else None
+            ),
         )
         frame = FrameIO(
             flip_byte=frame_cfg.flip_byte,

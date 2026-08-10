@@ -19,16 +19,22 @@ compatibility ranges, and where your data lives. (Back to the
   targeting the directory's most recently used session.
 - **The frame: flip without leaving.** Ctrl-] (configurable, consumed at
   the PTY layer, ignored inside bracketed paste) flips the screen to the
-  other harness: pressed mid-turn it arms and fires at the turn-complete
-  marker (press again to cancel — the bar shows the armed state), then
+  other harness: pressed mid-turn it arms and fires at the turn boundary
+  (press again to cancel — the bar shows the armed state), then
   tandem exits the fronted CLI gracefully (quit keystrokes, then SIGTERM,
   then a bounded SIGKILL), lets the incremental sync settle, flips roles,
   and resumes the other side — with no stop at the prompt in between.
-  Where no marker could be wired (codex with a `notify` handler of your
-  own, which tandem won't clobber) ~2s of transcript quiescence stands in;
-  where one was wired, a 120s valve covers a marker that never arrives —
-  far above any plausible tool-call silence, because firing early kills a
-  live turn while firing late only costs a wait (and Ctrl-] cancels). The
+  With claude fronted, the boundary comes from claude's own session
+  registry (`~/.claude/sessions/<pid>.json`, the data `claude agents
+  --json` prints): `busy` holds the flip, anything else fires it — so an
+  idle prompt flips instantly even though claude keeps appending
+  housekeeping to its transcript between turns. With codex fronted the
+  transcript-marker rules stand: where no marker could be wired (codex
+  with a `notify` handler of your own, which tandem won't clobber) ~2s of
+  transcript quiescence stands in; where one was wired, a 120s valve
+  covers a marker that never arrives — far above any plausible tool-call
+  silence, because firing early kills a live turn while firing late only
+  costs a wait (and Ctrl-] cancels). The
   bottom terminal row is tandem's one drawn pixel: the child is told the
   terminal is a row shorter, a scroll region keeps output above the bar,
   and a targeted watcher reasserts it after child screen resets. If a
