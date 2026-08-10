@@ -93,24 +93,56 @@ def _mtime(path: Path | None) -> float:
         return 0.0
 
 
+# Quiescence means two different things depending on whether the
+# turn-complete marker was wired at launch, so it gets two constants.
+_QUIESCE_S = 2.0            # marker-less: the only turn-boundary signal there is
+_MISSED_MARKER_VALVE_S = 30.0
+"""Safety valve for a marker that was wired but never arrived — a hook that
+failed to run, a notify handler that died. NOT turn pacing: real turns go
+quiet for seconds at a time (a long tool call appends nothing between the
+tool_use line and the tool_result line), so anything near the marker-less 2s
+would fire the flip 58s into a 60s `npm test` and kill the harness mid-turn.
+When the marker is wired it is the trigger; this is the last resort."""
+
+
+def _quiesce_default(marker_wired: bool) -> float:
+    return _MISSED_MARKER_VALVE_S if marker_wired else _QUIESCE_S
+
+
 def wait_until_safe(
     transcript: Path | None,
     sentinel: Path | None,
     cancelled: Callable[[], bool],
-    quiesce: float = 2.0,
+    quiesce: float | None = None,
     poll: float = 0.2,
+    marker_wired: bool = False,
 ) -> bool:
     """Block until the turn boundary. The transcript's last append lands
     before the Stop hook / notify touches the sentinel, so idle means the
-    sentinel is at least as new as the transcript; otherwise wait for the
-    marker touch, with transcript quiescence as the marker-less fallback.
-    Returns False if `cancelled()` turned true first.
+    sentinel is at least as new as the transcript. Returns False if
+    `cancelled()` turned true first.
+
+    Two modes, because transcript quiescence means different things:
+
+    - `marker_wired=True` (the harness was launched with the turn-complete
+      hook — the common case): the marker touch is the only normal trigger.
+      Quiescence stays wired as a 30s valve for a marker that never arrives,
+      never as a turn-pacing signal.
+    - `marker_wired=False` (no hook — e.g. codex with a user-configured
+      notify handler tandem refuses to clobber): 2s of transcript quiescence
+      is the fallback boundary, because nothing better exists.
+
+    `quiesce=None` takes the mode's default, so the mode alone is enough to
+    be safe; pass a number to override (tests scale it down).
 
     Both clocks here are wall-clock on purpose: the deadline is derived from
     file mtimes, so `time.time()` is the only comparable reading (monotonic
     would be right for a pure timeout, but there is none in this loop).
-    A missing file reads as mtime 0, which makes a fresh session (no files)
-    idle and a marker-less mid-turn session take the quiescence path."""
+    A missing file reads as mtime 0, which makes a fresh session (no files
+    yet) idle in either mode, and leaves a marker-less session on the
+    quiescence path for as long as it runs."""
+    if quiesce is None:
+        quiesce = _quiesce_default(marker_wired)
     while True:
         if cancelled():
             return False
@@ -125,14 +157,29 @@ def wait_until_safe(
 class FlipMonitor:
     """Owns the flip lifecycle: the armed flag (toggle to cancel), the
     turn-boundary wait, and the termination ladder through the PtyControl.
-    One background thread; all public methods are thread-safe."""
+    One background thread; all public methods are thread-safe.
+
+    `marker_wired` says whether this launch actually got a turn-complete
+    hook, which decides how the wait reads transcript quiescence (see
+    `wait_until_safe`). The caller derives it from the adapter: the argv the
+    runner already appended, `adapter.hook_argv_extra(sentinel)`, is empty
+    exactly when no hook was wired (codex declining to clobber a
+    user-configured notify), so `marker_wired=bool(hook_extra)` — reusing the
+    list that went into argv rather than calling the adapter a second time,
+    since a second call re-reads config and could disagree with what was
+    actually launched."""
 
     def __init__(self, control, quit_bytes: list[bytes],
-                 transcript: Path | None, sentinel: Path):
+                 transcript: Path | None, sentinel: Path,
+                 marker_wired: bool = False,
+                 quiesce: float | None = None, poll: float = 0.2):
         self.control = control
         self.quit_bytes = quit_bytes
         self.transcript = transcript
         self.sentinel = sentinel
+        self.marker_wired = marker_wired
+        self.quiesce = _quiesce_default(marker_wired) if quiesce is None else quiesce
+        self.poll = poll
         self.flip_requested = False
         self.how = ""
         self._armed = threading.Event()
@@ -183,6 +230,9 @@ class FlipMonitor:
                 cancelled=lambda: (
                     not self._armed.is_set() or self._stop.is_set()
                 ),
+                quiesce=self.quiesce,
+                poll=self.poll,
+                marker_wired=self.marker_wired,
             )
             if self._stop.is_set():
                 return
