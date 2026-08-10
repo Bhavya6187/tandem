@@ -159,7 +159,7 @@ def test_wait_wired_ignores_turn_pacing_quiet(tmp_path):
     # With the marker wired, transcript quiet is NOT a turn boundary: a long
     # tool call writes nothing between the tool_use append and the tool_result
     # append, and firing there kills the harness mid-turn. quiesce is scaled
-    # down (1.0 stands in for the real 30s valve) to keep the test fast — the
+    # down (1.0 stands in for the real 120s valve) to keep the test fast — the
     # valve does eventually trip, it is just never the normal trigger.
     t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
     _touch(t, time.time())         # turn in flight
@@ -197,8 +197,8 @@ def test_wait_wired_default_quiesce_is_the_valve_not_2s(tmp_path):
         done.set()
 
     threading.Thread(target=waiter, daemon=True).start()
-    assert not done.wait(timeout=0.4)   # parked behind the 30s valve
-    cancel.set()                        # don't leave it parked for 30s
+    assert not done.wait(timeout=0.4)   # parked behind the 120s valve
+    cancel.set()                        # don't leave it parked for 120s
     assert done.wait(timeout=2)
     assert result["ok"] is False
 
@@ -440,8 +440,12 @@ def test_monitor_quiesce_defaults_by_mode(tmp_path):
     override = FlipMonitor(_StubControl(), [], None, s, marker_wired=True,
                            quiesce=1.5)
     assert unwired.quiesce == 2.0        # marker-less fallback
-    assert wired.quiesce == 30.0         # missed-marker valve, not turn pacing
+    assert wired.quiesce == 120.0        # missed-marker valve, not turn pacing
     assert override.quiesce == 1.5       # explicit injection wins
+    # The valve has to outlast the longest silence a real turn can produce (a
+    # full test suite between the tool_use and tool_result appends), because
+    # firing early kills that turn while firing late only costs a wait.
+    assert wired.quiesce > 60.0
 
 
 def test_monitor_passes_mode_through_to_wait(tmp_path, monkeypatch):
@@ -465,7 +469,7 @@ def test_monitor_passes_mode_through_to_wait(tmp_path, monkeypatch):
         time.sleep(0.05)
     m.stop()
     assert m.flip_requested is True
-    assert seen == {"quiesce": 30.0, "poll": 0.05, "marker_wired": True,
+    assert seen == {"quiesce": 120.0, "poll": 0.05, "marker_wired": True,
                     "provider_reads": None}
 
 

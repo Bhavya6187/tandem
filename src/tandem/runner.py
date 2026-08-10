@@ -96,13 +96,21 @@ def _mtime(path: Path | None) -> float:
 # Quiescence means two different things depending on whether the
 # turn-complete marker was wired at launch, so it gets two constants.
 _QUIESCE_S = 2.0            # marker-less: the only turn-boundary signal there is
-_MISSED_MARKER_VALVE_S = 30.0
+_MISSED_MARKER_VALVE_S = 120.0
 """Safety valve for a marker that was wired but never arrived — a hook that
 failed to run, a notify handler that died. NOT turn pacing: real turns go
-quiet for seconds at a time (a long tool call appends nothing between the
-tool_use line and the tool_result line), so anything near the marker-less 2s
-would fire the flip 58s into a 60s `npm test` and kill the harness mid-turn.
-When the marker is wired it is the trigger; this is the last resort."""
+quiet for minutes at a time (a long tool call appends nothing between the
+tool_use line and the tool_result line — a full test suite, a slow install,
+a `sleep 90`), and firing there kills the harness mid-turn.
+
+The two error costs are wildly asymmetric, which is what sets the number.
+Firing too early costs a live turn: the harness is terminated between the
+tool call and its result, and that work is gone. Firing too late costs
+nothing but a wait, and only in the case this valve exists for at all — a
+dead hook — where a second Ctrl-] cancels the pending flip and the user can
+quit the harness by hand. So the valve sits far above any plausible
+tool-call silence rather than close to it. When the marker is wired it is
+the trigger; this is the last resort."""
 
 
 def _quiesce_default(marker_wired: bool) -> float:
