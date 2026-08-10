@@ -2,14 +2,16 @@
 
 Bare `tandem` / `tandem resume` enter here: run the active harness on its
 PTY; when the user exits it, offer a prompt instead of returning to the OS
-shell. `switch` flips roles and re-enters immediately; other lines are
-dispatched through the click group so one-shot and prompt behavior never
-drift apart.
+shell. `switch` flips roles and re-enters immediately, and a flip asked for
+from inside the harness (Ctrl-]) re-enters the other one with no prompt stop
+at all; other lines are dispatched through the click group so one-shot and
+prompt behavior never drift apart.
 """
 
 from __future__ import annotations
 
 import shlex
+import sys
 
 import click
 
@@ -33,13 +35,14 @@ def run_shell(tandem_id: str, sink_factory, input_fn=None, run_harness=None) -> 
         def run_harness(session):
             from .runner import InteractiveRunner
 
-            return InteractiveRunner(session, sink_factory=sink_factory).run()
+            r = InteractiveRunner(session, sink_factory=sink_factory)
+            return r.run(), r.flip_requested
 
     # The resume hint is the only place the id is shown, so it prints from a
     # finally: no failure inside the loop may cost the user their session.
     code = 1
     try:
-        code = _enter(tandem_id, run_harness, code)
+        code = _flip_loop(tandem_id, run_harness, _enter(tandem_id, run_harness, code))
         while True:
             with StateStore() as store:
                 session = store.get_session(tandem_id)
@@ -60,7 +63,9 @@ def run_shell(tandem_id: str, sink_factory, input_fn=None, run_harness=None) -> 
             if line in ("exit", "quit"):
                 break
             if line in ("", "resume"):
-                code = _enter(tandem_id, run_harness, code)
+                code = _flip_loop(
+                    tandem_id, run_harness, _enter(tandem_id, run_harness, code)
+                )
                 continue
             if line.split(maxsplit=1)[0] == "run":
                 parsed = _split_run_line(line)
@@ -94,7 +99,9 @@ def run_shell(tandem_id: str, sink_factory, input_fn=None, run_harness=None) -> 
                 )
                 continue
             if argv == ["switch"]:
-                code = _switch(tandem_id, run_harness, code)
+                code = _flip_loop(
+                    tandem_id, run_harness, _switch(tandem_id, run_harness, code)
+                )
                 continue
             _dispatch(argv, tandem_id)
     finally:
@@ -132,9 +139,34 @@ def _split_run_line(line: str) -> tuple[str, str] | None:
     return target, prompt
 
 
-def _switch(tandem_id: str, run_harness, code: int) -> int:
+def _norm(res) -> tuple[int, bool]:
+    """run_harness returns `(code, flip)`; a bare int (legacy callers and
+    test seams) means "exited, no flip"."""
+    return res if isinstance(res, tuple) else (res, False)
+
+
+def _clear_screen() -> None:
+    if sys.stdout.isatty():  # pragma: no cover - interactive only
+        sys.stdout.write("\x1b[2J\x1b[H")
+        sys.stdout.flush()
+
+
+def _flip_loop(tandem_id: str, run_harness, first: tuple[int, bool]) -> int:
+    """Keep flipping (Ctrl-]) until a session ends without requesting one.
+    No prompt stop between flips — this is the frame's tab feel. A failed
+    flip reports itself and returns no-flip, which ends the loop and drops
+    the user back at the prompt with the session intact."""
+    code, flip = first
+    while flip:
+        _clear_screen()
+        code, flip = _switch(tandem_id, run_harness, code)
+    return code
+
+
+def _switch(tandem_id: str, run_harness, code: int) -> tuple[int, bool]:
     """Flip roles and re-enter the newly active harness. Returns the exit
-    code to carry forward (unchanged if the flip failed)."""
+    code to carry forward (unchanged if the flip failed) and whether the
+    re-entered harness asked for another flip."""
     from .cli import _report_switch
 
     with StateStore() as store:
@@ -146,7 +178,7 @@ def _switch(tandem_id: str, run_harness, code: int) -> int:
                 fg="red",
                 err=True,
             )
-            return code
+            return code, False
         old = session.active
         try:
             new_active, problems, mem = ops.switch_session(store, session)
@@ -154,29 +186,30 @@ def _switch(tandem_id: str, run_harness, code: int) -> int:
             click.secho(
                 f"switch failed: {type(exc).__name__}: {exc}", fg="red", err=True
             )
-            return code
+            return code, False
     _report_switch(old, new_active, problems, mem)
     return _enter(tandem_id, run_harness, code)
 
 
-def _enter(tandem_id: str, run_harness, code: int) -> int:
-    """Run the active harness and return its exit code. A failed launch (or a
-    session row that vanished) is reported and `code` is carried forward, so
-    the caller returns to the prompt instead of losing the session."""
+def _enter(tandem_id: str, run_harness, code: int) -> tuple[int, bool]:
+    """Run the active harness; returns (exit code, flip requested). A failed
+    launch (or a session row that vanished) is reported and `code` is carried
+    forward with no flip, so the caller returns to the prompt instead of
+    losing the session."""
     try:
         with StateStore() as store:
             session = store.get_session(tandem_id)
             if session is None:
                 raise LookupError(f"session {tandem_id} is not in the state store")
             store.touch_used(tandem_id)
-        return run_harness(session)
+        return _norm(run_harness(session))
     except Exception as exc:
         click.secho(
             f"could not run the harness: {type(exc).__name__}: {exc}",
             fg="red",
             err=True,
         )
-        return code
+        return code, False
 
 
 def _dispatch(argv: list[str], tandem_id: str) -> None:

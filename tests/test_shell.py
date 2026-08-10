@@ -374,6 +374,130 @@ def test_malformed_run_still_gets_click_usage_error(sess, capsys, monkeypatch):
     assert "commands:" in cap.out
 
 
+def test_flip_reenters_other_harness_without_prompt(sess, monkeypatch):
+    """Ctrl-] inside the harness flips and re-enters with no prompt stop."""
+    def fake_switch(store, session):
+        new = "codex" if session.active == "claude" else "claude"
+        store.set_active(session.tandem_id, new)
+        return new, [], FakeMem()
+
+    monkeypatch.setattr(shell.ops, "switch_session", fake_switch)
+    calls = []
+
+    def run_harness(session):
+        calls.append(session.active)
+        if len(calls) == 1:
+            return 0, True   # user pressed Ctrl-]
+        return 0, False      # then exited normally
+
+    prompts = []
+
+    def input_fn(prompt):
+        prompts.append(prompt)
+        raise EOFError       # leave the shell at the first prompt
+
+    code = shell.run_shell(
+        sess.tandem_id, None, input_fn=input_fn, run_harness=run_harness,
+    )
+    assert code == 0
+    assert calls == ["claude", "codex"]  # flip switched roles
+    assert prompts == ["tandem (codex)> "]  # one prompt, after the plain exit
+
+
+def test_flip_loop_keeps_flipping_until_a_plain_exit(sess, monkeypatch):
+    """Successive flips chain without ever touching the prompt."""
+    def fake_switch(store, session):
+        new = "codex" if session.active == "claude" else "claude"
+        store.set_active(session.tandem_id, new)
+        return new, [], FakeMem()
+
+    monkeypatch.setattr(shell.ops, "switch_session", fake_switch)
+    calls = []
+
+    def run_harness(session):
+        calls.append(session.active)
+        return 0, len(calls) < 4
+
+    prompts = []
+
+    def input_fn(prompt):
+        prompts.append(prompt)
+        raise EOFError
+
+    shell.run_shell(sess.tandem_id, None, input_fn=input_fn, run_harness=run_harness)
+    assert calls == ["claude", "codex", "claude", "codex"]
+    assert len(prompts) == 1
+
+
+def test_flip_from_the_typed_switch_command(sess, monkeypatch):
+    """A flip requested inside the harness `switch` entered also chains."""
+    def fake_switch(store, session):
+        new = "codex" if session.active == "claude" else "claude"
+        store.set_active(session.tandem_id, new)
+        return new, [], FakeMem()
+
+    monkeypatch.setattr(shell.ops, "switch_session", fake_switch)
+    calls = []
+
+    def run_harness(session):
+        calls.append(session.active)
+        return 0, len(calls) == 2  # flip out of the harness `switch` entered
+
+    shell.run_shell(
+        sess.tandem_id, None, input_fn=scripted("switch", "exit"),
+        run_harness=run_harness,
+    )
+    assert calls == ["claude", "codex", "claude"]
+
+
+def test_flip_failure_falls_back_to_prompt(sess, capsys, monkeypatch):
+    """ops.switch_session raising must not lose the session or spin."""
+    def run_harness(session):
+        return 0, True
+
+    def boom(store, session):
+        raise RuntimeError("no flip for you")
+
+    monkeypatch.setattr(shell.ops, "switch_session", boom)
+
+    code = shell.run_shell(
+        sess.tandem_id, None, input_fn=scripted(), run_harness=run_harness,
+    )
+    cap = capsys.readouterr()
+    assert code == 0  # carried through; session intact at the prompt
+    assert "switch failed: RuntimeError: no flip for you" in cap.err
+    assert f"to continue this session: tandem resume {sess.tandem_id}" in cap.out
+
+
+def test_flip_with_a_vanished_session_row_stops_the_loop(sess, capsys):
+    """A session deleted mid-flight breaks the loop instead of spinning."""
+    def run_harness(session):
+        conn = sqlite3.connect(paths.state_db_path())
+        with conn:
+            conn.execute(
+                "DELETE FROM sessions WHERE tandem_id = ?", (sess.tandem_id,)
+            )
+        conn.close()
+        return 0, True
+
+    code = shell.run_shell(
+        sess.tandem_id, None, input_fn=scripted(), run_harness=run_harness,
+    )
+    assert code == 0
+    assert "switch failed" in capsys.readouterr().err
+
+
+def test_int_returning_run_harness_still_works(sess):
+    """Legacy seam: a plain int means no flip."""
+    def run_harness(session):
+        return 7
+
+    code = shell.run_shell(
+        sess.tandem_id, None, input_fn=scripted(), run_harness=run_harness,
+    )
+    assert code == 7
+
+
 def test_prompt_switch_reports_like_the_one_shot(sess, capsys, monkeypatch):
     """Display names, memory actions and the doctor advisory — the prompt is
     the primary switch path, so it must not report less than `tandem switch`."""
