@@ -1823,6 +1823,38 @@ Run these in addition to the checklist above:
 - [ ] Marker-less fresh codex (user-owned `notify`): flip armed in the first second of the session may fire early until the rollout is discovered — confirm the window is imperceptible in practice.
 - [ ] Note: the pump loop below the tty check has no automated coverage by design (pytest has no tty) — live validation is this code's only integration test.
 
+## Task 13 live-validation results — 2026-08-09, Cursor terminal, codex 0.147.0
+
+The merge-blocker item fired on first contact, and root-caused to two frame
+bugs plus one compat break (session `dbce59329de6`/`05bec5f70889` forensics):
+
+- **Flip key dead under codex (fixed).** codex's TUI queries the kitty
+  keyboard protocol (`\x1b[?u`) and pushes enhancement flags (`\x1b[>7u`)
+  when the terminal supports them — the Cursor terminal does. From then on
+  Ctrl-] arrives as CSI-u (`\x1b[93;5u`), never as the raw 0x1D byte, so the
+  detector never saw it: flips *out of claude* worked, flips *out of codex*
+  were silently dead. `FlipDetector` now recognizes the CSI-u spelling of
+  the configured flip key (press + repeat count, release swallowed, lock
+  modifiers tolerated, other chords on the same key forwarded).
+- **Bar killed by a benign scroll region (fixed).** codex asserts
+  `\x1b[1;<rows-2>r` at TUI startup to guard its composer rows. The
+  "parameterized DECSTBM ⇒ drop" rule read that as a terminal conflict and
+  tore the bar down instantly — the bar could never survive a codex phase.
+  `OutputGuard` now judges a region by its bottom edge against the real
+  terminal height: above the bar row is benign (`child_owns_region` keeps
+  repaints from stomping the child's region), reaching the bar row or
+  defaulting to full height still drops.
+- **codex 0.147 stores sessions in sqlite (OPEN compat break).** The live
+  codex holds no rollout JSONL open; threads live in
+  `~/.codex/state_5.sqlite` (`thread_sections` et al.) and a fresh 0.147
+  session writes no rollout file at all. Tandem's codex tailer/sync is
+  blind against it, and turn-boundary quiescence on a never-touched rollout
+  is trivially "idle" (a flip can fire mid-turn on marker-less codex
+  sessions). Needs its own design pass; not a frame bug.
+- Also observed: `codex resume <id>` of a tandem-seeded JSONL rollout still
+  launches and runs on 0.147 (the model_provider seed field holds up), but
+  nothing is appended back to the rollout.
+
 ## Post-merge follow-ups (from review triage; none block merge)
 
 flip_key denylist for Tab/Enter/Esc collisions; pin the `bar_row` writable contract and the config→FrameIO seam with tests; carry-truncation test filler byte; `\x1b[0m` prefix before the bar's SGR; `time.monotonic()` in `_wait_dead`; EIO guard on the pump's stdin read; post-wait armed re-check (cancel TOCTOU); bound the flip-loop test fakes; extract `paths.bar_drop_marker()`; tail-join timeout vs `switch_session` drain lock (pre-existing); `docs/formats.md` cross-check next release.
