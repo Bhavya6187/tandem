@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from . import paths
-from .config import load_harness_args
+from .config import load_frame_config, load_harness_args
 from .events import SessionContext
 from .harness import get_adapter
-from .ptyrun import run_in_pty
+from .ptyrun import FrameIO, PtyControl, run_in_pty
 from .state import PairedSession, StateStore, SyncCursor
 from .tailer import JsonlTailer, TailedLine, TranscriptTruncated, TranscriptWatcher
 from .util import json_line
@@ -331,6 +331,8 @@ class InteractiveRunner:
     def __init__(self, session: PairedSession, sink_factory: SinkFactory):
         self.session = session
         self.sink_factory = sink_factory
+        # set here too so the attribute exists even if run() raises early
+        self.flip_requested = False
 
     def run(self) -> int:
         session = self.session
@@ -350,7 +352,27 @@ class InteractiveRunner:
         sentinel.parent.mkdir(parents=True, exist_ok=True)
         argv = adapter.interactive_argv(active_sid, fresh)
         argv += load_harness_args(active)
-        argv += adapter.hook_argv_extra(sentinel)
+        # bound, not re-called: hook_argv_extra re-reads config per call
+        # (codex checks the user's config.toml for a notify handler), so a
+        # second call could disagree with the argv actually launched.
+        hook_extra = adapter.hook_argv_extra(sentinel)
+        argv += hook_extra
+
+        frame_cfg = load_frame_config()
+        control = PtyControl()
+        monitor = FlipMonitor(
+            control, adapter.quit_keystrokes(), transcript, sentinel,
+            marker_wired=bool(hook_extra),
+        )
+        frame = FrameIO(
+            flip_byte=frame_cfg.flip_byte,
+            on_flip=monitor.flip_pressed,
+            armed=monitor.armed,
+            bar=frame_cfg.bar,
+            active=active,
+            other=session.shadow,
+        )
+        self.flip_requested = False
 
         stop = threading.Event()
         spawn_time = time.time()
@@ -409,12 +431,30 @@ class InteractiveRunner:
 
         thread = threading.Thread(target=tail_thread, name="tandem-tail", daemon=True)
         thread.start()
+        monitor.start()   # before the try: stop() on an unstarted thread raises
         try:
-            code = run_in_pty(argv, cwd=session.cwd)
+            code = run_in_pty(argv, cwd=session.cwd, frame=frame, control=control)
         finally:
             stop.set()
+            # stop() first, and only then read the monitor: `flip_requested`
+            # and `how` are assigned as the ladder finishes, so a read before
+            # the join races the flip thread.
+            monitor.stop()
             thread.join(timeout=10)
             sentinel.unlink(missing_ok=True)
+            self.flip_requested = monitor.flip_requested
+        if frame.bar_dropped:
+            marker = paths.tandem_home() / "tmp" / f"{session.tandem_id}-bar-dropped"
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.touch()
+            except OSError:
+                pass  # doctor loses one hint; the session's exit code is not
+                      # negotiable, and the note below still reaches the user
+            errors.append(
+                "status bar disabled for this session (terminal conflict);"
+                " set [frame] bar = false to silence"
+            )
         for err in errors:
             print(f"tandem: sync error: {err}")
         return code

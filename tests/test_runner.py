@@ -18,7 +18,7 @@ def _run_capturing_argv(env, monkeypatch):
     calls = {}
     monkeypatch.setattr(
         runner, "run_in_pty",
-        lambda argv, cwd=None: calls.update(argv=argv) or 0,
+        lambda argv, cwd=None, **kw: calls.update(argv=argv) or 0,
     )
     code = runner.InteractiveRunner(
         env.session, lambda store, session, source: _Sink()).run()
@@ -75,7 +75,7 @@ def test_codex_fresh_mint_gets_args_after_bare_binary(env_factory, monkeypatch):
     calls = {}
     monkeypatch.setattr(
         runner, "run_in_pty",
-        lambda argv, cwd=None: calls.update(argv=argv) or 0,
+        lambda argv, cwd=None, **kw: calls.update(argv=argv) or 0,
     )
     code = runner.InteractiveRunner(
         session, lambda store, session, source: _Sink()).run()
@@ -336,3 +336,120 @@ def test_monitor_passes_mode_through_to_wait(tmp_path, monkeypatch):
     m.stop()
     assert m.flip_requested is True
     assert seen == {"quiesce": 30.0, "poll": 0.05, "marker_wired": True}
+
+
+# -- the runner wiring the frame ------------------------------------------
+
+
+class _DeadChild:
+    """Stands in for the pty child a real run_in_pty attaches; the
+    termination ladder reads it as already gone ("dead") without waiting out
+    the attach timeout."""
+
+    def isalive(self):
+        return False
+
+
+def test_runner_passes_frame_and_control(env_factory, monkeypatch):
+    env = env_factory(active="claude")
+    seen = {}
+
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None):
+        seen.update(frame=frame, control=control)
+        return 0
+
+    monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
+    r = runner.InteractiveRunner(env.session, lambda st, se, so: _Sink())
+    code = r.run()
+    assert code == 0
+    assert seen["control"] is not None
+    frame = seen["frame"]
+    assert frame is not None
+    assert frame.flip_byte == 0x1D
+    assert frame.active == "claude" and frame.other == "codex"
+    assert r.flip_requested is False
+
+
+def test_runner_reports_flip_requested(env_factory, monkeypatch):
+    env = env_factory(active="claude")
+    sentinel = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-claude.turn"
+
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None):
+        control.attach(_DeadChild())
+        frame.on_flip()  # user pressed the keybind
+        deadline = time.time() + 3
+        while not frame.armed() and time.time() < deadline:
+            time.sleep(0.02)
+        sentinel.touch()  # turn-complete marker: the wait releases
+        # the monitor's ladder finds no real child: control.terminate
+        # returns "dead", flip_requested still set
+        deadline = time.time() + 3
+        while frame.armed() and time.time() < deadline:
+            time.sleep(0.02)
+        return 0
+
+    monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
+    r = runner.InteractiveRunner(env.session, lambda st, se, so: _Sink())
+    r.run()
+    assert r.flip_requested is True
+
+
+def test_runner_writes_bar_drop_marker(env_factory, monkeypatch):
+    env = env_factory(active="claude")
+
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None):
+        frame.bar_dropped = True
+        return 0
+
+    monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
+    runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
+    marker = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-bar-dropped"
+    assert marker.exists()
+
+
+def _run_capturing_monitor(env, monkeypatch):
+    made = {}
+    real = runner.FlipMonitor
+
+    def capture(*a, **kw):
+        made["monitor"] = real(*a, **kw)
+        return made["monitor"]
+
+    monkeypatch.setattr(runner, "FlipMonitor", capture)
+    monkeypatch.setattr(
+        runner, "run_in_pty",
+        lambda argv, cwd=None, frame=None, control=None: 0,
+    )
+    runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
+    return made["monitor"]
+
+
+def test_marker_wired_derived_from_the_argv_hook_extras(env_factory, monkeypatch):
+    # The hook extras that went into argv decide the mode, and they are read
+    # once: hook_argv_extra re-reads config per call, so a second call could
+    # disagree with what was actually launched.
+    from tandem.harness.claude_code import ClaudeCodeAdapter
+
+    env = env_factory(active="claude")
+    calls = []
+    real_extra = ClaudeCodeAdapter.hook_argv_extra
+
+    def counting(self, sentinel):
+        calls.append(sentinel)
+        return real_extra(self, sentinel)
+
+    monkeypatch.setattr(ClaudeCodeAdapter, "hook_argv_extra", counting)
+    monitor = _run_capturing_monitor(env, monkeypatch)
+    assert monitor.marker_wired is True
+    assert len(calls) == 1
+
+
+def test_marker_wired_false_when_adapter_injects_no_hook(env_factory, monkeypatch):
+    # The marker-less shape: the adapter declined to wire a hook (codex
+    # refusing to clobber a user notify), so quiescence is the only boundary.
+    from tandem.harness.claude_code import ClaudeCodeAdapter
+
+    env = env_factory(active="claude")
+    monkeypatch.setattr(ClaudeCodeAdapter, "hook_argv_extra", lambda self, s: [])
+    monitor = _run_capturing_monitor(env, monkeypatch)
+    assert monitor.marker_wired is False
