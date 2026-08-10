@@ -112,6 +112,20 @@ def switch_session(store: StateStore, session: PairedSession):
         _create_codex_shadow_late(store, session)
         session = store.get_session(session.tandem_id) or session
 
+    # If claude never ran, its file does not exist either: claude's CLI
+    # creates the transcript on the first turn, not at launch, so a flip
+    # away from a zero-turn claude leaves its recorded id with no file and
+    # the drain below no target to append to. Seed it now — but only when
+    # tandem has never consumed a byte of it; a consumed-then-missing file
+    # is data loss, and the drain's hard error is the right answer there.
+    if new_active == "claude" and session.claude_session_id:
+        expected = get_adapter("claude").expected_transcript_path(
+            session.cwd, session.claude_session_id
+        )
+        never_ran = store.get_cursor(session.tandem_id, "claude").byte_offset == 0
+        if not expected.exists() and never_ran:
+            _create_claude_shadow_late(store, session)
+
     drain_source(store, session, old_active, flush_dangling=True)
     fast_forward(store, session, new_active)
     store.set_active(session.tandem_id, new_active)
@@ -132,6 +146,24 @@ def switch_session(store: StateStore, session: PairedSession):
         problems = validate_transcript(new_active, transcript,
                                        getattr(session, f"{new_active}_session_id"))
     return new_active, problems, memory_report
+
+
+def _create_claude_shadow_late(store: StateStore, session: PairedSession) -> None:
+    from .constants import SEED_NOTE
+    from .runner import ctx_from_cursor
+
+    adapter = get_adapter("claude")
+    cursor = store.get_cursor(session.tandem_id, session.active)
+    ctx = ctx_from_cursor(session, session.active, cursor)
+    # Any leaf uuid the cursor still holds points into the missing file;
+    # the seed is the new file's root, so it must not chain onto it.
+    ctx.claude_leaf_uuid = None
+    note = SEED_NOTE.format(
+        tandem_id=session.tandem_id, other=get_adapter(session.active).display_name
+    )
+    adapter.create_shadow_transcript(session.cwd, session.claude_session_id, ctx, note)
+    cursor.pending["claude_leaf_uuid"] = ctx.claude_leaf_uuid
+    store.save_cursor(cursor)
 
 
 def _create_codex_shadow_late(store: StateStore, session: PairedSession) -> None:
