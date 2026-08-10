@@ -131,6 +131,96 @@ def test_flip_after_dead_escape_fragment_still_fires():
     assert f1 + f2 == 1
 
 
+# -- kitty keyboard protocol (CSI u) flip encoding -------------------------
+#
+# codex's TUI pushes kitty enhancement flags (\x1b[>7u) on terminals that
+# support them, after which Ctrl-] arrives as \x1b[93;5u — never as the raw
+# 0x1D byte. The detector has to speak both encodings or the flip key is
+# silently dead for the whole codex phase (observed live on codex 0.147).
+
+
+def test_kitty_flip_press_consumed_and_counted():
+    d = FlipDetector(FLIP)
+    out, flips = d.feed(b"a\x1b[93;5ub")
+    assert out == b"ab"
+    assert flips == 1
+
+
+def test_kitty_flip_event_type_press_counted():
+    out, flips = FlipDetector(FLIP).feed(b"\x1b[93;5:1u")
+    assert out == b"" and flips == 1
+
+
+def test_kitty_flip_repeat_counted_like_legacy_autorepeat():
+    # legacy autorepeat delivers the raw byte again and again; the CSI-u
+    # repeat event (:2) keeps that behavior instead of inventing a new one
+    out, flips = FlipDetector(FLIP).feed(b"\x1b[93;5:2u")
+    assert out == b"" and flips == 1
+
+
+def test_kitty_flip_release_swallowed_not_counted():
+    # the release (:3) belongs to a press tandem already consumed: forwarding
+    # it hands the child a key-up for a key it never saw go down, and
+    # counting it would double every flip
+    out, flips = FlipDetector(FLIP).feed(b"\x1b[93;5:3u")
+    assert out == b"" and flips == 0
+
+
+def test_kitty_flip_with_lock_modifiers_counted():
+    # capslock (64) and numlock (128) ride along on real keyboards and must
+    # not unbind the flip key
+    out, flips = FlipDetector(FLIP).feed(b"\x1b[93;69u\x1b[93;133u")
+    assert out == b"" and flips == 2
+
+
+def test_kitty_flip_with_alternate_codepoints_counted():
+    # "report alternate keys" (flag 4, part of the >7u push) appends
+    # shifted/base-layout codepoints after a colon
+    out, flips = FlipDetector(FLIP).feed(b"\x1b[93:125;5u")
+    assert out == b"" and flips == 1
+
+
+def test_kitty_other_ctrl_key_passes_through():
+    out, flips = FlipDetector(FLIP).feed(b"\x1b[97;5u")   # ctrl-a
+    assert out == b"\x1b[97;5u" and flips == 0
+
+
+def test_kitty_flip_key_without_plain_ctrl_passes_through():
+    # ctrl+shift+] (mods 6) is a different chord, not the flip key
+    out, flips = FlipDetector(FLIP).feed(b"\x1b[93;6u")
+    assert out == b"\x1b[93;6u" and flips == 0
+
+
+def test_kitty_flip_split_across_feeds_still_fires():
+    d = FlipDetector(FLIP)
+    out1, f1 = d.feed(b"\x1b[93;5")
+    out2, f2 = d.feed(b"u")
+    assert out1 + out2 == b""
+    assert f1 + f2 == 1
+
+
+def test_kitty_flip_inside_bracketed_paste_passes_through():
+    d = FlipDetector(FLIP)
+    out, flips = d.feed(b"\x1b[200~\x1b[93;5u\x1b[201~")
+    assert out == b"\x1b[200~\x1b[93;5u\x1b[201~"
+    assert flips == 0
+
+
+def test_kitty_flip_for_rebound_letter_key():
+    # [frame] flip_key = "ctrl-t" (0x14): kitty reports the lowercase
+    # codepoint (116); the legacy byte stays bound alongside
+    d = FlipDetector(0x14)
+    out, flips = d.feed(b"\x1b[116;5u")
+    assert out == b"" and flips == 1
+    out, flips = d.feed(b"\x14")
+    assert out == b"" and flips == 1
+
+
+def test_kitty_lookalike_ctrl_arrow_passes_through():
+    out, flips = FlipDetector(FLIP).feed(b"\x1b[1;5C")
+    assert out == b"\x1b[1;5C" and flips == 0
+
+
 def test_guard_plain_output_no_verdict():
     assert OutputGuard().feed(b"hello \x1b[31mred\x1b[0m") == ""
 
@@ -154,8 +244,55 @@ def test_guard_bare_region_reset_triggers_reassert():
 
 
 def test_guard_parameterized_region_triggers_drop():
-    # the child drives its own scroll regions: the bar cannot coexist
+    # rows unknown (the default): any parameterized region must be assumed
+    # to cover the bar row
     assert OutputGuard().feed(b"\x1b[5;40r") == "drop"
+
+
+def test_guard_child_region_above_the_bar_is_benign():
+    # codex's TUI asserts \x1b[1;<rows-2>r at startup to guard its own
+    # composer rows. That region never touches tandem's bar row, so it is
+    # not a conflict — dropping here means the bar can never survive a
+    # codex phase (the live-validation blocker).
+    g = OutputGuard(rows=40)
+    assert g.feed(b"\x1b[1;38r") == "reassert"
+    assert g.child_owns_region is True
+
+
+def test_guard_region_bottom_just_under_the_bar_is_benign():
+    # rows-1 is exactly tandem's own region shape
+    assert OutputGuard(rows=40).feed(b"\x1b[1;39r") == "reassert"
+
+
+def test_guard_child_region_reaching_the_bar_row_drops():
+    assert OutputGuard(rows=40).feed(b"\x1b[1;40r") == "drop"
+
+
+def test_guard_single_param_region_still_drops():
+    # bottom omitted defaults to the last row: bar row included
+    assert OutputGuard(rows=40).feed(b"\x1b[5r") == "drop"
+
+
+def test_guard_bare_reset_releases_the_child_region():
+    g = OutputGuard(rows=40)
+    assert g.feed(b"\x1b[1;38r") == "reassert"
+    assert g.feed(b"\x1b[r") == "reassert"
+    assert g.child_owns_region is False
+
+
+def test_guard_ris_releases_the_child_region():
+    g = OutputGuard(rows=40)
+    g.feed(b"\x1b[1;38r")
+    assert g.feed(b"\x1bc") == "reassert"
+    assert g.child_owns_region is False
+
+
+def test_guard_resize_rejudges_regions():
+    # the pump updates rows on SIGWINCH: the same sequence that was benign
+    # at 40 rows covers the bar after a shrink to 30
+    g = OutputGuard(rows=40)
+    g.rows = 30
+    assert g.feed(b"\x1b[1;38r") == "drop"
 
 
 def test_guard_drop_wins_over_reassert():

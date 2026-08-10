@@ -326,17 +326,40 @@ class _Pump:
                     pass
 
 
-def test_pump_drops_the_bar_when_the_child_asserts_its_own_scroll_region(monkeypatch):
+def test_pump_drops_the_bar_when_the_child_region_covers_the_bar_row(monkeypatch):
     pump = _Pump(monkeypatch)
 
     def drive():
-        pump.feed(b"\x1b[1;20r")            # child's own DECSTBM
+        pump.feed(b"\x1b[1;24r")            # DECSTBM down to the real bottom row
         assert pump.await_clear()
 
     assert pump.run(drive) == 0
     assert pump.frame.bar_dropped is True
     # the bar's row is handed back to the child at the full terminal height
     assert pump.child.winsizes[-1] == (24, 80)
+
+
+def test_pump_keeps_the_bar_when_the_child_region_stays_above_it(monkeypatch):
+    """codex asserts \\x1b[1;<its rows-2>r at startup for its composer. With
+    the winsize lie the region bottom is below the real bottom row, so the
+    bar is untouched: no drop, and the repaint that follows must not stomp
+    the child's region with tandem's own (\\x1b[1;23r at 24 rows)."""
+    pump = _Pump(monkeypatch)
+
+    def drive():
+        before = len(pump.writes)
+        pump.feed(b"\x1b[1;22r")
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            if any(b"\x1b[7m" in w for w in pump.writes[before:]):
+                break
+            time.sleep(0.02)
+        assert any(b"\x1b[7m" in w for w in pump.writes[before:])   # repainted
+        assert not any(b"\x1b[2K" in w for w in pump.writes)        # never torn down
+        assert not any(b"\x1b[1;23r" in w for w in pump.writes[before:])
+
+    assert pump.run(drive) == 0
+    assert pump.frame.bar_dropped is False
 
 
 def test_a_window_shrunk_below_the_row_floor_drops_the_bar_but_records_nothing(
@@ -391,7 +414,7 @@ def test_drop_bar_survives_a_sigwinch_landing_inside_its_own_teardown(monkeypatc
     pump.on_write = on_write
 
     def drive():
-        pump.feed(b"\x1b[1;20r")
+        pump.feed(b"\x1b[1;24r")
         assert pump.await_clear()
 
     assert pump.run(drive) == 0             # no AttributeError escaped the pump

@@ -193,7 +193,7 @@ def run_in_pty(
         if frame
         else None
     )
-    guard = OutputGuard() if bar_on else None
+    guard = OutputGuard(rows) if bar_on else None
     bar = (
         StatusBar(rows, cols, frame.active, frame.other, frame.key_label)
         if bar_on
@@ -214,8 +214,16 @@ def run_in_pty(
     out_fd = sys.stdout.fileno()
 
     def paint() -> None:
-        if bar is not None:
-            _write_all(out_fd, bar.region() + bar.paint(frame.armed()))
+        # Local reads: drop_bar can null these out from under a repaint.
+        # While the child owns a benign scroll region (codex pinning its
+        # composer rows), only the row is repainted: re-emitting tandem's
+        # own region would widen the child's out from under it, and the
+        # armed-state repaint fires on every flip press.
+        b, g = bar, guard
+        if b is None:
+            return
+        region = b"" if (g is not None and g.child_owns_region) else b.region()
+        _write_all(out_fd, region + b.paint(frame.armed()))
 
     def drop_bar(reason: str) -> None:
         """Terminal state: the guard's drop verdict is not latched, so the
@@ -226,10 +234,12 @@ def run_in_pty(
         not come back when the window grows again; the drop is session-
         scoped by design).
 
-        - "conflict": the child asserted its own scroll region, so tandem and
-          the harness are fighting over the same rows. That is a real,
-          per-terminal incompatibility the user may want to settle with
-          `[frame] bar = false`, so it leaves the marker `doctor` reads.
+        - "conflict": the child asserted a scroll region that covers the
+          bar row (a region pinned above the bar is benign and never lands
+          here), so tandem and the harness really are fighting over the
+          same rows. That is a real, per-terminal incompatibility the user
+          may want to settle with `[frame] bar = false`, so it leaves the
+          marker `doctor` reads.
         - "shrunk": tandem's own row-floor policy fired because the window is
           below the height the reserved row is worth. Nothing is wrong,
           nothing is worth fixing, and the cause is visible on screen —
@@ -266,6 +276,11 @@ def run_in_pty(
         # would surface at whatever bytecode it interrupted, so swallow.
         try:
             r, c = _winsize(stdin_fd)
+            g = guard
+            if g is not None:
+                # keep the DECSTBM judgment honest across resizes: a region
+                # that was benign at the old height may cover the bar now
+                g.rows = r
             if bar is not None and not _bar_on(frame, r):
                 # too short now; drop_bar restores the full winsize
                 drop_bar("shrunk")

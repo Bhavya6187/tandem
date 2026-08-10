@@ -20,30 +20,83 @@ _PARTIAL_RE = re.compile(rb"\x1b(\[(<(\d{0,4}(;\d{0,4}){0,2};?)?|2(0[01]?)?)?)?\
 # longest byte string _PARTIAL_RE can match: ESC [ < 1234 ;1234 ;1234 ;
 _MAX_PARTIAL = 18
 
+# kitty CSI-u modifier field is 1 + a bitmask; the flip chord is ctrl (4)
+# with nothing else held except the lock keys (capslock 64, numlock 128),
+# which real keyboards leave lit all the time
+_CSIU_CTRL = 4
+_CSIU_DISQUALIFIERS = 1 | 2 | 8 | 16 | 32   # shift, alt, super, hyper, meta
 
-def _split_partial(buf: bytes) -> tuple[bytes, bytes]:
-    """Split off a trailing fragment of a tracked escape sequence, to be
-    retried on the next feed. Anything that cannot become one is not held
-    back (a lone ESC keypress must reach the child)."""
-    i = buf.rfind(b"\x1b", max(0, len(buf) - _MAX_PARTIAL))
-    if i == -1:
-        return buf, b""
-    m = _PARTIAL_RE.match(buf, i)
-    if m and m.group(0) != b"":
-        return buf[:i], buf[i:]
-    return buf, b""
+
+def _csiu_codepoint(flip_byte: int) -> int | None:
+    """The codepoint a kitty-protocol terminal reports for the flip chord.
+
+    Once a child pushes kitty enhancement flags (codex's TUI does, on any
+    terminal that supports them), Ctrl-] arrives as ``\\x1b[93;5u`` and the
+    raw 0x1D byte never appears — so the detector must recognize this
+    spelling too, or the flip key is silently dead for that whole phase.
+
+    Letters report their lowercase codepoint; 0x1B-0x1D report the
+    unshifted punctuation key. 0x1E/0x1F need Shift on common layouts (the
+    modifier field would not be plain ctrl), so they keep legacy-byte
+    detection only."""
+    if 0x01 <= flip_byte <= 0x1A:
+        return flip_byte + 96
+    if flip_byte in (0x1B, 0x1C, 0x1D):
+        return flip_byte + 64
+    return None
 
 
 class FlipDetector:
-    """Input-side filter: consume the flip byte (outside bracketed paste),
-    swallow SGR mouse events aimed at the bar row, forward everything else
-    byte-for-byte."""
+    """Input-side filter: consume the flip key — as its raw control byte or
+    its kitty CSI-u spelling — outside bracketed paste, swallow SGR mouse
+    events aimed at the bar row, forward everything else byte-for-byte."""
 
     def __init__(self, flip_byte: int, bar_row: int | None = None):
         self.flip_byte = flip_byte
         self.bar_row = bar_row
         self._in_paste = False
         self._carry = b""
+        cp = _csiu_codepoint(flip_byte)
+        if cp is None:
+            self._csiu_re = None
+            self._partial_re = _PARTIAL_RE
+            self._max_partial = _MAX_PARTIAL
+        else:
+            digits = str(cp).encode()
+            # \x1b[<cp>(:shifted(:base)?)?;<mods>(:<event>)?u — alternates
+            # come from the "report alternate keys" flag, the event type
+            # (1 press, 2 repeat, 3 release) from "report event types";
+            # both are part of the >7u push codex uses.
+            self._csiu_re = re.compile(
+                rb"\x1b\[" + digits
+                + rb"(?::\d{1,7}(?::\d{1,7})?)?;(\d{1,3})(?::(\d{1,2}))?u"
+            )
+            # a trailing fragment that could still become the flip sequence
+            # must be carried like the mouse/paste fragments: nested
+            # optionals so every prefix of the digits (then of the
+            # alternates/mods tail) matches up to \Z
+            frag = rb"(?::\d{0,7}(?::\d{0,7})?)?(?:;\d{0,3}(?::\d{0,2})?)?"
+            for ch in reversed(digits[1:]):
+                frag = b"(?:" + bytes([ch]) + frag + b")?"
+            frag = digits[:1] + frag
+            self._partial_re = re.compile(
+                rb"\x1b(\[(<(\d{0,4}(;\d{0,4}){0,2};?)?|2(0[01]?)?|"
+                + frag + rb")?)?\Z"
+            )
+            # ESC [ + 3 digits + :1234567:1234567 + ;123 + :12
+            self._max_partial = 32
+
+    def _split_partial(self, buf: bytes) -> tuple[bytes, bytes]:
+        """Split off a trailing fragment of a tracked escape sequence, to be
+        retried on the next feed. Anything that cannot become one is not held
+        back (a lone ESC keypress must reach the child)."""
+        i = buf.rfind(b"\x1b", max(0, len(buf) - self._max_partial))
+        if i == -1:
+            return buf, b""
+        m = self._partial_re.match(buf, i)
+        if m and m.group(0) != b"":
+            return buf[:i], buf[i:]
+        return buf, b""
 
     def flush(self) -> bytes:
         """Release a stranded fragment verbatim. A carried prefix waits for
@@ -56,7 +109,7 @@ class FlipDetector:
 
     def feed(self, data: bytes) -> tuple[bytes, int]:
         buf = self._carry + data
-        buf, self._carry = _split_partial(buf)
+        buf, self._carry = self._split_partial(buf)
         out = bytearray()
         flips = 0
         i = 0
@@ -80,6 +133,24 @@ class FlipDetector:
                     out += m.group(0)
                     i = m.end()
                     continue
+                if self._csiu_re is not None:
+                    m = self._csiu_re.match(buf, i)
+                    if m:
+                        bits = int(m.group(1)) - 1
+                        if bits & _CSIU_CTRL and not bits & _CSIU_DISQUALIFIERS:
+                            # ours: count press (bare or :1) and repeat (:2,
+                            # matching legacy autorepeat), swallow the
+                            # release (:3) — the child never saw the press,
+                            # so it must not see the key come back up.
+                            if m.group(2) in (None, b"1", b"2"):
+                                flips += 1
+                            i = m.end()
+                            continue
+                        # same key, different chord (e.g. ctrl+shift):
+                        # not the flip — forward it whole
+                        out += m.group(0)
+                        i = m.end()
+                        continue
                 if buf[i] == self.flip_byte:
                     flips += 1
                     i += 1
@@ -89,37 +160,63 @@ class FlipDetector:
         return bytes(out), flips
 
 
-_DROP_RE = re.compile(rb"\x1b\[\d{1,4}(;\d{1,4})?r")     # child's own DECSTBM
-# bare `\x1b[r` needs no guard against half-matching a parameterized region:
-# that form spells its digits *before* the r, so the two can never share a
-# prefix. `_DROP_RE` is scanned first regardless, so drop still wins.
-_REASSERT_RE = re.compile(rb"\x1bc|\x1b\[\?1049[hl]|\x1b\[[23]J|\x1b\[r")
+# One union of everything watched, scanned in stream order. The
+# parameterized-DECSTBM branch (digits before the r) and the bare `\x1b[r`
+# branch can never share a prefix, so the alternation is unambiguous.
+_WATCH_RE = re.compile(
+    rb"\x1b\[(\d{1,4})(?:;(\d{1,4}))?r"     # child DECSTBM with parameters
+    rb"|\x1b\[r"                            # bare DECSTBM reset
+    rb"|\x1bc"                              # RIS: full reset
+    rb"|\x1b\[\?1049[hl]"                   # alt screen enter/leave
+    rb"|\x1b\[[23]J"                        # clear screen / scrollback
+)
 
 
 class OutputGuard:
     """Output-side watcher for the handful of sequences that clobber the
     reserved row or scroll region. Returns a verdict; never alters bytes.
     A small carry window handles sequences split across read chunks; only
-    matches ending beyond the carry count (earlier ones fired last feed)."""
+    matches ending beyond the carry count (earlier ones fired last feed).
+
+    A parameterized DECSTBM is judged by its bottom edge against `rows`
+    (the real terminal height — the bar row). A child that pins a region
+    *above* the bar (codex's TUI guards its composer rows this way at
+    startup) is not a conflict: the bar row is untouched, so the verdict is
+    a repaint, and `child_owns_region` flips on so the repaint knows not to
+    stomp the child's region with tandem's own. Only a region that reaches
+    the bar row — or one whose bottom is left to default to the last row —
+    is a real fight over the same rows and worth dropping the bar for.
+    With `rows` unknown (0), every parameterized region is assumed to cover
+    the bar. The pump keeps `rows` current across SIGWINCH."""
 
     # >= the longest watched sequence (12 bytes: ESC [ 1234 ;5678 r), so no
     # split point can hide one from both feeds it straddles
     CARRY = 15
 
-    def __init__(self):
+    def __init__(self, rows: int = 0):
+        self.rows = rows
+        self.child_owns_region = False
         self._carry = b""
 
     def feed(self, data: bytes) -> str:
         buf = self._carry + data
         base = len(self._carry)
         self._carry = buf[max(0, len(buf) - self.CARRY):]
-        for m in _DROP_RE.finditer(buf):
-            if m.end() > base:
+        verdict = ""
+        for m in _WATCH_RE.finditer(buf):
+            if m.end() <= base:
+                continue
+            if m.group(1) is not None:
+                bottom = m.group(2)
+                if bottom is not None and 0 < int(bottom) < self.rows:
+                    self.child_owns_region = True
+                    verdict = "reassert"
+                    continue
                 return "drop"
-        for m in _REASSERT_RE.finditer(buf):
-            if m.end() > base:
-                return "reassert"
-        return ""
+            if m.group(0) in (b"\x1b[r", b"\x1bc"):
+                self.child_owns_region = False
+            verdict = "reassert"
+        return verdict
 
 
 class StatusBar:
