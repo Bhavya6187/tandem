@@ -394,7 +394,7 @@ def test_runner_reports_flip_requested(env_factory, monkeypatch):
     assert r.flip_requested is True
 
 
-def test_runner_writes_bar_drop_marker(env_factory, monkeypatch):
+def test_runner_writes_bar_drop_marker(env_factory, monkeypatch, capsys):
     env = env_factory(active="claude")
 
     def fake_run_in_pty(argv, cwd=None, frame=None, control=None):
@@ -405,6 +405,11 @@ def test_runner_writes_bar_drop_marker(env_factory, monkeypatch):
     runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
     marker = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-bar-dropped"
     assert marker.exists()
+    # A dropped bar is a note, not a sync failure: labelling it "sync error"
+    # sends the user hunting a transcript divergence that never happened.
+    out = capsys.readouterr().out
+    assert "status bar disabled for this session" in out
+    assert "sync error" not in out
 
 
 def _run_capturing_monitor(env, monkeypatch):

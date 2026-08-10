@@ -377,6 +377,12 @@ class InteractiveRunner:
         stop = threading.Event()
         spawn_time = time.time()
         errors: list[str] = []
+        # Two lists, one reporting spot: `errors` are sync failures (the
+        # "sync error" prefix is load-bearing — it tells the user their
+        # transcripts diverged), `notes` are everything else tandem wants to
+        # mention on the way out. A note printed as a sync error sends people
+        # hunting a failure that never happened.
+        notes: list[str] = []
 
         def tail_thread() -> None:
             # Own store/connection: sqlite handles are thread-bound, and the
@@ -451,10 +457,12 @@ class InteractiveRunner:
             except OSError:
                 pass  # doctor loses one hint; the session's exit code is not
                       # negotiable, and the note below still reaches the user
-            errors.append(
+            notes.append(
                 "status bar disabled for this session (terminal conflict);"
                 " set [frame] bar = false to silence"
             )
         for err in errors:
             print(f"tandem: sync error: {err}")
+        for note in notes:
+            print(f"tandem: {note}")
         return code
