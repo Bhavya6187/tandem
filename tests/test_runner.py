@@ -537,7 +537,8 @@ def test_runner_writes_bar_drop_marker(env_factory, monkeypatch, capsys):
         return 0
 
     monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
-    runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
+    r = runner.InteractiveRunner(env.session, lambda st, se, so: _Sink())
+    r.run()
     marker = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-bar-dropped"
     assert marker.exists()
     # A dropped bar is a note, not a sync failure: labelling it "sync error"
@@ -545,6 +546,39 @@ def test_runner_writes_bar_drop_marker(env_factory, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "status bar disabled for this session" in out
     assert "sync error" not in out
+    assert out.count("status bar disabled for this session") == 1  # no dupes
+    assert r.reports == [
+        "tandem: status bar disabled for this session (terminal conflict);"
+        " set [frame] bar = false to silence"
+    ]
+
+
+def test_runner_holds_its_reports_back_for_a_flip(env_factory, monkeypatch, capsys):
+    # A flip clears the screen a moment after run() returns, so anything
+    # printed here is wiped before the user can read it. Collect, don't print
+    # — the shell reprints onto the fresh screen.
+    env = env_factory(active="claude")
+    sentinel = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-claude.turn"
+
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None):
+        control.attach(_DeadChild())
+        frame.bar_dropped = True
+        frame.on_flip()
+        deadline = time.time() + 3
+        while not frame.armed() and time.time() < deadline:
+            time.sleep(0.02)
+        sentinel.touch()
+        deadline = time.time() + 3
+        while frame.armed() and time.time() < deadline:
+            time.sleep(0.02)
+        return 0
+
+    monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
+    r = runner.InteractiveRunner(env.session, lambda st, se, so: _Sink())
+    r.run()
+    assert r.flip_requested is True
+    assert any("status bar disabled" in line for line in r.reports)
+    assert "status bar disabled" not in capsys.readouterr().out
 
 
 def _run_capturing_monitor(env, monkeypatch):

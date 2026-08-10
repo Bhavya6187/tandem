@@ -30,19 +30,28 @@ def run_shell(tandem_id: str, sink_factory, input_fn=None, run_harness=None) -> 
     tests (real: `input` and an InteractiveRunner)."""
     if input_fn is None:  # pragma: no cover - interactive default
         input_fn = input
+    # Report lines the runner held back because the flip about to happen would
+    # clear the screen out from under them; `_flip_loop` prints them onto the
+    # fresh screen. Scoped to this shell, refilled by every harness run.
+    # Injected test runners never touch it, which leaves it empty — harmless.
+    reports: list[str] = []
     if run_harness is None:  # pragma: no cover - interactive default
 
         def run_harness(session):
             from .runner import InteractiveRunner
 
             r = InteractiveRunner(session, sink_factory=sink_factory)
-            return r.run(), r.flip_requested
+            code = r.run()
+            reports[:] = r.reports
+            return code, r.flip_requested
 
     # The resume hint is the only place the id is shown, so it prints from a
     # finally: no failure inside the loop may cost the user their session.
     code = 1
     try:
-        code = _flip_loop(tandem_id, run_harness, _enter(tandem_id, run_harness, code))
+        code = _flip_loop(
+            tandem_id, run_harness, _enter(tandem_id, run_harness, code), reports
+        )
         while True:
             with StateStore() as store:
                 session = store.get_session(tandem_id)
@@ -64,7 +73,8 @@ def run_shell(tandem_id: str, sink_factory, input_fn=None, run_harness=None) -> 
                 break
             if line in ("", "resume"):
                 code = _flip_loop(
-                    tandem_id, run_harness, _enter(tandem_id, run_harness, code)
+                    tandem_id, run_harness, _enter(tandem_id, run_harness, code),
+                    reports,
                 )
                 continue
             if line.split(maxsplit=1)[0] == "run":
@@ -100,7 +110,8 @@ def run_shell(tandem_id: str, sink_factory, input_fn=None, run_harness=None) -> 
                 continue
             if argv == ["switch"]:
                 code = _flip_loop(
-                    tandem_id, run_harness, _switch(tandem_id, run_harness, code)
+                    tandem_id, run_harness, _switch(tandem_id, run_harness, code),
+                    reports,
                 )
                 continue
             _dispatch(argv, tandem_id)
@@ -151,14 +162,26 @@ def _clear_screen() -> None:
         sys.stdout.flush()
 
 
-def _flip_loop(tandem_id: str, run_harness, first: tuple[int, bool]) -> int:
+def _flip_loop(
+    tandem_id: str, run_harness, first: tuple[int, bool],
+    reports: list[str] | None = None,
+) -> int:
     """Keep flipping (Ctrl-]) until a session ends without requesting one.
     No prompt stop between flips — this is the frame's tab feel. A failed
     flip reports itself and returns no-flip, which ends the loop and drops
-    the user back at the prompt with the session intact."""
+    the user back at the prompt with the session intact.
+
+    `reports` is the outgoing session's held-back report lines (sync errors,
+    notes). They print right after the clear, never before it: the clear is
+    what would otherwise erase them, and the whole point is that a flip must
+    not cost the user a sync-failure warning."""
     code, flip = first
     while flip:
         _clear_screen()
+        if reports:
+            for line in reports:
+                click.echo(line)
+            reports.clear()   # this session's news, reported once
         code, flip = _switch(tandem_id, run_harness, code)
     return code
 

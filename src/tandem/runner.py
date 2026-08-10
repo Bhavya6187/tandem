@@ -371,8 +371,13 @@ class InteractiveRunner:
     def __init__(self, session: PairedSession, sink_factory: SinkFactory):
         self.session = session
         self.sink_factory = sink_factory
-        # set here too so the attribute exists even if run() raises early
+        # set here too so the attributes exist even if run() raises early
         self.flip_requested = False
+        # Formatted, ready-to-print report lines for the session that just
+        # ran. `run()` prints them itself on a normal exit; on a flip it does
+        # not, because the flip's screen clear would wipe them a moment
+        # later — the shell reprints them onto the fresh screen instead.
+        self.reports: list[str] = []
 
     def run(self) -> int:
         session = self.session
@@ -413,6 +418,7 @@ class InteractiveRunner:
             other=session.shadow,
         )
         self.flip_requested = False
+        self.reports = []
 
         stop = threading.Event()
         spawn_time = time.time()
@@ -508,8 +514,9 @@ class InteractiveRunner:
                 "status bar disabled for this session (terminal conflict);"
                 " set [frame] bar = false to silence"
             )
-        for err in errors:
-            print(f"tandem: sync error: {err}")
-        for note in notes:
-            print(f"tandem: {note}")
+        self.reports = [f"tandem: sync error: {err}" for err in errors]
+        self.reports += [f"tandem: {note}" for note in notes]
+        if not self.flip_requested:
+            for line in self.reports:
+                print(line)
         return code

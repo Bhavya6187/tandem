@@ -487,6 +487,72 @@ def test_flip_with_a_vanished_session_row_stops_the_loop(sess, capsys):
     assert "switch failed" in capsys.readouterr().err
 
 
+class FakeInteractiveRunner:
+    """Stands in for the real runner behind `run_shell`'s own closure — the
+    seam the reports plumbing actually lives in, so the injected `run_harness`
+    used by every other test would skip it entirely."""
+
+    script: list = []
+    seen: list = []
+
+    def __init__(self, session, sink_factory=None):
+        self.session = session
+        self.reports = []
+        self.flip_requested = False
+
+    def run(self):
+        FakeInteractiveRunner.seen.append(self.session.active)
+        reports, flip = FakeInteractiveRunner.script.pop(0)
+        self.reports = list(reports)
+        self.flip_requested = flip
+        if not flip:  # the real runner prints its own on a non-flip exit
+            for line in self.reports:
+                print(line)
+        return 0
+
+
+def _fake_runner_shell(monkeypatch, sess, script):
+    from tandem import runner as runner_mod
+
+    def fake_switch(store, session):
+        new = "codex" if session.active == "claude" else "claude"
+        store.set_active(session.tandem_id, new)
+        return new, [], FakeMem()
+
+    monkeypatch.setattr(shell.ops, "switch_session", fake_switch)
+    monkeypatch.setattr(runner_mod, "InteractiveRunner", FakeInteractiveRunner)
+    FakeInteractiveRunner.script = list(script)
+    FakeInteractiveRunner.seen = []
+    shell.run_shell(sess.tandem_id, None, input_fn=scripted())
+    return FakeInteractiveRunner.seen
+
+
+def test_flip_reprints_the_runners_reports_after_the_clear(sess, capsys, monkeypatch):
+    """The flip clears the screen; a sync error the user never gets to read is
+    the same as no sync error at all, so the held-back lines print after it."""
+    lines = [
+        "tandem: sync error: transcript shrank",
+        "tandem: status bar disabled for this session (terminal conflict)",
+    ]
+    seen = _fake_runner_shell(
+        monkeypatch, sess, [(lines, True), ([], False)]
+    )
+    out = capsys.readouterr().out
+    assert seen == ["claude", "codex"]        # the flip really happened
+    for line in lines:
+        assert out.count(line) == 1           # shown once, on the fresh screen
+
+
+def test_non_flip_exit_prints_its_reports_once(sess, capsys, monkeypatch):
+    """No flip, no clear: the runner prints them itself and the shell must not
+    print a second copy."""
+    lines = ["tandem: sync error: transcript shrank"]
+    seen = _fake_runner_shell(monkeypatch, sess, [(lines, False)])
+    out = capsys.readouterr().out
+    assert seen == ["claude"]
+    assert out.count(lines[0]) == 1
+
+
 def test_int_returning_run_harness_still_works(sess):
     """Legacy seam: a plain int means no flip."""
     def run_harness(session):
