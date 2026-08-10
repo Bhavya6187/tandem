@@ -1804,3 +1804,25 @@ Record results (terminal app + CLI versions tested) in the PR description.
 - **Spec coverage:** frame behavior (Tasks 6, 8–10), detector edges incl. paste + config override (Tasks 1, 2), bar + reserved row + guard + auto-drop (Tasks 3, 4, 6), termination ladder (Tasks 5, 7), turn-boundary + cancel toggle (Task 8), never-lose-the-session (Task 10 failure test), doctor note (Task 11), README/docs reframe (Task 12), live validation incl. emulator matrix and quit-recipe pinning (Task 13). Unpaired/plain sessions need no code: the detector only exists under the wrapper.
 - **Placeholder scan:** the two named-fixture stand-ins (`shell_env`, `doctor_env`) are explicit instructions to reuse the file's existing setup idiom, not TBDs; all code blocks are complete.
 - **Type consistency:** `FrameIO` fields match between Tasks 6 and 9; `terminate(soft=list[bytes])` matches `quit_keystrokes() -> list[bytes]`; `_enter`/`_switch` tuple returns consistent across Task 10's call sites; marker-file path identical in Tasks 9 and 11.
+
+---
+
+## Task 13 addendum — items added by the final whole-branch review
+
+Run these in addition to the checklist above:
+
+- [ ] **Does the bar survive first contact? (MERGE BLOCKER if not)** Launch, wait 60s, use both TUIs normally. If the bar vanishes immediately, capture output (`script`/asciinema) and check for a startup full-height DECSTBM — that decides whether the "parameterized DECSTBM ⇒ drop" rule survives.
+- [ ] **DECSC/DECRC collision:** watch for cursor misplacement during heavy streaming and drag-resize (one save slot per screen buffer; tandem and the child share it).
+- [ ] **Mid-turn flip during a >60s silent tool call** (arm at t+5s of a long test run) — must wait for turn completion, not fire at the 120s valve unless the hook actually died.
+- [ ] **Ctrl-] mid-turn in a fresh `tandem --active codex` session** — must show the armed indicator and wait (rollout-discovery publishing path).
+- [ ] **Sync-error visibility across a flip** — force a truncated transcript, flip, confirm the `sync error` line is readable after the screen clear.
+- [ ] **Quit-recipe verification:** confirm a normal flip reports a graceful exit (`soft`, not SIGTERM) in both directions, per pinned CLI versions.
+- [ ] **Shrink below 5 rows, then restore:** bar drops silently (no doctor marker — that's the shrink path), child gets full winsize back.
+- [ ] **Terminal hangup mid-session** (close window / drop SSH): no orphaned harness child.
+- [ ] **ESC pressed while the model is streaming** reaches the child (~200ms keyboard-idle flush) — test while streaming, not while idle.
+- [ ] Marker-less fresh codex (user-owned `notify`): flip armed in the first second of the session may fire early until the rollout is discovered — confirm the window is imperceptible in practice.
+- [ ] Note: the pump loop below the tty check has no automated coverage by design (pytest has no tty) — live validation is this code's only integration test.
+
+## Post-merge follow-ups (from review triage; none block merge)
+
+flip_key denylist for Tab/Enter/Esc collisions; pin the `bar_row` writable contract and the config→FrameIO seam with tests; carry-truncation test filler byte; `\x1b[0m` prefix before the bar's SGR; `time.monotonic()` in `_wait_dead`; EIO guard on the pump's stdin read; post-wait armed re-check (cancel TOCTOU); bound the flip-loop test fakes; extract `paths.bar_drop_marker()`; tail-join timeout vs `switch_session` drain lock (pre-existing); `docs/formats.md` cross-check next release.
