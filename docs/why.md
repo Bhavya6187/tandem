@@ -17,16 +17,17 @@ main thread. Setup and routing modes:
 
 ## ⏳ Hit a usage limit? Just keep going.
 
-Claude runs out of its usage window mid-refactor? Type `switch` and Codex
-continues the **same conversation** a second later — same files, same
-history, same plan. Your two subscriptions become one long runway instead
-of two separate walls.
+Claude runs out of its usage window mid-refactor? Press **Ctrl-]** and
+Codex continues the **same conversation** a second later — same files,
+same history, same plan. Your two subscriptions become one long runway
+instead of two separate walls.
 
 ## 🌩️ Immune to outages.
 
 An Anthropic or OpenAI outage doesn't stop your work. If the active
-model's API goes down, `switch` — the same session continues seamlessly
-in the other harness, and you can switch back whenever the outage clears.
+model's API goes down, press **Ctrl-]** — the same session continues
+seamlessly in the other harness, and you can flip back whenever the
+outage clears.
 
 ## 💳 Subscriptions, not API bills.
 

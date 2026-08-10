@@ -5,6 +5,13 @@ Session format observed on codex-cli 0.145.0 (docs/formats.md):
 - each line {timestamp, type, payload}; model-facing history is the
   response_item lines, UI history is the event_msg lines
 - first line is session_meta; ~/.codex/session_index.jsonl indexes threads
+
+KNOWN BREAK — codex 0.147.0 moved session storage to sqlite
+(~/.codex/state_5.sqlite, thread_sections et al.): a live session holds no
+rollout JSONL open and a fresh session writes none, so the tailer/sync see
+nothing from codex. `codex resume` of a tandem-seeded rollout still
+launches (2026-08-09, live-validated), but appends nothing back. Needs a
+storage-aware adapter pass; tracked in the frame plan's validation results.
 """
 
 from __future__ import annotations
@@ -157,6 +164,9 @@ class CodexAdapter(HarnessAdapter):
         # notify appends a JSON payload argument; route through sh -c so it
         # lands in $0 and is ignored.
         return ["-c", f'notify=["/bin/sh","-c","touch \'{sentinel}\'"]']
+
+    def quit_keystrokes(self) -> list[bytes]:
+        return [b"\x03", b"\x03", b"\x04"]
 
     # -- parsing -------------------------------------------------------------
 

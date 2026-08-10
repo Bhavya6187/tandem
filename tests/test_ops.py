@@ -3,7 +3,10 @@ the incoming side, and never echo synced entries back."""
 
 import json
 
+import pytest
+
 from tandem import ops
+from tandem.sync import SyncSetupError
 from tandem.util import read_jsonl
 
 from conftest import (
@@ -102,6 +105,42 @@ class TestSwitch:
         assert any("[via codex] Thing done." in c for c in contents)
         # the pre-switch claude turn must not have bounced back into claude
         assert sum("before switch" in c for c in contents) == 1  # only the original
+
+    def test_switch_back_to_never_run_claude_seeds_shadow(self, env_factory):
+        # Pairing seeds only the shadow side's file; claude's CLI creates its
+        # own transcript on the first *turn*, not at launch. Flipping away
+        # from a zero-turn claude therefore leaves the recorded session id
+        # with no file (the test env pre-creates it, so remove it), and the
+        # flip back must seed one rather than die in the codex->claude drain.
+        env = env_factory(active="claude")
+        env.claude_shadow.unlink()
+
+        ops.switch_session(env.store, env.session)
+        session = env.refresh()
+        assert session.active == "codex"
+
+        for obj in codex_turn("hello from codex", "Hi!"):
+            write_line(env.codex_shadow, obj)
+
+        new_active, problems, _mem = ops.switch_session(env.store, session)
+        assert new_active == "claude"
+        assert problems == []
+        contents = [json.dumps(e) for e in read_jsonl(env.claude_shadow)]
+        assert any("[via codex] hello from codex" in c for c in contents)
+        assert any("[via codex] Hi!" in c for c in contents)
+
+    def test_switch_back_after_claude_file_loss_still_errors(self, env_factory):
+        # A claude cursor that has consumed bytes means the transcript
+        # existed; its file going missing mid-session is data loss, not the
+        # never-ran case, and must keep the hard error.
+        env = env_factory(active="claude")
+        ops.fast_forward(env.store, env.session, "claude")
+        ops.switch_session(env.store, env.session)
+        session = env.refresh()
+
+        env.claude_shadow.unlink()
+        with pytest.raises(SyncSetupError, match="shadow transcript missing"):
+            ops.switch_session(env.store, session)
 
     def test_double_switch_round_trip(self, env_factory):
         env = env_factory(active="claude")

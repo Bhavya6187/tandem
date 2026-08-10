@@ -54,6 +54,14 @@ def claude_installed_plugins_path() -> Path:
     return claude_home() / "plugins" / "installed_plugins.json"
 
 
+def claude_sessions_dir() -> Path:
+    """Per-live-session registry: <pid>.json with sessionId and
+    status "busy"|"waiting" — the data `claude agents --json` prints
+    (observed: claude 2.1.226). Rewritten by claude on state
+    transitions; stale files linger after a crash."""
+    return claude_home() / "sessions"
+
+
 # --- Codex ------------------------------------------------------------------
 
 def codex_home() -> Path:

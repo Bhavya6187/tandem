@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from . import paths
-from .config import load_harness_args
+from .config import load_frame_config, load_harness_args
 from .events import SessionContext
 from .harness import get_adapter
-from .ptyrun import run_in_pty
+from .ptyrun import FrameIO, PtyControl, run_in_pty
 from .state import PairedSession, StateStore, SyncCursor
 from .tailer import JsonlTailer, TailedLine, TranscriptTruncated, TranscriptWatcher
 from .util import json_line
@@ -82,6 +82,240 @@ def ctx_to_cursor(ctx: SessionContext, cursor: SyncCursor) -> None:
             "claude_leaf_uuid": ctx.claude_leaf_uuid,
         }
     )
+
+
+def _mtime(path: Path | None) -> float:
+    if path is None:
+        return 0.0
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+# Quiescence means two different things depending on whether the
+# turn-complete marker was wired at launch, so it gets two constants.
+_QUIESCE_S = 2.0            # marker-less: the only turn-boundary signal there is
+_MISSED_MARKER_VALVE_S = 120.0
+"""Safety valve for a marker that was wired but never arrived — a hook that
+failed to run, a notify handler that died. NOT turn pacing: real turns go
+quiet for minutes at a time (a long tool call appends nothing between the
+tool_use line and the tool_result line — a full test suite, a slow install,
+a `sleep 90`), and firing there kills the harness mid-turn.
+
+The two error costs are wildly asymmetric, which is what sets the number.
+Firing too early costs a live turn: the harness is terminated between the
+tool call and its result, and that work is gone. Firing too late costs
+nothing but a wait, and only in the case this valve exists for at all — a
+dead hook — where a second Ctrl-] cancels the pending flip and the user can
+quit the harness by hand. So the valve sits far above any plausible
+tool-call silence rather than close to it. When the marker is wired it is
+the trigger; this is the last resort."""
+
+
+def _quiesce_default(marker_wired: bool) -> float:
+    return _MISSED_MARKER_VALVE_S if marker_wired else _QUIESCE_S
+
+
+def _key_label(byte: int) -> str:
+    """How the bar spells the flip keybind. `config._parse_flip_key` only ever
+    yields 0x01-0x1F, so the caret form always applies; the hex fallback is
+    there so a future non-control binding still prints something."""
+    if 0x00 < byte < 0x20:
+        return "^" + chr(byte + 0x40)
+    return f"0x{byte:02x}"
+
+
+def wait_until_safe(
+    transcript: Path | None,
+    sentinel: Path | None,
+    cancelled: Callable[[], bool],
+    quiesce: float | None = None,
+    poll: float = 0.2,
+    marker_wired: bool = False,
+    provider: Callable[[], Path | None] | None = None,
+    status_probe: Callable[[], str | None] | None = None,
+) -> bool:
+    """Block until the turn boundary. The transcript's last append lands
+    before the Stop hook / notify touches the sentinel, so idle means the
+    sentinel is at least as new as the transcript. Returns False if
+    `cancelled()` turned true first.
+
+    Two modes, because transcript quiescence means different things:
+
+    - `marker_wired=True` (the harness was launched with the turn-complete
+      hook — the common case): the marker touch is the only normal trigger.
+      Quiescence stays wired as a valve for a marker that never arrives,
+      never as a turn-pacing signal.
+    - `marker_wired=False` (no hook — e.g. codex with a user-configured
+      notify handler tandem refuses to clobber): 2s of transcript quiescence
+      is the fallback boundary, because nothing better exists.
+
+    `quiesce=None` takes the mode's default, so the mode alone is enough to
+    be safe; pass a number to override (tests scale it down).
+
+    The transcript is re-read every poll through `provider`, because the path
+    is not always known when the wait starts: codex mints its own session id
+    and the runner's tail thread discovers the rollout seconds later. The
+    default provider returns the `transcript` argument forever, which is the
+    standalone (already-known path) contract this function shipped with.
+
+    An unknown transcript is *not* evidence of idleness. `_mtime(None)` is
+    0.0, so the plain `s >= t` test would call every unknown-transcript
+    session idle and fire a flip in the middle of a turn. With the marker
+    wired there is a better answer: nothing is known, so hold and let the
+    valve decide — anchored to the moment the wait began rather than to a
+    file mtime that does not exist. (Marker-less sessions keep the old
+    reading: quiescence is all they have, and their transcript is always
+    known — only codex's fresh-mint path arrives here with None, and that
+    path always wires the marker or falls back to the 2s quiescence over a
+    real file once discovery lands.)
+
+    Both clocks here are wall-clock on purpose: the deadline is derived from
+    file mtimes, so `time.time()` is the only comparable reading (monotonic
+    would be right for a pure timeout, but there is none in this loop).
+
+    With `status_probe` (claude sessions), the probe is the entire
+    boundary test and the marker/quiescence rules above never run: the
+    probe reads claude's own session registry, which distinguishes a
+    running turn ("busy") from an idle prompt ("waiting") directly.
+    Anything but "busy" — including no answer at all — flips
+    immediately: single-tier by spec, eager on registry schema drift.
+    The valve is deliberately absent here; it existed to cap a marker
+    that never arrives, and it killed genuinely long turns. The
+    transcript-noise problem this solves: modern claude appends
+    housekeeping (away_summary, last-prompt) minutes after Stop and
+    bumps the transcript mtime on resume, so sentinel >= transcript is
+    false while the session sits idle at its prompt."""
+    if quiesce is None:
+        quiesce = _quiesce_default(marker_wired)
+    if provider is None:
+        provider = lambda: transcript  # noqa: E731 - back-compat default
+    armed_at = time.time()
+    while True:
+        if cancelled():
+            return False
+        if status_probe is not None:
+            if status_probe() == "busy":
+                time.sleep(poll)
+                continue
+            return True
+        path = provider()
+        if path is None and marker_wired:
+            if time.time() - armed_at >= quiesce:
+                return True   # valve, from arm time: no mtime to anchor to
+            time.sleep(poll)
+            continue
+        t, s = _mtime(path), _mtime(sentinel)
+        if s >= t:
+            return True
+        if time.time() - t >= quiesce:
+            return True
+        time.sleep(poll)
+
+
+class FlipMonitor:
+    """Owns the flip lifecycle: the armed flag (toggle to cancel), the
+    turn-boundary wait, and the termination ladder through the PtyControl.
+    One background thread; all public methods are thread-safe.
+
+    `transcript` is a live attribute, not a constructor snapshot: codex mints
+    its own session id, so the runner's tail thread discovers the rollout
+    after launch and publishes it here. The wait loop re-reads it every poll
+    through a provider closure — a plain attribute read/write, which the GIL
+    makes atomic, so no lock is needed (and none may be added: `armed()` runs
+    inside the SIGWINCH handler on the pump thread).
+
+    `marker_wired` says whether this launch actually got a turn-complete
+    hook, which decides how the wait reads transcript quiescence (see
+    `wait_until_safe`). The caller derives it from the adapter: the argv the
+    runner already appended, `adapter.hook_argv_extra(sentinel)`, is empty
+    exactly when no hook was wired (codex declining to clobber a
+    user-configured notify), so `marker_wired=bool(hook_extra)` — reusing the
+    list that went into argv rather than calling the adapter a second time,
+    since a second call re-reads config and could disagree with what was
+    actually launched.
+
+    `status_probe` (claude only) reads the harness's own session
+    registry and, when present, replaces the transcript/sentinel rules
+    entirely — see `wait_until_safe`."""
+
+    def __init__(self, control, quit_bytes: list[bytes],
+                 transcript: Path | None, sentinel: Path,
+                 marker_wired: bool = False,
+                 quiesce: float | None = None, poll: float = 0.2,
+                 status_probe: Callable[[], str | None] | None = None):
+        self.control = control
+        self.quit_bytes = quit_bytes
+        self.transcript = transcript
+        self.sentinel = sentinel
+        self.marker_wired = marker_wired
+        self.quiesce = _quiesce_default(marker_wired) if quiesce is None else quiesce
+        self.poll = poll
+        self.status_probe = status_probe
+        self.flip_requested = False
+        self.how = ""
+        self._armed = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="tandem-flip", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._armed.set()  # unblock the wait
+        # 15s outlasts the worst-case ladder (attach wait 5s + soft
+        # keystrokes + soft/term/kill timeouts ~6.75s), so a stop() landing
+        # mid-ladder still joins instead of abandoning a live thread.
+        self._thread.join(timeout=15)
+
+    def flip_pressed(self) -> None:
+        """Arm, or toggle off a pending flip. Called from the pty pump's
+        stdin branch, so it must not block: Event.set/clear take only the
+        Event's own lock and never do I/O. It must also stay off any lock
+        that `armed()` needs — `armed()` runs inside the SIGWINCH handler on
+        this same thread, and a shared lock would deadlock the pump."""
+        if self._armed.is_set():
+            self._armed.clear()  # toggle: cancel a pending flip
+        else:
+            self._armed.set()
+
+    def armed(self) -> bool:
+        """Bar state: armed and still pending. Reached from inside the pump's
+        SIGWINCH handler (on_winch -> paint -> armed), so it is deliberately
+        lock-free, allocation-free and non-raising: Event.is_set() is a bare
+        flag read and `flip_requested` a plain attribute. Never add a lock,
+        a stat/read, or a raise path here. Goes False once the flip actually
+        fires, so the bar stops advertising an arm that is already spent."""
+        return self._armed.is_set() and not self.flip_requested
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._armed.wait()
+            if self._stop.is_set():
+                return
+            ok = wait_until_safe(
+                self.transcript,
+                self.sentinel,
+                cancelled=lambda: (
+                    not self._armed.is_set() or self._stop.is_set()
+                ),
+                quiesce=self.quiesce,
+                poll=self.poll,
+                marker_wired=self.marker_wired,
+                provider=lambda: self.transcript,
+                status_probe=self.status_probe,
+            )
+            if self._stop.is_set():
+                return
+            if not ok:
+                continue  # cancelled: back to waiting for the next arm
+            self.flip_requested = True
+            self.how = self.control.terminate(self.quit_bytes)
+            return
 
 
 class TailLoop:
@@ -172,6 +406,13 @@ class InteractiveRunner:
     def __init__(self, session: PairedSession, sink_factory: SinkFactory):
         self.session = session
         self.sink_factory = sink_factory
+        # set here too so the attributes exist even if run() raises early
+        self.flip_requested = False
+        # Formatted, ready-to-print report lines for the session that just
+        # ran. `run()` prints them itself on a normal exit; on a flip it does
+        # not, because the flip's screen clear would wipe them a moment
+        # later — the shell reprints them onto the fresh screen instead.
+        self.reports: list[str] = []
 
     def run(self) -> int:
         session = self.session
@@ -191,11 +432,55 @@ class InteractiveRunner:
         sentinel.parent.mkdir(parents=True, exist_ok=True)
         argv = adapter.interactive_argv(active_sid, fresh)
         argv += load_harness_args(active)
-        argv += adapter.hook_argv_extra(sentinel)
+        # bound, not re-called: hook_argv_extra re-reads config per call
+        # (codex checks the user's config.toml for a notify handler), so a
+        # second call could disagree with the argv actually launched.
+        hook_extra = adapter.hook_argv_extra(sentinel)
+        argv += hook_extra
+
+        frame_cfg = load_frame_config()
+        control = PtyControl()
+        def claude_probe() -> str | None:
+            # A raising probe would kill the tandem-flip thread and leave
+            # the bar advertising an armed flip that can never fire (os.kill
+            # raises OverflowError — not OSError — on a pid outside C-long
+            # range, so registry garbage can escape session_status's own
+            # guards). Single tier reads any non-answer as flippable, so an
+            # escape maps to None, never to a dead thread.
+            try:
+                return adapter.session_status(active_sid)
+            except Exception:
+                return None
+
+        monitor = FlipMonitor(
+            control, adapter.quit_keystrokes(), transcript, sentinel,
+            marker_wired=bool(hook_extra),
+            # claude only: codex has no session registry, and a probe that
+            # answers None would flip eagerly mid-turn — absence, not None
+            # answers, is how codex opts out.
+            status_probe=claude_probe if active == "claude" else None,
+        )
+        frame = FrameIO(
+            flip_byte=frame_cfg.flip_byte,
+            on_flip=monitor.flip_pressed,
+            armed=monitor.armed,
+            bar=frame_cfg.bar,
+            active=active,
+            other=session.shadow,
+            key_label=_key_label(frame_cfg.flip_byte),
+        )
+        self.flip_requested = False
+        self.reports = []
 
         stop = threading.Event()
         spawn_time = time.time()
         errors: list[str] = []
+        # Two lists, one reporting spot: `errors` are sync failures (the
+        # "sync error" prefix is load-bearing — it tells the user their
+        # transcripts diverged), `notes` are everything else tandem wants to
+        # mention on the way out. A note printed as a sync error sends people
+        # hunting a failure that never happened.
+        notes: list[str] = []
 
         def tail_thread() -> None:
             # Own store/connection: sqlite handles are thread-bound, and the
@@ -213,6 +498,13 @@ class InteractiveRunner:
                                 store.set_native_session_id(session.tandem_id, "codex", sid)
                                 current = store.get_session(session.tandem_id) or current
                             path = found
+                            # Publish to the flip monitor: until this lands it
+                            # has no transcript to judge a turn boundary by,
+                            # and holds any armed flip behind its valve. A bare
+                            # attribute write is all the synchronization there
+                            # is or should be — the GIL makes it atomic and the
+                            # monitor's wait re-reads it every poll.
+                            monitor.transcript = path
                             break
                     if path is None:
                         return
@@ -250,12 +542,33 @@ class InteractiveRunner:
 
         thread = threading.Thread(target=tail_thread, name="tandem-tail", daemon=True)
         thread.start()
+        monitor.start()   # before the try: stop() on an unstarted thread raises
         try:
-            code = run_in_pty(argv, cwd=session.cwd)
+            code = run_in_pty(argv, cwd=session.cwd, frame=frame, control=control)
         finally:
             stop.set()
+            # stop() first, and only then read the monitor: `flip_requested`
+            # and `how` are assigned as the ladder finishes, so a read before
+            # the join races the flip thread.
+            monitor.stop()
             thread.join(timeout=10)
             sentinel.unlink(missing_ok=True)
-        for err in errors:
-            print(f"tandem: sync error: {err}")
+            self.flip_requested = monitor.flip_requested
+        if frame.bar_dropped:
+            marker = paths.tandem_home() / "tmp" / f"{session.tandem_id}-bar-dropped"
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.touch()
+            except OSError:
+                pass  # doctor loses one hint; the session's exit code is not
+                      # negotiable, and the note below still reaches the user
+            notes.append(
+                "status bar disabled for this session (terminal conflict);"
+                " set [frame] bar = false to silence"
+            )
+        self.reports = [f"tandem: sync error: {err}" for err in errors]
+        self.reports += [f"tandem: {note}" for note in notes]
+        if not self.flip_requested:
+            for line in self.reports:
+                print(line)
         return code

@@ -219,6 +219,16 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
                 f"(run `tandem sync`)"
             )
 
+    # Written best-effort by the runner when the frame gave up on the status
+    # bar; nothing deletes it, so the warning repeats until the user does.
+    bar_marker = paths.tandem_home() / "tmp" / f"{session.tandem_id}-bar-dropped"
+    if bar_marker.exists():
+        report.warn(
+            "the status bar was auto-disabled in a previous session"
+            " (terminal conflict) — set [frame] bar = false to keep it off,"
+            " or delete the marker to retry: " + str(bar_marker)
+        )
+
     qdir = paths.quarantine_dir(session.tandem_id)
     qfiles = sorted(qdir.iterdir()) if qdir.is_dir() else []
     if qfiles:

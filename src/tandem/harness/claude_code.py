@@ -11,6 +11,7 @@ Session format observed on claude 2.1.220 (docs/formats.md):
 from __future__ import annotations
 
 import json
+import os
 import uuid as uuidlib
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,24 @@ def _stringify_block_content(content: Any) -> str:
                 parts.append(f"<{c.get('type', 'block')}>")
         return "\n".join(parts)
     return "" if content is None else str(content)
+
+
+def _pid_alive(pid: int) -> bool:
+    """A registry entry for a dead pid is a stale leftover (claude
+    cleans up on exit, not on crash). PermissionError means alive but
+    not ours — still alive; anything else unreadable counts as dead,
+    because trusting a stale entry can freeze the flip on a phantom
+    "busy". Callers must screen out pid <= 0 first: kill(0)/kill(-N)
+    probe process groups and would read as alive."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 class ClaudeCodeAdapter(HarnessAdapter):
@@ -125,6 +144,41 @@ class ClaudeCodeAdapter(HarnessAdapter):
             }
         }
         return ["--settings", json.dumps(settings)]
+
+    def quit_keystrokes(self) -> list[bytes]:
+        return [b"\x03", b"\x04"]
+
+    def session_status(self, session_id: str) -> str | None:
+        """Live turn state from claude's session registry: "busy" while a
+        turn runs, "waiting" at the prompt, None when no live entry
+        matches. The flip wait treats anything but "busy" as flippable
+        (single-tier by spec: eager on schema drift). Matched by
+        sessionId — tandem mints claude session ids — never by pid
+        filename, which a forking wrapper would break. Dead-pid entries
+        are skipped; among several live matches "busy" wins, because
+        flipping kills a live turn while waiting only costs a wait."""
+        try:
+            files = sorted(paths.claude_sessions_dir().glob("*.json"))
+        except OSError:
+            return None
+        statuses: list[str] = []
+        for p in files:
+            try:
+                entry = json.loads(p.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(entry, dict) or entry.get("sessionId") != session_id:
+                continue
+            pid = entry.get("pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 \
+                or not _pid_alive(pid):
+                continue
+            status = entry.get("status")
+            if isinstance(status, str):
+                statuses.append(status)
+        if "busy" in statuses:
+            return "busy"
+        return statuses[0] if statuses else None
 
     # -- parsing -------------------------------------------------------------
 

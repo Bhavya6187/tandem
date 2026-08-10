@@ -421,7 +421,7 @@ class TestSubLockCoverage:
 
         monkeypatch.setattr(ops, "_sub_lock", recording_lock)
         monkeypatch.setattr(runner.TailLoop, "drain", drain)
-        monkeypatch.setattr(runner, "run_in_pty", lambda argv, cwd=None: 0)
+        monkeypatch.setattr(runner, "run_in_pty", lambda argv, cwd=None, **kw: 0)
 
         class _Sink:
             def handle(self, line, ctx, cursor): ...
