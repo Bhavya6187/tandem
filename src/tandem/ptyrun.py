@@ -136,7 +136,10 @@ class PtyControl:
 class FrameIO:
     """Frame wiring for run_in_pty, built by the runner. The pump
     constructs the detector/guard/bar internally from these fields;
-    `bar_dropped` reports back that the bar had to be disabled."""
+    `bar_dropped` reports back that the bar was disabled over a *terminal
+    conflict* — the one drop cause worth remembering across sessions. A bar
+    dropped because the window got short is not recorded: the user can see
+    their own window."""
 
     flip_byte: int
     on_flip: Callable[[], None]
@@ -207,9 +210,23 @@ def run_in_pty(
         if bar is not None:
             _write_all(out_fd, bar.region() + bar.paint(frame.armed()))
 
-    def drop_bar() -> None:
+    def drop_bar(reason: str) -> None:
         """Terminal state: the guard's drop verdict is not latched, so the
-        pump latches it here by tearing the bar down for good."""
+        pump latches it here by tearing the bar down for good.
+
+        `reason` decides what is *recorded*, not what is torn down — the
+        teardown is identical and equally permanent either way (the bar does
+        not come back when the window grows again; the drop is session-
+        scoped by design).
+
+        - "conflict": the child asserted its own scroll region, so tandem and
+          the harness are fighting over the same rows. That is a real,
+          per-terminal incompatibility the user may want to settle with
+          `[frame] bar = false`, so it leaves the marker `doctor` reads.
+        - "shrunk": tandem's own row-floor policy fired because the window is
+          below the height the reserved row is worth. Nothing is wrong,
+          nothing is worth fixing, and the cause is visible on screen —
+          recording it would make `doctor` nag about a resize."""
         nonlocal bar_on, guard, bar
         # Claim the bar first, ask questions second. Drops and resizes are
         # causally correlated (a child sets DECSTBM *because* the terminal
@@ -226,7 +243,8 @@ def run_in_pty(
         if dying is None:
             return
         bar_on, guard = False, None
-        frame.bar_dropped = True
+        if reason == "conflict":
+            frame.bar_dropped = True
         if detector is not None:
             detector.bar_row = None
         _write_all(out_fd, dying.clear())
@@ -242,7 +260,8 @@ def run_in_pty(
         try:
             r, c = _winsize(stdin_fd)
             if bar is not None and not _bar_on(frame, r):
-                drop_bar()  # too short now; drop_bar restores the full winsize
+                # too short now; drop_bar restores the full winsize
+                drop_bar("shrunk")
                 return
             if bar is not None:
                 bar.resize(r, c)
@@ -309,7 +328,7 @@ def run_in_pty(
                 if guard is not None:
                     verdict = guard.feed(data)
                     if verdict == "drop":
-                        drop_bar()
+                        drop_bar("conflict")
                     elif verdict == "reassert":
                         paint()
             if stdin_open and stdin_fd in ready:

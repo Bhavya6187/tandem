@@ -338,6 +338,40 @@ def test_pump_drops_the_bar_when_the_child_asserts_its_own_scroll_region(monkeyp
     assert pump.child.winsizes[-1] == (24, 80)
 
 
+def test_a_window_shrunk_below_the_row_floor_drops_the_bar_but_records_nothing(
+    monkeypatch,
+):
+    """tandem's own row-floor policy is not a terminal conflict: the bar goes
+    away (permanently, for this session) but nothing is persisted, so the next
+    `doctor` does not warn about a window the user simply made small."""
+    pump = _Pump(monkeypatch)
+
+    def drive():
+        pump.winch(3)                       # below the 5-row floor
+        assert pump.await_clear()
+
+    assert pump.run(drive) == 0
+    assert pump.frame.bar_dropped is False
+    assert pump.child.winsizes[-1] == (3, 80)   # child gets the whole window
+
+
+def test_a_bar_dropped_by_the_row_floor_does_not_come_back_on_grow(monkeypatch):
+    """Session-scoped drop semantics are unchanged by the reason: growing the
+    window back does not re-enable the bar."""
+    pump = _Pump(monkeypatch)
+
+    def drive():
+        pump.winch(3)
+        assert pump.await_clear()
+        before = len(pump.writes)
+        pump.winch(40)
+        time.sleep(0.2)
+        assert not any(b"\x1b[7m" in w for w in pump.writes[before:])
+
+    assert pump.run(drive) == 0
+    assert pump.frame.bar_dropped is False
+
+
 def test_drop_bar_survives_a_sigwinch_landing_inside_its_own_teardown(monkeypatch):
     """Drops and resizes are causally correlated, so the SIGWINCH handler
     lands inside drop_bar's writes all the time. The bar must already be gone
