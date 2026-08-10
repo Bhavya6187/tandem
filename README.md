@@ -7,9 +7,9 @@
 Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and
 [OpenAI Codex CLI](https://github.com/openai/codex) as a single paired
 session — each model in its own native harness. Work in either one,
-switch at any moment, and pick up exactly where you left off. Only one
-model runs per turn; the other stays in sync through pure local file
-translation.
+flip to the other with **Ctrl-]**, and pick up exactly where you left
+off. Only one model runs per turn; the other stays in sync through pure
+local file translation.
 
 [![CI](https://github.com/Bhavya6187/tandem/actions/workflows/ci.yml/badge.svg)](https://github.com/Bhavya6187/tandem/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tandem-cli)](https://pypi.org/project/tandem-cli/)
@@ -36,11 +36,24 @@ cd your-project
 tandem                       # fresh paired session; drops you into claude
 ```
 
-Work normally. When you exit the agent, you land at tandem's prompt
-instead of your shell:
+Work normally — that's the real Claude Code TUI. When you want the other
+model, press **Ctrl-]**: tandem closes out the harness at the turn
+boundary and reopens the same conversation in Codex a couple of seconds
+later. Press it again to come back. The bottom row tracks who you're
+facing:
 
 ```
-tandem (claude)> switch      # continue instantly in codex
+claude ● │ codex ○   ^] flips
+```
+
+Pressed mid-turn, the flip arms and fires the moment the model finishes
+(the bar says so; press again to cancel).
+
+Exit the harness the usual way and you land at tandem's prompt instead of
+your shell:
+
+```
+tandem (claude)> switch      # the same flip, from the prompt
 tandem (codex)> exit
 to continue this session: tandem resume a1b2c3d4e5f6
 ```
@@ -53,6 +66,14 @@ tandem resume a1b2c3d4e5f6   # a specific one (id from the exit hint)
 ```
 
 ## Why tandem?
+
+### 🖥️ One CLI, two harnesses, zero ceremony.
+
+`tandem` is the terminal you live in. It fronts the real Claude Code or
+Codex TUI — pixel-for-pixel native — and **Ctrl-]** flips to the other
+one in a couple of seconds, same conversation, same files, same history.
+A one-line tab bar on the bottom row shows which model you're facing;
+everything above it is the untouched native UI.
 
 ### 🆕 0.2 — GPT subagents inside Claude Code
 
@@ -67,14 +88,14 @@ once. Setup and routing:
 
 ### ⏳ Hit a usage limit? Just keep going.
 
-Claude runs out of its usage window mid-refactor? Type `switch` and
+Claude runs out of its usage window mid-refactor? Press **Ctrl-]** and
 Codex continues the **same conversation** a second later — same files,
 same history, same plan. Two subscriptions become one long runway.
 
 ### 🌩️ Immune to outages.
 
-An Anthropic or OpenAI outage doesn't stop your work: `switch`, keep
-going in the other harness, and switch back whenever it clears.
+An Anthropic or OpenAI outage doesn't stop your work: **Ctrl-]**, keep
+going in the other harness, and flip back whenever it clears.
 
 Five more reasons — subscriptions not API bills, two model families on
 one problem, native harnesses, instant switching, privacy:
@@ -88,7 +109,11 @@ one problem, native harnesses, instant switching, privacy:
   CLI's native session format — pure local file I/O, no model calls —
   so the other side is always resume-ready.
 - Each CLI is the real thing running on a PTY: your keybindings, slash
-  commands, and MCP servers all work exactly as they do today.
+  commands, and MCP servers all work exactly as they do today — tandem
+  reserves exactly one key (Ctrl-]) and one terminal row (the tab bar).
+- A flip waits for the turn boundary, exits the fronted CLI gracefully,
+  lets the sync settle, and resumes the other side — no prompt in
+  between.
 - Everything stays local: the CLIs' own session files plus a small
   SQLite database in `~/.tandem`. No cloud sync, no telemetry.
 - Uninstall tandem tomorrow and both sessions still resume natively
@@ -102,6 +127,7 @@ Full mechanics — sync engine, crash safety, compatibility ranges:
 | Command | What it does |
 | --- | --- |
 | `tandem` | Start a fresh paired session (Claude active; `--active codex` to flip) |
+| `Ctrl-]` | Flip to the other harness from inside a running session, without stopping at a prompt (rebindable in `[frame]`) |
 | `switch` | Flip active/shadow and enter the other agent — at the tandem prompt, or one-shot from your shell (one-shot only flips, it doesn't enter) |
 | `tandem resume [id]` | Continue the most recent (or a specific) session |
 | `tandem run --on codex "…"` | One-off prompt to the *other* agent, with full context |
@@ -121,7 +147,7 @@ sync-mcp` (share MCP server configs between the tools).
   the full pitch, all eight reasons
 - [Configuration](https://github.com/Bhavya6187/tandem/blob/main/docs/configuration.md) —
   the optional `~/.tandem/config.toml`: subagent workers, per-harness
-  startup args
+  startup args, the flip key and tab bar
 - [How tandem works](https://github.com/Bhavya6187/tandem/blob/main/docs/how-it-works.md) —
   sync engine, PTY passthrough, compatibility, where your data lives
 - [Developing tandem](https://github.com/Bhavya6187/tandem/blob/main/docs/development.md) —

@@ -38,3 +38,26 @@ The list is passed to the harness raw: a flag that expects a value can
 swallow the settings tandem appends after it and break turn tracking.
 Malformed values (a non-list, empty or non-string elements) are
 silently ignored rather than failing the launch.
+
+## [frame] — the flip key and the tab bar
+
+The frame is tandem's own surface inside a running session: one reserved
+keybind that flips to the other harness, and the one-line tab bar on the
+bottom terminal row.
+
+```toml
+[frame]
+flip_key = "ctrl-]"
+bar = true
+```
+
+| key | default | meaning |
+| --- | --- | --- |
+| `flip_key` | `"ctrl-]"` | The flip keybind, consumed by tandem (never forwarded). Accepts `ctrl-<char>` or a hex byte like `"0x1d"`; printable keys are rejected (they would swallow typing). |
+| `bar` | `true` | The one-line tab bar on the bottom terminal row. `false` hides it; the flip still works. |
+
+An unparseable value falls back to the default rather than failing the
+launch. If a terminal can't sustain the bar, tandem drops it for the rest
+of that session — the flip is unaffected — and `tandem doctor` warns
+about it until you delete the marker file it names; set `bar = false` if
+you'd rather keep the bar off for good.

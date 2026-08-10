@@ -9,13 +9,30 @@ compatibility ranges, and where your data lives. (Back to the
   local file I/O: tandem tails the active transcript, translates each
   entry, and appends it to the shadow's session file. The shadow's model
   is never called to "catch up".
-- **A persistent prompt, not the OS shell.** Leaving the harness lands you
-  at `tandem (claude)>`. There, `switch` flips roles and drops you
-  straight into the other tool, Enter re-enters the current one, and
+- **A persistent prompt, not the OS shell.** Exiting the harness — as
+  opposed to flipping out of it — lands you at `tandem (claude)>`. There,
+  `switch` flips roles and drops you straight into the other tool, Enter
+  re-enters the current one, and
   `status` / `sync` / `doctor` / `run --on` / `sync-mcp` all run against
   this session. `exit` (or Ctrl-D) returns to your shell and prints the
   resume hint. Every command also works one-shot from your shell,
   targeting the directory's most recently used session.
+- **The frame: flip without leaving.** Ctrl-] (configurable, consumed at
+  the PTY layer, ignored inside bracketed paste) flips the screen to the
+  other harness: pressed mid-turn it arms and fires at the turn-complete
+  marker (press again to cancel — the bar shows the armed state), then
+  tandem exits the fronted CLI gracefully (quit keystrokes, then SIGTERM,
+  then a bounded SIGKILL), lets the incremental sync settle, flips roles,
+  and resumes the other side — with no stop at the prompt in between.
+  Where no marker could be wired (codex with a `notify` handler of your
+  own, which tandem won't clobber) ~2s of transcript quiescence stands in;
+  where one was wired, a 30s valve covers a marker that never arrives. The
+  bottom terminal row is tandem's one drawn pixel: the child is told the
+  terminal is a row shorter, a scroll region keeps output above the bar,
+  and a targeted watcher reasserts it after child screen resets. If a
+  terminal can't sustain the bar it drops for the session (the flip keeps
+  working) and `tandem doctor` says so until you delete the marker file it
+  names.
 - **PTY passthrough.** tandem launches the real CLI on a pty (raw mode,
   resize forwarding, signals through the line discipline) and never
   scrapes terminal output — the transcript files are the source of truth.
