@@ -3,6 +3,7 @@
 from unicodedata import east_asian_width
 
 from tandem.frame import FlipDetector, OutputGuard, StatusBar
+from tandem.harness import get_adapter
 
 FLIP = 0x1D  # Ctrl-]
 
@@ -367,3 +368,15 @@ def test_feed_after_flush_starts_clean():
     assert d.flush() == b"\x1b[2"
     out, flips = d.feed(b"00~\x1d")          # no longer a paste-begin
     assert out == b"00~" and flips == 1
+
+
+def test_claude_quit_recipe():
+    # Ctrl-C clears the composer / interrupts, Ctrl-D on the empty
+    # composer exits
+    assert get_adapter("claude").quit_keystrokes() == [b"\x03", b"\x04"]
+
+
+def test_codex_quit_recipe():
+    # Ctrl-C clears/interrupts, second Ctrl-C quits ("press again"),
+    # Ctrl-D backstops older builds
+    assert get_adapter("codex").quit_keystrokes() == [b"\x03", b"\x03", b"\x04"]

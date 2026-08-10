@@ -68,6 +68,13 @@ class HarnessAdapter(ABC):
         uses the sentinel as a flush signal; fs-watching remains the
         fallback."""
 
+    def quit_keystrokes(self) -> list[bytes]:
+        """Byte chunks that cleanly exit the interactive CLI — clear the
+        composer, then quit — sent in order with a short pause between.
+        Pinned per harness version; live-verified at release (the ladder's
+        SIGTERM rung backstops a recipe the CLI stops honoring)."""
+        return []
+
     # -- transcript parsing / rendering (the converter halves) ---------------
 
     @abstractmethod

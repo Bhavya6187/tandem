@@ -158,6 +158,9 @@ class CodexAdapter(HarnessAdapter):
         # lands in $0 and is ignored.
         return ["-c", f'notify=["/bin/sh","-c","touch \'{sentinel}\'"]']
 
+    def quit_keystrokes(self) -> list[bytes]:
+        return [b"\x03", b"\x03", b"\x04"]
+
     # -- parsing -------------------------------------------------------------
 
     def parse_entry(self, raw: dict[str, Any], ctx: SessionContext) -> list[NormalizedEvent]:

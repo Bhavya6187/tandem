@@ -126,6 +126,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
         }
         return ["--settings", json.dumps(settings)]
 
+    def quit_keystrokes(self) -> list[bytes]:
+        return [b"\x03", b"\x04"]
+
     # -- parsing -------------------------------------------------------------
 
     def parse_entry(self, raw: dict[str, Any], ctx: SessionContext) -> list[NormalizedEvent]:
