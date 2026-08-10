@@ -469,6 +469,116 @@ def test_flip_failure_falls_back_to_prompt(sess, capsys, monkeypatch):
     assert f"to continue this session: tandem resume {sess.tandem_id}" in cap.out
 
 
+def _flipping_switch(monkeypatch):
+    def fake_switch(store, session):
+        new = "codex" if session.active == "claude" else "claude"
+        store.set_active(session.tandem_id, new)
+        return new, [], FakeMem()
+
+    monkeypatch.setattr(shell.ops, "switch_session", fake_switch)
+
+
+def test_failed_launch_after_a_flip_returns_to_the_harness_we_left(
+    sess, capsys, monkeypatch
+):
+    """The spec's first rung: never strand the user at a prompt whose active
+    harness cannot launch. Flip the roles back and re-enter the one they were
+    in a second ago."""
+    _flipping_switch(monkeypatch)
+    calls = []
+
+    def run_harness(session):
+        calls.append(session.active)
+        if session.active == "codex":
+            raise FileNotFoundError("codex: command not found")
+        return 0, len(calls) == 1   # the first claude session asks for a flip
+
+    prompts = []
+
+    def input_fn(prompt):
+        prompts.append(prompt)
+        raise EOFError
+
+    shell.run_shell(sess.tandem_id, None, input_fn=input_fn, run_harness=run_harness)
+    cap = capsys.readouterr()
+    assert calls == ["claude", "codex", "claude"]  # flipped, failed, flipped back
+    assert "codex would not start — switching back to claude." in cap.err
+    with StateStore() as store:
+        assert store.get_session(sess.tandem_id).active == "claude"  # roles restored
+    assert prompts == ["tandem (claude)> "]  # one prompt, after the working run
+
+
+def test_both_harnesses_failing_lands_at_the_prompt_with_the_session_intact(
+    sess, capsys, monkeypatch
+):
+    """Second rung: the flip-back cannot launch either, so fall to the prompt
+    with the errors shown — and the resume hint still prints."""
+    _flipping_switch(monkeypatch)
+    calls = []
+
+    def run_harness(session):
+        calls.append(session.active)
+        if len(calls) == 1:
+            return 0, True          # flip requested
+        raise FileNotFoundError(f"{session.active}: command not found")
+
+    prompts = []
+
+    def input_fn(prompt):
+        prompts.append(prompt)
+        raise EOFError
+
+    code = shell.run_shell(
+        sess.tandem_id, None, input_fn=input_fn, run_harness=run_harness
+    )
+    cap = capsys.readouterr()
+    assert calls == ["claude", "codex", "claude"]  # one retry only, no ping-pong
+    assert cap.err.count("could not run the harness: FileNotFoundError") == 2
+    assert prompts == ["tandem (claude)> "]
+    assert code == 0
+    assert f"to continue this session: tandem resume {sess.tandem_id}" in cap.out
+
+
+def test_flip_back_does_not_run_when_the_switch_itself_fails(sess, capsys, monkeypatch):
+    """`ops.switch_session` raising means roles never moved: there is nothing
+    to flip back from, so the prompt is the right landing (unchanged)."""
+    def boom(store, session):
+        raise RuntimeError("no flip for you")
+
+    monkeypatch.setattr(shell.ops, "switch_session", boom)
+    calls = []
+
+    def run_harness(session):
+        calls.append(session.active)
+        return 0, len(calls) == 1
+
+    shell.run_shell(
+        sess.tandem_id, None, input_fn=scripted(), run_harness=run_harness
+    )
+    cap = capsys.readouterr()
+    assert calls == ["claude"]
+    assert "switch failed: RuntimeError: no flip for you" in cap.err
+    assert "would not start" not in cap.err
+
+
+def test_plain_reentry_failure_has_no_flip_back(sess, capsys):
+    """`_enter` off the prompt never moved roles, so a failed launch must not
+    drag the session into the other harness."""
+    calls = []
+
+    def run_harness(session):
+        calls.append(session.active)
+        raise FileNotFoundError("claude: command not found")
+
+    shell.run_shell(
+        sess.tandem_id, None, input_fn=scripted("exit"), run_harness=run_harness
+    )
+    assert calls == ["claude"]
+    with StateStore() as store:
+        assert store.get_session(sess.tandem_id).active == "claude"
+    assert "would not start" not in capsys.readouterr().err
+
+
 def test_flip_with_a_vanished_session_row_stops_the_loop(sess, capsys):
     """A session deleted mid-flight breaks the loop instead of spinning."""
     def run_harness(session):

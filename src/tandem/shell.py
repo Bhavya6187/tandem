@@ -186,10 +186,26 @@ def _flip_loop(
     return code
 
 
-def _switch(tandem_id: str, run_harness, code: int) -> tuple[int, bool]:
+def _switch(
+    tandem_id: str, run_harness, code: int, fall_back: bool = True
+) -> tuple[int, bool]:
     """Flip roles and re-enter the newly active harness. Returns the exit
     code to carry forward (unchanged if the flip failed) and whether the
-    re-entered harness asked for another flip."""
+    re-entered harness asked for another flip.
+
+    Two failures, two answers. The switch itself failing means roles never
+    moved, so the prompt is the right place to land. The switch succeeding
+    and the *launch* failing is worse: the user is now sitting at a prompt
+    whose active harness cannot start (`codex` uninstalled, a bad
+    `[codex] args`), which is precisely the dead end the spec's ladder
+    exists to avoid. So the first rung is to flip straight back and re-enter
+    the harness they just left — never strand them.
+
+    `fall_back=False` marks that flip-back attempt: one retry, no ping-pong
+    between two harnesses that both refuse to launch. If it also fails, the
+    caller lands at the prompt with the error shown — and the session itself
+    is never at risk, since `run_shell`'s finally always prints the resume
+    hint."""
     from .cli import _report_switch
 
     with StateStore() as store:
@@ -211,28 +227,46 @@ def _switch(tandem_id: str, run_harness, code: int) -> tuple[int, bool]:
             )
             return code, False
     _report_switch(old, new_active, problems, mem)
-    return _enter(tandem_id, run_harness, code)
+    code, flip, launched = _try_enter(tandem_id, run_harness, code)
+    if launched or not fall_back:
+        return code, flip
+    click.secho(
+        f"{new_active} would not start — switching back to {old}.",
+        fg="yellow",
+        err=True,
+    )
+    return _switch(tandem_id, run_harness, code, fall_back=False)
 
 
-def _enter(tandem_id: str, run_harness, code: int) -> tuple[int, bool]:
-    """Run the active harness; returns (exit code, flip requested). A failed
-    launch (or a session row that vanished) is reported and `code` is carried
-    forward with no flip, so the caller returns to the prompt instead of
-    losing the session."""
+def _try_enter(tandem_id: str, run_harness, code: int) -> tuple[int, bool, bool]:
+    """Run the active harness; returns (exit code, flip requested, launched).
+    `launched` is False when the harness never got off the ground (a missing
+    binary, a vanished session row) as opposed to running and exiting — the
+    distinction `_switch` needs to decide whether to flip back."""
     try:
         with StateStore() as store:
             session = store.get_session(tandem_id)
             if session is None:
                 raise LookupError(f"session {tandem_id} is not in the state store")
             store.touch_used(tandem_id)
-        return _norm(run_harness(session))
+        return (*_norm(run_harness(session)), True)
     except Exception as exc:
         click.secho(
             f"could not run the harness: {type(exc).__name__}: {exc}",
             fg="red",
             err=True,
         )
-        return code, False
+        return code, False, False
+
+
+def _enter(tandem_id: str, run_harness, code: int) -> tuple[int, bool]:
+    """Run the active harness; returns (exit code, flip requested). A failed
+    launch (or a session row that vanished) is reported and `code` is carried
+    forward with no flip, so the caller returns to the prompt instead of
+    losing the session. No flip-back ladder here: roles never moved, so the
+    harness the user just failed to launch *is* the one they were in."""
+    c, flip, _ = _try_enter(tandem_id, run_harness, code)
+    return c, flip
 
 
 def _dispatch(argv: list[str], tandem_id: str) -> None:
