@@ -26,13 +26,16 @@ compatibility ranges, and where your data lives. (Back to the
   and resumes the other side — with no stop at the prompt in between.
   Where no marker could be wired (codex with a `notify` handler of your
   own, which tandem won't clobber) ~2s of transcript quiescence stands in;
-  where one was wired, a 30s valve covers a marker that never arrives. The
+  where one was wired, a 120s valve covers a marker that never arrives —
+  far above any plausible tool-call silence, because firing early kills a
+  live turn while firing late only costs a wait (and Ctrl-] cancels). The
   bottom terminal row is tandem's one drawn pixel: the child is told the
   terminal is a row shorter, a scroll region keeps output above the bar,
   and a targeted watcher reasserts it after child screen resets. If a
   terminal can't sustain the bar it drops for the session (the flip keeps
   working) and `tandem doctor` says so until you delete the marker file it
-  names.
+  names; shrinking the window below the bar's row floor drops it just as
+  permanently, but silently — that one isn't a conflict to fix.
 - **PTY passthrough.** tandem launches the real CLI on a pty (raw mode,
   resize forwarding, signals through the line discipline) and never
   scrapes terminal output — the transcript files are the source of truth.

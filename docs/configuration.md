@@ -53,11 +53,14 @@ bar = true
 
 | key | default | meaning |
 | --- | --- | --- |
-| `flip_key` | `"ctrl-]"` | The flip keybind, consumed by tandem (never forwarded). Accepts `ctrl-<char>` or a hex byte like `"0x1d"`; printable keys are rejected (they would swallow typing). |
+| `flip_key` | `"ctrl-]"` | The flip keybind, consumed by tandem (never forwarded). Accepts `ctrl-<char>` or a hex byte like `"0x1d"`; printable keys are rejected (they would swallow typing). The bar relabels itself to match (`ctrl-t` shows `^T flips`). |
 | `bar` | `true` | The one-line tab bar on the bottom terminal row. `false` hides it; the flip still works. |
 
 An unparseable value falls back to the default rather than failing the
 launch. If a terminal can't sustain the bar, tandem drops it for the rest
 of that session — the flip is unaffected — and `tandem doctor` warns
 about it until you delete the marker file it names; set `bar = false` if
-you'd rather keep the bar off for good.
+you'd rather keep the bar off for good. Shrinking the window below the
+bar's row floor also drops it for the session, but that is tandem's own
+policy rather than a conflict, so nothing is recorded and `doctor` stays
+quiet.
