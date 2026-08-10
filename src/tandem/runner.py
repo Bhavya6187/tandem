@@ -134,6 +134,7 @@ def wait_until_safe(
     poll: float = 0.2,
     marker_wired: bool = False,
     provider: Callable[[], Path | None] | None = None,
+    status_probe: Callable[[], str | None] | None = None,
 ) -> bool:
     """Block until the turn boundary. The transcript's last append lands
     before the Stop hook / notify touches the sentinel, so idle means the
@@ -172,7 +173,20 @@ def wait_until_safe(
 
     Both clocks here are wall-clock on purpose: the deadline is derived from
     file mtimes, so `time.time()` is the only comparable reading (monotonic
-    would be right for a pure timeout, but there is none in this loop)."""
+    would be right for a pure timeout, but there is none in this loop).
+
+    With `status_probe` (claude sessions), the probe is the entire
+    boundary test and the marker/quiescence rules above never run: the
+    probe reads claude's own session registry, which distinguishes a
+    running turn ("busy") from an idle prompt ("waiting") directly.
+    Anything but "busy" — including no answer at all — flips
+    immediately: single-tier by spec, eager on registry schema drift.
+    The valve is deliberately absent here; it existed to cap a marker
+    that never arrives, and it killed genuinely long turns. The
+    transcript-noise problem this solves: modern claude appends
+    housekeeping (away_summary, last-prompt) minutes after Stop and
+    bumps the transcript mtime on resume, so sentinel >= transcript is
+    false while the session sits idle at its prompt."""
     if quiesce is None:
         quiesce = _quiesce_default(marker_wired)
     if provider is None:
@@ -181,6 +195,11 @@ def wait_until_safe(
     while True:
         if cancelled():
             return False
+        if status_probe is not None:
+            if status_probe() == "busy":
+                time.sleep(poll)
+                continue
+            return True
         path = provider()
         if path is None and marker_wired:
             if time.time() - armed_at >= quiesce:
@@ -215,12 +234,17 @@ class FlipMonitor:
     user-configured notify), so `marker_wired=bool(hook_extra)` — reusing the
     list that went into argv rather than calling the adapter a second time,
     since a second call re-reads config and could disagree with what was
-    actually launched."""
+    actually launched.
+
+    `status_probe` (claude only) reads the harness's own session
+    registry and, when present, replaces the transcript/sentinel rules
+    entirely — see `wait_until_safe`."""
 
     def __init__(self, control, quit_bytes: list[bytes],
                  transcript: Path | None, sentinel: Path,
                  marker_wired: bool = False,
-                 quiesce: float | None = None, poll: float = 0.2):
+                 quiesce: float | None = None, poll: float = 0.2,
+                 status_probe: Callable[[], str | None] | None = None):
         self.control = control
         self.quit_bytes = quit_bytes
         self.transcript = transcript
@@ -228,6 +252,7 @@ class FlipMonitor:
         self.marker_wired = marker_wired
         self.quiesce = _quiesce_default(marker_wired) if quiesce is None else quiesce
         self.poll = poll
+        self.status_probe = status_probe
         self.flip_requested = False
         self.how = ""
         self._armed = threading.Event()
@@ -282,6 +307,7 @@ class FlipMonitor:
                 poll=self.poll,
                 marker_wired=self.marker_wired,
                 provider=lambda: self.transcript,
+                status_probe=self.status_probe,
             )
             if self._stop.is_set():
                 return

@@ -453,7 +453,7 @@ def test_monitor_passes_mode_through_to_wait(tmp_path, monkeypatch):
     seen = {}
 
     def fake_wait(transcript, sentinel, cancelled, quiesce=None, poll=0.2,
-                  marker_wired=False, provider=None):
+                  marker_wired=False, provider=None, status_probe=None):
         seen.update(quiesce=quiesce, poll=poll, marker_wired=marker_wired,
                     provider_reads=provider())
         return True
@@ -744,3 +744,111 @@ def test_session_status_tolerates_garbage_files(tmp_path, monkeypatch):
         f"{me}.json": {"pid": me, "sessionId": _SID, "status": "waiting"},
     })
     assert _claude_adapter().session_status(_SID) == "waiting"
+
+
+# ---- status probe replaces the mtime rules ---------------------------------
+
+
+def test_wait_probe_waiting_overrides_busy_mtimes(tmp_path):
+    # transcript newer than sentinel: the mtime rules read mid-turn and
+    # would hold for the 120s valve. The probe says the session is at its
+    # prompt, and the probe is the whole test now.
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    _touch(t, time.time())
+    _touch(s, time.time() - 30)
+    assert wait_until_safe(t, s, cancelled=lambda: False, marker_wired=True,
+                           status_probe=lambda: "waiting") is True
+
+
+def test_wait_probe_no_answer_flips_eagerly(tmp_path):
+    # single tier by spec: registry missing/unreadable -> flip now.
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    _touch(t, time.time())
+    _touch(s, time.time() - 30)
+    assert wait_until_safe(t, s, cancelled=lambda: False, marker_wired=True,
+                           status_probe=lambda: None) is True
+
+
+def test_wait_probe_busy_blocks_then_releases(tmp_path):
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    _touch(s, time.time())  # mtime rules would say idle (sentinel newest)
+    _touch(t, time.time() - 30)
+    state = {"status": "busy"}
+    result = {}
+    done = threading.Event()
+
+    def wait():
+        result["ok"] = wait_until_safe(t, s, cancelled=lambda: False,
+                                       marker_wired=True, poll=0.05,
+                                       status_probe=lambda: state["status"])
+        done.set()
+
+    threading.Thread(target=wait, daemon=True).start()
+    assert not done.wait(timeout=0.4)   # busy verdict outranks idle mtimes
+    state["status"] = "waiting"
+    assert done.wait(timeout=3)
+    assert result["ok"] is True
+
+
+def test_wait_probe_busy_suppresses_valve(tmp_path):
+    # A long-silent tool call: transcript ancient, quiesce tiny — the old
+    # valve would fire and kill the live turn. The probe's "busy" holds.
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    _touch(t, time.time() - 3600)
+    _touch(s, time.time() - 7200)
+    state = {"status": "busy"}
+    result = {}
+    done = threading.Event()
+
+    def wait():
+        result["ok"] = wait_until_safe(t, s, cancelled=lambda: False,
+                                       marker_wired=True, quiesce=0.1,
+                                       poll=0.05,
+                                       status_probe=lambda: state["status"])
+        done.set()
+
+    threading.Thread(target=wait, daemon=True).start()
+    assert not done.wait(timeout=0.5)   # outlives quiesce: no valve
+    state["status"] = "waiting"
+    assert done.wait(timeout=3)
+    assert result["ok"] is True
+
+
+def test_wait_probe_busy_cancel_honored(tmp_path):
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    _touch(t, time.time())
+    cancel = threading.Event()
+    result = {}
+    done = threading.Event()
+
+    def wait():
+        result["ok"] = wait_until_safe(t, s, cancelled=cancel.is_set,
+                                       marker_wired=True, poll=0.05,
+                                       status_probe=lambda: "busy")
+        done.set()
+
+    threading.Thread(target=wait, daemon=True).start()
+    assert not done.wait(timeout=0.3)
+    cancel.set()
+    assert done.wait(timeout=3)
+    assert result["ok"] is False
+
+
+def test_monitor_probe_waiting_fires_immediately(tmp_path):
+    # End-to-end through FlipMonitor: mtimes scream mid-turn, probe says
+    # waiting -> the ladder runs. Mirrors test_monitor_arm_wait_terminate.
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    _touch(t, time.time())
+    control = _StubControl()
+    m = FlipMonitor(control, [b"\x04"], transcript=t, sentinel=s,
+                    marker_wired=True, poll=0.05,
+                    status_probe=lambda: "waiting")
+    m.start()
+    m.flip_pressed()
+    deadline = time.time() + 3
+    while not m.flip_requested and time.time() < deadline:
+        time.sleep(0.05)
+    m.stop()
+    assert m.flip_requested is True
+    assert m.how == "soft"
+    assert control.calls == [[b"\x04"]]
