@@ -1,6 +1,11 @@
 """InteractiveRunner: user-configured [harness] args land in the spawned argv."""
 
+import os
+import threading
+import time
+
 from tandem import paths, runner
+from tandem.runner import FlipMonitor, wait_until_safe
 
 
 class _Sink:
@@ -102,3 +107,114 @@ def test_no_config_leaves_argv_unchanged(env_factory, monkeypatch):
     argv = _run_capturing_argv(env, monkeypatch)
     assert argv[:3] == ["claude", "--resume", env.session.claude_session_id]
     assert argv[3] == "--settings"
+
+
+def _touch(path, mtime):
+    path.write_text("x")
+    os.utime(path, (mtime, mtime))
+
+
+def test_wait_idle_when_sentinel_newer_than_transcript(tmp_path):
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    now = time.time()
+    _touch(t, now - 10)
+    _touch(s, now - 5)   # marker closed the last turn
+    assert wait_until_safe(t, s, cancelled=lambda: False) is True
+
+
+def test_wait_idle_when_no_files(tmp_path):
+    assert (
+        wait_until_safe(tmp_path / "none", tmp_path / "none2",
+                        cancelled=lambda: False)
+        is True
+    )
+
+
+def test_wait_quiescence_fallback(tmp_path):
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    now = time.time()
+    _touch(t, now - 3)   # transcript quiet for 3s, no marker since
+    _touch(s, now - 10)
+    assert (
+        wait_until_safe(t, s, cancelled=lambda: False, quiesce=2.0) is True
+    )
+
+
+def test_wait_blocks_midturn_then_marker_releases(tmp_path):
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    _touch(t, time.time())          # a line just landed: turn in flight
+    _touch(s, time.time() - 30)
+    done = threading.Event()
+    result = {}
+
+    def waiter():
+        result["ok"] = wait_until_safe(t, s, cancelled=lambda: False,
+                                       quiesce=30.0, poll=0.05)
+        done.set()
+
+    threading.Thread(target=waiter, daemon=True).start()
+    time.sleep(0.2)
+    assert not done.is_set()        # still waiting
+    _touch(s, time.time() + 1)      # marker fires
+    assert done.wait(timeout=2)
+    assert result["ok"] is True
+
+
+def test_wait_cancelled(tmp_path):
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    _touch(t, time.time())
+    _touch(s, time.time() - 30)
+    assert (
+        wait_until_safe(t, s, cancelled=lambda: True, quiesce=30.0) is False
+    )
+
+
+class _StubControl:
+    def __init__(self):
+        self.calls = []
+
+    def terminate(self, soft, **kw):
+        self.calls.append(soft)
+        return "soft"
+
+
+def test_monitor_arm_wait_terminate(tmp_path):
+    control = _StubControl()
+    m = FlipMonitor(control, [b"\x04"], transcript=None,
+                    sentinel=tmp_path / "s.turn")
+    m.start()
+    assert m.armed() is False
+    m.flip_pressed()                 # idle (no files) -> fires immediately
+    deadline = time.time() + 3
+    while not m.flip_requested and time.time() < deadline:
+        time.sleep(0.05)
+    m.stop()
+    assert m.flip_requested is True
+    assert m.how == "soft"
+    assert control.calls == [[b"\x04"]]
+
+
+def test_monitor_toggle_cancels(tmp_path):
+    t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
+    _touch(t, time.time())           # mid-turn: monitor will block
+    _touch(s, time.time() - 30)
+    control = _StubControl()
+    m = FlipMonitor(control, [b"\x04"], transcript=t, sentinel=s)
+    m.start()
+    m.flip_pressed()
+    time.sleep(0.1)
+    assert m.armed() is True
+    m.flip_pressed()                 # toggle: cancel
+    time.sleep(0.3)
+    assert m.armed() is False
+    assert m.flip_requested is False
+    m.stop()
+    assert control.calls == []
+
+
+def test_monitor_stop_unblocks_cleanly(tmp_path):
+    m = FlipMonitor(_StubControl(), [b"\x04"], transcript=None,
+                    sentinel=tmp_path / "s.turn")
+    m.start()
+    m.stop()                         # never armed: must not hang or fire
+    assert m.flip_requested is False

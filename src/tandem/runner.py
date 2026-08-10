@@ -84,6 +84,115 @@ def ctx_to_cursor(ctx: SessionContext, cursor: SyncCursor) -> None:
     )
 
 
+def _mtime(path: Path | None) -> float:
+    if path is None:
+        return 0.0
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def wait_until_safe(
+    transcript: Path | None,
+    sentinel: Path | None,
+    cancelled: Callable[[], bool],
+    quiesce: float = 2.0,
+    poll: float = 0.2,
+) -> bool:
+    """Block until the turn boundary. The transcript's last append lands
+    before the Stop hook / notify touches the sentinel, so idle means the
+    sentinel is at least as new as the transcript; otherwise wait for the
+    marker touch, with transcript quiescence as the marker-less fallback.
+    Returns False if `cancelled()` turned true first.
+
+    Both clocks here are wall-clock on purpose: the deadline is derived from
+    file mtimes, so `time.time()` is the only comparable reading (monotonic
+    would be right for a pure timeout, but there is none in this loop).
+    A missing file reads as mtime 0, which makes a fresh session (no files)
+    idle and a marker-less mid-turn session take the quiescence path."""
+    while True:
+        if cancelled():
+            return False
+        t, s = _mtime(transcript), _mtime(sentinel)
+        if s >= t:
+            return True
+        if time.time() - t >= quiesce:
+            return True
+        time.sleep(poll)
+
+
+class FlipMonitor:
+    """Owns the flip lifecycle: the armed flag (toggle to cancel), the
+    turn-boundary wait, and the termination ladder through the PtyControl.
+    One background thread; all public methods are thread-safe."""
+
+    def __init__(self, control, quit_bytes: list[bytes],
+                 transcript: Path | None, sentinel: Path):
+        self.control = control
+        self.quit_bytes = quit_bytes
+        self.transcript = transcript
+        self.sentinel = sentinel
+        self.flip_requested = False
+        self.how = ""
+        self._armed = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="tandem-flip", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._armed.set()  # unblock the wait
+        # 15s outlasts the worst-case ladder (attach wait 5s + soft
+        # keystrokes + soft/term/kill timeouts ~6.75s), so a stop() landing
+        # mid-ladder still joins instead of abandoning a live thread.
+        self._thread.join(timeout=15)
+
+    def flip_pressed(self) -> None:
+        """Arm, or toggle off a pending flip. Called from the pty pump's
+        stdin branch, so it must not block: Event.set/clear take only the
+        Event's own lock and never do I/O. It must also stay off any lock
+        that `armed()` needs — `armed()` runs inside the SIGWINCH handler on
+        this same thread, and a shared lock would deadlock the pump."""
+        if self._armed.is_set():
+            self._armed.clear()  # toggle: cancel a pending flip
+        else:
+            self._armed.set()
+
+    def armed(self) -> bool:
+        """Bar state: armed and still pending. Reached from inside the pump's
+        SIGWINCH handler (on_winch -> paint -> armed), so it is deliberately
+        lock-free, allocation-free and non-raising: Event.is_set() is a bare
+        flag read and `flip_requested` a plain attribute. Never add a lock,
+        a stat/read, or a raise path here. Goes False once the flip actually
+        fires, so the bar stops advertising an arm that is already spent."""
+        return self._armed.is_set() and not self.flip_requested
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._armed.wait()
+            if self._stop.is_set():
+                return
+            ok = wait_until_safe(
+                self.transcript,
+                self.sentinel,
+                cancelled=lambda: (
+                    not self._armed.is_set() or self._stop.is_set()
+                ),
+            )
+            if self._stop.is_set():
+                return
+            if not ok:
+                continue  # cancelled: back to waiting for the next arm
+            self.flip_requested = True
+            self.how = self.control.terminate(self.quit_bytes)
+            return
+
+
 class TailLoop:
     """Tails one source transcript, parses, feeds the sink, persists the
     cursor. Usable standalone in tests (no PTY required)."""
