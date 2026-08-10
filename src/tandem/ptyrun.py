@@ -147,6 +147,9 @@ class FrameIO:
     bar: bool = True
     active: str = ""
     other: str = ""
+    # how `flip_byte` is spelled on the bar; the runner derives it from the
+    # configured byte so a rebound key advertises itself correctly
+    key_label: str = "^]"
     bar_dropped: bool = False
 
 
@@ -191,7 +194,11 @@ def run_in_pty(
         else None
     )
     guard = OutputGuard() if bar_on else None
-    bar = StatusBar(rows, cols, frame.active, frame.other) if bar_on else None
+    bar = (
+        StatusBar(rows, cols, frame.active, frame.other, frame.key_label)
+        if bar_on
+        else None
+    )
 
     child = PtyProcess.spawn(
         argv,

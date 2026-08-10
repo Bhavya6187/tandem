@@ -117,6 +117,15 @@ def _quiesce_default(marker_wired: bool) -> float:
     return _MISSED_MARKER_VALVE_S if marker_wired else _QUIESCE_S
 
 
+def _key_label(byte: int) -> str:
+    """How the bar spells the flip keybind. `config._parse_flip_key` only ever
+    yields 0x01-0x1F, so the caret form always applies; the hex fallback is
+    there so a future non-control binding still prints something."""
+    if 0x00 < byte < 0x20:
+        return "^" + chr(byte + 0x40)
+    return f"0x{byte:02x}"
+
+
 def wait_until_safe(
     transcript: Path | None,
     sentinel: Path | None,
@@ -416,6 +425,7 @@ class InteractiveRunner:
             bar=frame_cfg.bar,
             active=active,
             other=session.shadow,
+            key_label=_key_label(frame_cfg.flip_byte),
         )
         self.flip_requested = False
         self.reports = []

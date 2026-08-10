@@ -501,8 +501,33 @@ def test_runner_passes_frame_and_control(env_factory, monkeypatch):
     frame = seen["frame"]
     assert frame is not None
     assert frame.flip_byte == 0x1D
+    assert frame.key_label == "^]"
     assert frame.active == "claude" and frame.other == "codex"
     assert r.flip_requested is False
+
+
+def test_runner_labels_a_rebound_flip_key_for_the_bar(env_factory, monkeypatch):
+    # [frame] flip_key = "ctrl-t" must reach the bar as "^T", not just as the
+    # byte the detector watches.
+    env = env_factory(active="claude")
+    (paths.tandem_home() / "config.toml").write_text(
+        '[frame]\nflip_key = "ctrl-t"\n'
+    )
+    seen = {}
+    monkeypatch.setattr(
+        runner, "run_in_pty",
+        lambda argv, cwd=None, frame=None, control=None: seen.update(frame=frame) or 0,
+    )
+    runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
+    assert seen["frame"].flip_byte == 0x14
+    assert seen["frame"].key_label == "^T"
+
+
+def test_key_label_spells_control_bytes_with_a_caret():
+    assert runner._key_label(0x1D) == "^]"
+    assert runner._key_label(0x14) == "^T"
+    assert runner._key_label(0x01) == "^A"
+    assert runner._key_label(0x7F) == "0x7f"   # not a control byte: fallback
 
 
 def test_runner_reports_flip_requested(env_factory, monkeypatch):

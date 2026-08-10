@@ -147,6 +147,7 @@ def test_frame_io_defaults():
     frame = FrameIO(flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False)
     assert frame.bar is True
     assert (frame.active, frame.other) == ("", "")
+    assert frame.key_label == "^]"
     assert frame.bar_dropped is False
 
 

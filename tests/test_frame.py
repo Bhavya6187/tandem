@@ -232,6 +232,23 @@ def test_bar_line_armed_state():
     assert "flipping at turn end" in line and "^] cancels" in line
 
 
+def test_bar_line_names_the_rebound_key():
+    # [frame] flip_key = "ctrl-t": the bar is the only place the keybind is
+    # advertised, so a hardcoded ^] would send the user pressing a key that
+    # goes straight through to the harness.
+    bar = StatusBar(rows=40, cols=60, active="claude", other="codex",
+                    key_label="^T")
+    assert "^T flips" in bar.line(armed=False)
+    assert "^T cancels" in bar.line(armed=True)
+    assert "^]" not in bar.line(armed=False)
+    assert "^]" not in bar.line(armed=True)
+
+
+def test_bar_line_defaults_to_ctrl_bracket():
+    bar = StatusBar(rows=40, cols=60, active="claude", other="codex")
+    assert "^] flips" in bar.line(armed=False)
+
+
 def test_bar_line_truncates_to_width():
     bar = StatusBar(rows=40, cols=12, active="claude", other="codex")
     assert len(bar.line(armed=False)) == 12
