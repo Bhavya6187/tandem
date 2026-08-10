@@ -142,3 +142,20 @@ class TestDoctor:
             for c in report.checks
             if c.status == "warn"
         )
+
+    def test_warns_on_bar_drop_marker(self, env_factory):
+        from tandem import paths
+
+        env = env_factory()
+        marker = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-bar-dropped"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        report = run_doctor(env.store, env.session)
+        assert any(
+            c.status == "warn" and "status bar" in c.message for c in report.checks
+        )
+
+    def test_quiet_without_bar_drop_marker(self, env_factory):
+        env = env_factory()
+        report = run_doctor(env.store, env.session)
+        assert not any("status bar" in c.message for c in report.checks)
