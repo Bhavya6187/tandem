@@ -211,15 +211,20 @@ def run_in_pty(
         """Terminal state: the guard's drop verdict is not latched, so the
         pump latches it here by tearing the bar down for good."""
         nonlocal bar_on, guard, bar
-        if bar is None:
-            return
-        # State down before any syscall. Drops and resizes are causally
-        # correlated (a child sets DECSTBM *because* the terminal resized,
-        # and a drag-resize bursts SIGWINCH), so a handler landing inside the
-        # writes below must already see bar is None — otherwise it repaints
-        # the region and bar *after* the clear and nothing is left to remove
-        # them, corrupting the terminal past tandem's exit.
+        # Claim the bar first, ask questions second. Drops and resizes are
+        # causally correlated (a child sets DECSTBM *because* the terminal
+        # resized, and a drag-resize bursts SIGWINCH), so a SIGWINCH landing
+        # anywhere below must already see bar is None. Reading the guard
+        # before the swap leaves a one-statement window where a reentrant
+        # call passes the guard, swaps the bar out from under this one, and
+        # leaves `dying` None here — an AttributeError escaping the pump and
+        # orphaning the child. It also has to be None before the writes
+        # below, or the handler repaints region and bar *after* the clear
+        # with nothing left to remove them, corrupting the terminal past
+        # tandem's exit.
         dying, bar = bar, None
+        if dying is None:
+            return
         bar_on, guard = False, None
         frame.bar_dropped = True
         if detector is not None:

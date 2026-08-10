@@ -1,5 +1,14 @@
+import fcntl
+import os
+import pty
+import signal
+import struct
 import sys
+import termios
+import threading
+import time
 
+import tandem.ptyrun as ptyrun
 from tandem.ptyrun import FrameIO, PtyControl, _bar_on, _child_dims, run_in_pty
 
 
@@ -195,3 +204,163 @@ def test_write_all_gives_up_on_a_zero_byte_write(monkeypatch):
 
     monkeypatch.setattr(ptyrun.os, "write", lambda fd, data: 0)
     ptyrun._write_all(7, b"abc")   # returns instead of hanging
+
+
+# -- driving the real pump ------------------------------------------------
+#
+# The bar teardown paths only exist inside run_in_pty's closure, and they
+# only run against a tty. These give the pump a real pty for stdin (so
+# tcgetattr/setraw/ioctl are honest) and a stub child whose "fd" is a pipe
+# the test writes into, which is enough to exercise the output guard, the
+# SIGWINCH handler, and drop_bar end to end.
+
+
+class _FakeStdin:
+    def __init__(self, fd):
+        self._fd = fd
+
+    def fileno(self):
+        return self._fd
+
+
+class _PumpChild:
+    """Stub PtyProcess whose `fd` is a real pipe the test feeds. Closing the
+    write end is how a test ends the pump (read -> EOF -> loop breaks)."""
+
+    def __init__(self):
+        self.rd, self.wr = os.pipe()
+        self.pid = os.getpid()
+        self.exitstatus = 0
+        self.writes = []
+        self.winsizes = []
+
+    @property
+    def fd(self):
+        return self.rd
+
+    def read(self, n):
+        data = os.read(self.rd, n)
+        if not data:
+            raise EOFError
+        return data
+
+    def write(self, data):
+        self.writes.append(bytes(data))
+
+    def isalive(self):
+        return True
+
+    def setwinsize(self, rows, cols):
+        self.winsizes.append((rows, cols))
+
+    def sendeof(self):
+        pass
+
+    def wait(self):
+        return 0
+
+
+class _Pump:
+    def __init__(self, monkeypatch, frame=None, rows=24, cols=80):
+        self.frame = frame or FrameIO(
+            flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False
+        )
+        self.master, self.slave = pty.openpty()
+        self.child = _PumpChild()
+        self.writes: list[bytes] = []
+        self.painted = threading.Event()
+        self.on_write = None
+        self.set_rows(rows, cols)
+        monkeypatch.setattr(ptyrun, "_write_all", self._record)
+        monkeypatch.setattr(ptyrun.sys, "stdin", _FakeStdin(self.slave))
+        monkeypatch.setattr(
+            ptyrun, "PtyProcess",
+            type("_Spawner", (), {"spawn": staticmethod(lambda *a, **kw: self.child)}),
+        )
+
+    def _record(self, fd, data):
+        data = bytes(data)
+        self.writes.append(data)
+        self.painted.set()      # the first paint proves the pump is running
+        if self.on_write is not None:
+            self.on_write(data)
+
+    def set_rows(self, rows, cols=80):
+        fcntl.ioctl(
+            self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0)
+        )
+
+    def feed(self, data: bytes) -> None:
+        os.write(self.child.wr, data)
+
+    def winch(self, rows, cols=80):
+        self.set_rows(rows, cols)
+        os.kill(os.getpid(), signal.SIGWINCH)   # delivered to the pump thread
+
+    def await_clear(self, timeout=3.0) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if any(b"\x1b[2K" in w for w in self.writes):
+                return True
+            time.sleep(0.02)
+        return False
+
+    def run(self, drive) -> int:
+        def driver():
+            try:
+                assert self.painted.wait(timeout=5)
+                drive()
+            finally:
+                os.close(self.child.wr)     # EOF: ends the pump
+        thread = threading.Thread(target=driver, daemon=True)
+        thread.start()
+        try:
+            return run_in_pty(["fake-harness"], frame=self.frame)
+        finally:
+            thread.join(timeout=5)
+            for fd in (self.master, self.slave, self.child.rd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+
+def test_pump_drops_the_bar_when_the_child_asserts_its_own_scroll_region(monkeypatch):
+    pump = _Pump(monkeypatch)
+
+    def drive():
+        pump.feed(b"\x1b[1;20r")            # child's own DECSTBM
+        assert pump.await_clear()
+
+    assert pump.run(drive) == 0
+    assert pump.frame.bar_dropped is True
+    # the bar's row is handed back to the child at the full terminal height
+    assert pump.child.winsizes[-1] == (24, 80)
+
+
+def test_drop_bar_survives_a_sigwinch_landing_inside_its_own_teardown(monkeypatch):
+    """Drops and resizes are causally correlated, so the SIGWINCH handler
+    lands inside drop_bar's writes all the time. The bar must already be gone
+    by then: a reentrant drop that still saw it would write a second clear (or
+    repaint the region *after* the clear) and outlive tandem's exit."""
+    pump = _Pump(monkeypatch)
+    reentered = []
+
+    def on_write(data):
+        if b"\x1b[2K" in data and not reentered:
+            reentered.append(True)
+            pump.set_rows(3)                # a resize the drop raced
+            os.kill(os.getpid(), signal.SIGWINCH)
+            time.sleep(0.05)                # let the handler run to completion
+
+    pump.on_write = on_write
+
+    def drive():
+        pump.feed(b"\x1b[1;20r")
+        assert pump.await_clear()
+
+    assert pump.run(drive) == 0             # no AttributeError escaped the pump
+    assert reentered == [True]              # the reentrant path really ran
+    clears = [w for w in pump.writes if b"\x1b[2K" in w]
+    assert len(clears) == 1                 # torn down exactly once
+    assert not any(b"\x1b[7m" in w for w in pump.writes[pump.writes.index(clears[0]):])
