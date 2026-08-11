@@ -645,9 +645,9 @@ def _interactive(active: str) -> None:
 
 
 def _enter_session(session: PairedSession) -> int:
-    from .shell import run_shell
+    from .flip import run_session
 
-    return run_shell(session.tandem_id, _default_sink_factory)
+    return run_session(session.tandem_id, _default_sink_factory)
 
 
 if __name__ == "__main__":
