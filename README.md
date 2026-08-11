@@ -49,12 +49,10 @@ claude ● │ codex ○   ^] flips
 Pressed mid-turn, the flip arms and fires the moment the model finishes
 (the bar says so; press again to cancel).
 
-Exit the harness the usual way and you land at tandem's prompt instead of
-your shell:
+Exit the harness the usual way and you're back at your shell, with the
+session saved and a hint for picking it up again:
 
 ```
-tandem (claude)> switch      # the same flip, from the prompt
-tandem (codex)> exit
 to continue this session: tandem resume a1b2c3d4e5f6
 ```
 
@@ -112,7 +110,7 @@ one problem, native harnesses, instant switching, privacy:
   commands, and MCP servers all work exactly as they do today — tandem
   reserves exactly one key (Ctrl-]) and one terminal row (the tab bar).
 - A flip waits for the turn boundary, exits the fronted CLI gracefully,
-  lets the sync settle, and resumes the other side — no prompt in
+  lets the sync settle, and resumes the other side — no stop in
   between.
 - Everything stays local: the CLIs' own session files plus a small
   SQLite database in `~/.tandem`. No cloud sync, no telemetry.
@@ -127,8 +125,7 @@ Full mechanics — sync engine, crash safety, compatibility ranges:
 | Command | What it does |
 | --- | --- |
 | `tandem` | Start a fresh paired session (Claude active; `--active codex` to flip) |
-| `Ctrl-]` | Flip to the other harness from inside a running session, without stopping at a prompt (rebindable in `[frame]`) |
-| `switch` | Flip active/shadow and enter the other agent — at the tandem prompt, or one-shot from your shell (one-shot only flips, it doesn't enter) |
+| `Ctrl-]` | Flip to the other harness from inside a running session (rebindable in `[frame]`) |
 | `tandem resume [id]` | Continue the most recent (or a specific) session |
 | `tandem run --on codex "…"` | One-off prompt to the *other* agent, with full context |
 | `tandem sub "…"` | Run one delegated task on a codex model (what GPT subagents use under the hood) |

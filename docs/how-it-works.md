@@ -9,21 +9,18 @@ compatibility ranges, and where your data lives. (Back to the
   local file I/O: tandem tails the active transcript, translates each
   entry, and appends it to the shadow's session file. The shadow's model
   is never called to "catch up".
-- **A persistent prompt, not the OS shell.** Exiting the harness — as
-  opposed to flipping out of it — lands you at `tandem (claude)>`. There,
-  `switch` flips roles and drops you straight into the other tool, Enter
-  re-enters the current one, and
-  `status` / `sync` / `doctor` / `run --on` / `sync-mcp` all run against
-  this session. `exit` (or Ctrl-D) returns to your shell and prints the
-  resume hint. Every command also works one-shot from your shell,
-  targeting the directory's most recently used session.
+- **Exit means exit.** Leaving the harness — as opposed to flipping out
+  of it — prints the resume hint and returns you to your OS shell; the
+  paired session is saved and `tandem resume` re-enters it.
+  `status` / `sync` / `doctor` / `run --on` / `sync-mcp` run one-shot
+  from your shell, targeting the directory's most recently used session.
 - **The frame: flip without leaving.** Ctrl-] (configurable, consumed at
   the PTY layer, ignored inside bracketed paste) flips the screen to the
   other harness: pressed mid-turn it arms and fires at the turn boundary
   (press again to cancel — the bar shows the armed state), then
   tandem exits the fronted CLI gracefully (quit keystrokes, then SIGTERM,
   then a bounded SIGKILL), lets the incremental sync settle, flips roles,
-  and resumes the other side — with no stop at the prompt in between.
+  and resumes the other side — with no stop in between.
   With claude fronted, the boundary comes from claude's own session
   registry (`~/.claude/sessions/<pid>.json`, the data `claude agents
   --json` prints): `busy` holds the flip, anything else fires it — so an

@@ -411,7 +411,7 @@ class InteractiveRunner:
         # Formatted, ready-to-print report lines for the session that just
         # ran. `run()` prints them itself on a normal exit; on a flip it does
         # not, because the flip's screen clear would wipe them a moment
-        # later — the shell reprints them onto the fresh screen instead.
+        # later — the flip loop reprints them onto the fresh screen instead.
         self.reports: list[str] = []
 
     def run(self) -> int:
