@@ -583,7 +583,7 @@ def test_runner_writes_bar_drop_marker(env_factory, monkeypatch, capsys):
 def test_runner_holds_its_reports_back_for_a_flip(env_factory, monkeypatch, capsys):
     # A flip clears the screen a moment after run() returns, so anything
     # printed here is wiped before the user can read it. Collect, don't print
-    # — the shell reprints onto the fresh screen.
+    # — the flip loop reprints onto the fresh screen.
     env = env_factory(active="claude")
     sentinel = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-claude.turn"
 

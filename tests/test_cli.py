@@ -95,6 +95,25 @@ def _mk_session(cwd, active="claude", n=0):
         return store.create_session(str(cwd), active, f"c-{n}", f"x-{n}")
 
 
+def test_enter_session_runs_the_flip_loop(homes, monkeypatch):
+    """Every entry point funnels through `_enter_session`, and every other
+    test here patches it away — so pin the one seam it hides: the flip loop
+    gets this session's id, and its exit code is what the CLI exits with."""
+    from tandem import flip
+
+    seen = []
+
+    def fake_run_session(tandem_id, sink_factory):
+        seen.append((tandem_id, sink_factory))
+        return 3
+
+    monkeypatch.setattr(flip, "run_session", fake_run_session)
+    s = _mk_session(homes)
+    assert cli._enter_session(s) == 3      # code propagates to sys.exit
+    assert [t for t, _ in seen] == [s.tandem_id]
+    assert seen[0][1] is cli._default_sink_factory
+
+
 def test_resume_picks_most_recently_used(homes, ok_versions, entered):
     s1 = _mk_session(homes, n=1)
     _mk_session(homes, n=2)
@@ -182,6 +201,6 @@ def test_bare_tandem_offers_plugin_after_pairing(
                         lambda: calls.append(len(entered)))
     r = click.testing.CliRunner().invoke(cli.main, [])
     assert r.exit_code == 0
-    # offered exactly once, after pairing but before entering the shell
+    # offered exactly once, after pairing but before entering the session
     assert calls == [0]
     assert len(entered) == 1

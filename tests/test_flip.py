@@ -59,8 +59,9 @@ def test_failed_entry_reports_and_exits(sess, capsys):
     def run_harness(session):
         raise FileNotFoundError("claude: command not found")
 
-    flip.run_session(sess.tandem_id, None, run_harness=run_harness)
+    code = flip.run_session(sess.tandem_id, None, run_harness=run_harness)
     cap = capsys.readouterr()
+    assert code == 1  # a launch that never ran is a failure, not a 0
     assert "could not run the harness: FileNotFoundError" in cap.err
     assert f"to continue this session: tandem resume {sess.tandem_id}" in cap.out
 
@@ -69,7 +70,7 @@ def test_resume_hint_prints_even_when_the_loop_raises(sess, capsys, monkeypatch)
     """The hint is the only place the id is shown, so it must survive an
     unexpected exception escaping the loop."""
 
-    def boom(tandem_id, run_harness, first, reports=None):
+    def boom(tandem_id, run_harness, first, reports):
         raise RuntimeError("terminal went away")
 
     monkeypatch.setattr(flip, "_flip_loop", boom)
@@ -167,7 +168,7 @@ def test_both_harnesses_failing_exits_with_the_session_intact(
     cap = capsys.readouterr()
     assert calls == ["claude", "codex", "claude"]  # one retry only, no ping-pong
     assert cap.err.count("could not run the harness: FileNotFoundError") == 2
-    assert code == 0
+    assert code == 1  # neither harness ran: a failure, not the flipping run's 0
     assert f"to continue this session: tandem resume {sess.tandem_id}" in cap.out
 
 

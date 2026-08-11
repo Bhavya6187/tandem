@@ -27,7 +27,7 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
     # fresh screen. Refilled by every harness run. Injected test runners never
     # touch it, which leaves it empty — harmless.
     reports: list[str] = []
-    if run_harness is None:  # pragma: no cover - interactive default
+    if run_harness is None:
 
         def run_harness(session):
             from .runner import InteractiveRunner
@@ -42,7 +42,7 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
     code = 1
     try:
         code = _flip_loop(
-            tandem_id, run_harness, _enter(tandem_id, run_harness, code), reports
+            tandem_id, run_harness, _enter(tandem_id, run_harness), reports
         )
     finally:
         # Hint first: state bookkeeping must not be able to swallow it.
@@ -65,8 +65,7 @@ def _clear_screen() -> None:
 
 
 def _flip_loop(
-    tandem_id: str, run_harness, first: tuple[int, bool],
-    reports: list[str] | None = None,
+    tandem_id: str, run_harness, first: tuple[int, bool], reports: list[str],
 ) -> int:
     """Keep flipping (Ctrl-]) until a session ends without requesting one.
     No stop between flips — this is the frame's tab feel. A failed flip
@@ -114,8 +113,9 @@ def _switch(
     tandem_id: str, run_harness, code: int, fall_back: bool = True
 ) -> tuple[int, bool]:
     """Flip roles and re-enter the newly active harness. Returns the exit
-    code to carry forward (unchanged if the flip failed) and whether the
-    re-entered harness asked for another flip.
+    code to carry forward (unchanged if the flip itself failed, 1 if the
+    flip worked but the launch did not) and whether the re-entered harness
+    asked for another flip.
 
     Two failures, two answers. The switch itself failing means roles never
     moved, so ending the session at the OS shell is the right landing. The
@@ -148,7 +148,7 @@ def _switch(
             )
             return code, False
     _report_switch(old, new_active, problems, mem)
-    code, flip, launched = _try_enter(tandem_id, run_harness, code)
+    code, flip, launched = _try_enter(tandem_id, run_harness)
     if launched or not fall_back:
         return code, flip
     click.secho(
@@ -159,11 +159,17 @@ def _switch(
     return _switch(tandem_id, run_harness, code, fall_back=False)
 
 
-def _try_enter(tandem_id: str, run_harness, code: int) -> tuple[int, bool, bool]:
+def _try_enter(tandem_id: str, run_harness) -> tuple[int, bool, bool]:
     """Run the active harness; returns (exit code, flip requested, launched).
     `launched` is False when the harness never got off the ground (a missing
     binary, a vanished session row) as opposed to running and exiting — the
-    distinction `_switch` needs to decide whether to flip back."""
+    distinction `_switch` needs to decide whether to flip back.
+
+    A failed launch exits 1 wherever it happens: a launch that never ran is a
+    failure whether it was the first one or the one after a flip, and carrying
+    the previous harness's code forward would report the last thing that *did*
+    run as this session's outcome. A later successful launch overwrites it with
+    that harness's real exit code."""
     try:
         with StateStore() as store:
             session = store.get_session(tandem_id)
@@ -177,14 +183,14 @@ def _try_enter(tandem_id: str, run_harness, code: int) -> tuple[int, bool, bool]
             fg="red",
             err=True,
         )
-        return code, False, False
+        return 1, False, False
 
 
-def _enter(tandem_id: str, run_harness, code: int) -> tuple[int, bool]:
+def _enter(tandem_id: str, run_harness) -> tuple[int, bool]:
     """Run the active harness; returns (exit code, flip requested). A failed
-    launch (or a session row that vanished) is reported and `code` is carried
-    forward with no flip, so the caller ends the session instead of losing
-    it. No flip-back ladder here: roles never moved, so the harness the user
-    just failed to launch *is* the one they were in."""
-    c, flip, _ = _try_enter(tandem_id, run_harness, code)
+    launch (or a session row that vanished) is reported and exits 1 with no
+    flip, so the caller ends the session instead of losing it. No flip-back
+    ladder here: roles never moved, so the harness the user just failed to
+    launch *is* the one they were in."""
+    c, flip, _ = _try_enter(tandem_id, run_harness)
     return c, flip
