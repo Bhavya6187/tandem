@@ -13,6 +13,7 @@ import sys
 import click
 
 from . import ops
+from .harness import get_adapter
 from .state import StateStore
 
 
@@ -87,6 +88,28 @@ def _flip_loop(
     return code
 
 
+def _report_switch(old: str, new_active: str, problems, mem) -> None:
+    """Report the outcome of a role flip: memory-sync actions and the
+    may-not-resume advisory."""
+    click.echo(
+        f"active harness: {get_adapter(old).display_name} -> "
+        f"{get_adapter(new_active).display_name}"
+    )
+    for a in mem.actions:
+        click.echo(f"  memory: {a}")
+    for w in mem.warnings:
+        click.secho(f"  memory: {w}", fg="yellow", err=True)
+    for p in problems:
+        click.secho(f"  warning: {p}", fg="yellow", err=True)
+    if problems:
+        click.secho(
+            "  the newly active session may not resume cleanly; "
+            "run `tandem doctor` for details.",
+            fg="yellow",
+            err=True,
+        )
+
+
 def _switch(
     tandem_id: str, run_harness, code: int, fall_back: bool = True
 ) -> tuple[int, bool]:
@@ -106,8 +129,6 @@ def _switch(
     between two harnesses that both refuse to launch. If it also fails, the
     loop ends with the error shown — and the session itself is never at
     risk, since `run_session`'s finally always prints the resume hint."""
-    from .cli import _report_switch
-
     with StateStore() as store:
         session = store.get_session(tandem_id)
         if session is None:

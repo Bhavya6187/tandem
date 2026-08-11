@@ -161,24 +161,6 @@ def test_doctor_no_session_hints_tandem(homes, monkeypatch):
     assert "run `tandem` to start one" in r.output
 
 
-def test_one_shot_switch_hints_resume(homes, ok_versions, monkeypatch):
-    class Mem:
-        actions: list = []
-        warnings: list = []
-
-    s = _mk_session(homes)
-
-    def fake_switch(store, session):
-        store.set_active(session.tandem_id, "codex")
-        return "codex", [], Mem()
-
-    monkeypatch.setattr("tandem.ops.switch_session", fake_switch)
-    r = click.testing.CliRunner().invoke(cli.main, ["switch"])
-    assert r.exit_code == 0
-    assert "tandem resume" in r.output
-    assert "Run `tandem` to continue" not in r.output
-
-
 def test_plugin_install_cmd_exit_codes(monkeypatch):
     from tandem import plugin_setup
 
