@@ -39,22 +39,24 @@ swallow the settings tandem appends after it and break turn tracking.
 Malformed values (a non-list, empty or non-string elements) are
 silently ignored rather than failing the launch.
 
-## [frame] — the flip key and the tab bar
+## [frame] — the flip key, the tab bar, and warm standby
 
 The frame is tandem's own surface inside a running session: one reserved
-keybind that flips to the other harness, and the one-line tab bar on the
-bottom terminal row.
+keybind that flips to the other harness, the one-line tab bar on the
+bottom terminal row, and the pre-booted standby harness behind the flip.
 
 ```toml
 [frame]
 flip_key = "ctrl-]"
 bar = true
+warm = true   # pre-boot the other harness so Ctrl-] attaches instantly; false = cold flips
 ```
 
 | key | default | meaning |
 | --- | --- | --- |
 | `flip_key` | `"ctrl-]"` | The flip keybind, consumed by tandem (never forwarded). Accepts `ctrl-<char>` or a hex byte like `"0x1d"`; printable keys are rejected (they would swallow typing). The bar relabels itself to match (`ctrl-t` shows `^T flips`). |
 | `bar` | `true` | The one-line tab bar on the bottom terminal row. `false` hides it; the flip still works. |
+| `warm` | `true` | Pre-boot the other harness in the background so the first flip attaches instantly. `false` gives cold flips: nothing is started until you press the key, and the first flip waits for the harness to boot. |
 
 An unparseable value falls back to the default rather than failing the
 launch. If a terminal can't sustain the bar, tandem drops it for the rest
