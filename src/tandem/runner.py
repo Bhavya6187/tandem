@@ -16,13 +16,14 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from . import paths
-from .config import load_frame_config, load_harness_args
+from .config import load_frame_config
 from .events import SessionContext
 from .harness import get_adapter
 from .ptyrun import FrameIO, PtyControl, run_in_pty
 from .state import PairedSession, StateStore, SyncCursor
 from .tailer import JsonlTailer, TailedLine, TranscriptTruncated, TranscriptWatcher
 from .util import json_line
+from .warm import build_launch
 
 
 class EventSink(Protocol):
@@ -419,24 +420,16 @@ class InteractiveRunner:
         active = session.active
         adapter = get_adapter(active)
         active_sid = getattr(session, f"{active}_session_id")
-
-        transcript: Path | None = None
-        fresh = True
-        if active_sid:
-            transcript = adapter.transcript_path(session.cwd, active_sid)
-            fresh = transcript is None
-            if fresh and active == "claude":
-                transcript = adapter.expected_transcript_path(session.cwd, active_sid)
-
-        sentinel = paths.tandem_home() / "tmp" / f"{session.tandem_id}-{active}.turn"
-        sentinel.parent.mkdir(parents=True, exist_ok=True)
-        argv = adapter.interactive_argv(active_sid, fresh)
-        argv += load_harness_args(active)
-        # bound, not re-called: hook_argv_extra re-reads config per call
-        # (codex checks the user's config.toml for a notify handler), so a
-        # second call could disagree with the argv actually launched.
-        hook_extra = adapter.hook_argv_extra(sentinel)
-        argv += hook_extra
+        # One recipe, bound once: hook_argv_extra re-reads config per call
+        # (codex checks the user's config.toml for a notify handler), so the
+        # argv actually launched and marker_wired must come from the same
+        # snapshot — which is also what lets a warm standby be adopted with
+        # the exact recipe it was spawned under.
+        recipe = build_launch(session, active)
+        transcript = recipe.transcript
+        sentinel = recipe.sentinel
+        argv = recipe.argv
+        hook_extra = recipe.hook_extra
 
         frame_cfg = load_frame_config()
         control = PtyControl()
