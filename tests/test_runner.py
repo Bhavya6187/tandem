@@ -416,6 +416,70 @@ def test_monitor_arm_wait_terminate(tmp_path):
     assert control.calls == [[b"\x04"]]
 
 
+class _OrderingControl:
+    """Records the ladder against the fire on one list: the hook appends
+    "fired", `terminate` appends "ladder"."""
+
+    def __init__(self, order):
+        self.order = order
+
+    def terminate(self, soft, **kw):
+        self.order.append("ladder")
+        return "soft"
+
+
+def _fire_and_join(control, hook, tmp_path):
+    """Drive one decided flip through a real FlipMonitor with `hook` wired
+    through the constructor, and join the thread so the ladder has finished
+    before anything is asserted. `status_probe` makes the boundary wait
+    return at once; the loop is the same settle `test_monitor_arm_wait_
+    terminate` uses, because `stop()` landing before the thread wakes from
+    its arm would cancel the flip instead of firing it."""
+    m = FlipMonitor(control, [b"\x04"], transcript=None,
+                    sentinel=tmp_path / "s.turn",
+                    status_probe=lambda: "waiting",
+                    on_flip_decided=hook)
+    m.start()
+    m.flip_pressed()
+    deadline = time.time() + 3
+    while not m.flip_requested and time.time() < deadline:
+        time.sleep(0.05)
+    m.stop()
+    return m
+
+
+def test_monitor_fires_the_flip_hook_before_the_ladder(tmp_path):
+    # The hook is where the incoming harness is spawned, and the whole point
+    # of firing it from here is that the boot overlaps the outgoing harness's
+    # teardown. Run after `control.terminate` it would still spawn, still
+    # hand over, still pass every runner test — and serialize precisely what
+    # this pipelines. So the order is the contract.
+    order = []
+    m = _fire_and_join(_OrderingControl(order), lambda: order.append("fired"),
+                       tmp_path)
+    assert order == ["fired", "ladder"]
+    assert m.flip_requested is True
+    assert m.how == "soft"          # the ladder's answer still lands
+
+
+def test_monitor_survives_a_raising_flip_hook(tmp_path):
+    # A hook that raises costs a cold flip and nothing else. Without the
+    # swallow the exception kills this thread mid-flip: `flip_requested` is
+    # already True, so the runner still reports a flip and the tests above
+    # still pass, but the ladder never runs and the harness the user just
+    # pressed Ctrl-] in is never terminated. The ladder's survival is the
+    # assertion, not a warning.
+    order = []
+
+    def boom():
+        raise OSError("spawn failed")
+
+    m = _fire_and_join(_OrderingControl(order), boom, tmp_path)
+    assert order == ["ladder"]
+    assert m.flip_requested is True
+    assert m.how == "soft"
+
+
 def test_monitor_toggle_cancels(tmp_path):
     t, s = tmp_path / "t.jsonl", tmp_path / "s.turn"
     _touch(t, time.time())           # mid-turn: monitor will block
@@ -1047,6 +1111,7 @@ def test_no_fire_when_config_off(env_factory, monkeypatch):
 def test_no_fire_without_a_tty(env_factory, monkeypatch):
     env = env_factory(active="claude")
     r, spawns = _drive_flip(monkeypatch, env, tty=False)
+    assert r.flip_requested                 # or the gate is never reached
     assert spawns == [] and r.warm_child is None
 
 
@@ -1054,6 +1119,7 @@ def test_no_fire_when_shadow_transcript_is_missing(env_factory, monkeypatch):
     env = env_factory(active="claude")
     env.codex_shadow.unlink()               # never fresh-mint codex
     r, spawns = _drive_flip(monkeypatch, env)
+    assert r.flip_requested                 # or the gate is never reached
     assert spawns == [] and r.warm_child is None
 
 

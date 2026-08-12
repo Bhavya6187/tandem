@@ -291,9 +291,15 @@ class FlipMonitor:
     def stop(self) -> None:
         self._stop.set()
         self._armed.set()  # unblock the wait
-        # 15s outlasts the worst-case ladder (attach wait 5s + soft
-        # keystrokes + soft/term/kill timeouts ~6.75s), so a stop() landing
-        # mid-ladder still joins instead of abandoning a live thread.
+        # 15s outlasts the worst-case tail of a decided flip: the
+        # `on_flip_decided` fire (a fork/exec — the incoming harness is
+        # spawned inside this joined window) plus the ladder itself (attach
+        # wait 5s + soft keystrokes + soft/term/kill timeouts ~6.75s). So a
+        # stop() landing mid-flip still joins instead of abandoning a live
+        # thread. It stays a budget, not a guarantee — what makes an expired
+        # one *safe* is the runner's fired-slot lock, not this join: a child
+        # that lands after the caller has read the slot is killed by the fire
+        # itself rather than stranded (see `InteractiveRunner._run`).
         self._thread.join(timeout=15)
 
     def flip_pressed(self) -> None:
@@ -550,8 +556,12 @@ class InteractiveRunner:
             if size is None:
                 return   # no shadow file yet: switch_session's late-create
                          # + a cold spawn own that flip; never fresh-mint
-            recipe = build_launch(session, shadow)
-            child = spawn_hidden(recipe, _winsize(sys.stdin.fileno()), size)
+            # not `recipe`: that name is taken by the *active* side's launch,
+            # which this closure must never rebuild or shadow
+            shadow_recipe = build_launch(session, shadow)
+            child = spawn_hidden(
+                shadow_recipe, _winsize(sys.stdin.fileno()), size
+            )
             with fired_lock:
                 if not fired["closed"]:
                     fired["child"] = child
