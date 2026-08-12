@@ -256,11 +256,12 @@ class FlipMonitor:
     entirely — see `wait_until_safe`.
 
     `on_flip_decided` fires once, on this thread, in the gap between the
-    decision and the ladder — the runner spawns the incoming harness there,
-    so its boot overlaps the outgoing one's teardown. It is called with the
-    flag already set (`flip_requested` is what makes the flip inevitable, and
-    a callback must not be able to take it back) and its exceptions are
-    swallowed: a failed hook costs a cold flip, never the flip itself."""
+    decision and the ladder — the runner starts the incoming harness's launch
+    worker there, so its boot overlaps the outgoing one's teardown. It is
+    called with the flag already set (`flip_requested` is what makes the flip
+    inevitable, and a callback must not be able to take it back) and its
+    exceptions are swallowed: a failed hook costs a cold flip, never the flip
+    itself."""
 
     def __init__(self, control, quit_bytes: list[bytes],
                  transcript: Path | None, sentinel: Path,
@@ -291,15 +292,12 @@ class FlipMonitor:
     def stop(self) -> None:
         self._stop.set()
         self._armed.set()  # unblock the wait
-        # 15s outlasts the worst-case tail of a decided flip: the
-        # `on_flip_decided` fire (a fork/exec — the incoming harness is
-        # spawned inside this joined window) plus the ladder itself (attach
-        # wait 5s + soft keystrokes + soft/term/kill timeouts ~6.75s). So a
-        # stop() landing mid-flip still joins instead of abandoning a live
-        # thread. It stays a budget, not a guarantee — what makes an expired
-        # one *safe* is the runner's fired-slot lock, not this join: a child
-        # that lands after the caller has read the slot is killed by the fire
-        # itself rather than stranded (see `InteractiveRunner._run`).
+        # 15s outlasts the worst-case termination ladder (attach wait 5s +
+        # soft keystrokes + soft/term/kill timeouts ~6.75s), so stop() landing
+        # mid-flip normally joins instead of abandoning the monitor. The warm
+        # launch worker is deliberately outside this join: the fired-slot lock
+        # makes that safe by killing a child that lands after the caller has
+        # closed and read the slot (see `InteractiveRunner._run`).
         self._thread.join(timeout=15)
 
     def flip_pressed(self) -> None:
@@ -535,13 +533,11 @@ class InteractiveRunner:
             status_probe=claude_probe if active == "claude" else None,
         )
         # Fired at most once, on the monitor thread, between the flip
-        # decision and the ladder: the incoming harness boots while the
-        # outgoing one dies. The finally below reads the slot only after
-        # monitor.stop() joins that thread, so the handoff is normally
-        # uncontended; the lock covers the one case the join cannot — a
-        # stop() whose timeout expires with a spawn still in flight —
-        # by making "fill the slot" and "close it" one step, so whichever
-        # side loses kills the child instead of stranding it.
+        # decision and the ladder. It starts a worker and returns immediately,
+        # so a slow fork/exec cannot hold up teardown of the outgoing harness.
+        # The finally below closes the handoff slot after the ladder: a child
+        # that has landed by then is adopted, while a worker that lands later
+        # sees the closed slot and kills its child instead of stranding it.
         # The non-tty path never flips, so a spawn there could only ever
         # leak a hidden harness: the gate is read at fire time, and takes
         # both the [frame] `warm` flag and a real stdin tty.
@@ -559,14 +555,25 @@ class InteractiveRunner:
             # not `recipe`: that name is taken by the *active* side's launch,
             # which this closure must never rebuild or shadow
             shadow_recipe = build_launch(session, shadow)
-            child = spawn_hidden(
-                shadow_recipe, _winsize(sys.stdin.fileno()), size
-            )
-            with fired_lock:
-                if not fired["closed"]:
-                    fired["child"] = child
-                    return
-            child.kill()   # the runner already read the slot and left
+            dims = _winsize(sys.stdin.fileno())
+
+            def spawn() -> None:
+                try:
+                    child = spawn_hidden(shadow_recipe, dims, size)
+                except Exception:
+                    return   # a failed fire means a cold flip
+                with fired_lock:
+                    if not fired["closed"]:
+                        fired["child"] = child
+                        return
+                try:
+                    child.kill()   # the runner already read the slot and left
+                except Exception:
+                    pass
+
+            threading.Thread(
+                target=spawn, name="tandem-warm-fire", daemon=True
+            ).start()
 
         # The monitor exists before the closure does, so the hook is wired by
         # assignment — `monitor.start()` is called far below, which is what

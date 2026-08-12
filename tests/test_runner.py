@@ -1025,6 +1025,22 @@ class _StdinWithFileno:
         return 0
 
 
+class _QuietWatcher:
+    """No native FSEvents thread in tests whose runner exits immediately."""
+
+    def watch(self, path):
+        pass
+
+    def start(self):
+        pass
+
+    def wait(self):
+        time.sleep(0.01)
+
+    def stop(self):
+        pass
+
+
 def _flip_driver(env):
     """The file's established flip-driving `run_in_pty` stand-in: attach a
     dead child (the ladder reads it as already gone), press the keybind,
@@ -1066,6 +1082,7 @@ def _drive_flip(monkeypatch, env, *, warm_cfg=True, tty=True, spawns=None):
     monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: tty)
     monkeypatch.setattr(sys, "stdin", _StdinWithFileno())
     recorded = spawns if spawns is not None else []
+    spawn_done = threading.Event()
 
     class FakeChild:
         def __init__(self, recipe, dims, shadow_size):
@@ -1083,10 +1100,20 @@ def _drive_flip(monkeypatch, env, *, warm_cfg=True, tty=True, spawns=None):
     def fake_spawn_hidden(recipe, dims, shadow_size):
         child = FakeChild(recipe, dims, shadow_size)
         recorded.append(child)
+        spawn_done.set()
         return child
 
     monkeypatch.setattr(runner_mod, "spawn_hidden", fake_spawn_hidden)
-    monkeypatch.setattr(runner_mod, "run_in_pty", _flip_driver(env))
+    monkeypatch.setattr(runner_mod, "TranscriptWatcher", _QuietWatcher)
+    drive_flip = _flip_driver(env)
+
+    def fake_run_in_pty(*args, **kwargs):
+        code = drive_flip(*args, **kwargs)
+        if warm_cfg and tty and env.codex_shadow.exists():
+            assert spawn_done.wait(3)
+        return code
+
+    monkeypatch.setattr(runner_mod, "run_in_pty", fake_run_in_pty)
     r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink)
     r.run()
     return r, recorded
@@ -1128,6 +1155,7 @@ def test_a_raising_fire_still_flips(env_factory, monkeypatch):
     env = env_factory(active="claude")
     monkeypatch.setattr(runner_mod, "spawn_hidden",
                         lambda *a, **kw: (_ for _ in ()).throw(OSError("boom")))
+    monkeypatch.setattr(runner_mod, "TranscriptWatcher", _QuietWatcher)
     monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: True)
     monkeypatch.setattr(sys, "stdin", _StdinWithFileno())
     monkeypatch.setattr(runner_mod, "run_in_pty", _flip_driver(env))
@@ -1136,12 +1164,47 @@ def test_a_raising_fire_still_flips(env_factory, monkeypatch):
     assert r.flip_requested and r.warm_child is None
 
 
+def test_a_slow_fire_does_not_delay_the_termination_ladder(env_factory,
+                                                           monkeypatch):
+    import tandem.runner as runner_mod
+    env = env_factory(active="claude")
+    order = []
+    release_spawn = threading.Event()
+    spawn_done = threading.Event()
+
+    def slow_spawn(*args, **kwargs):
+        order.append("spawn-start")
+        release_spawn.wait(timeout=1)
+        order.append("spawn-done")
+        spawn_done.set()
+        return _DeadChild()
+
+    def terminate(self, soft, **kwargs):
+        order.append("ladder")
+        release_spawn.set()
+        return "soft"
+
+    monkeypatch.setattr(runner_mod, "spawn_hidden", slow_spawn)
+    monkeypatch.setattr(runner_mod, "TranscriptWatcher", _QuietWatcher)
+    monkeypatch.setattr(runner_mod.PtyControl, "terminate", terminate)
+    monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: True)
+    monkeypatch.setattr(sys, "stdin", _StdinWithFileno())
+    monkeypatch.setattr(runner_mod, "run_in_pty", _flip_driver(env))
+    r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink)
+    r.run()
+
+    assert r.flip_requested
+    assert spawn_done.wait(3)
+    assert order.index("ladder") < order.index("spawn-done")
+
+
 def test_no_flip_leaves_no_fire_spawn(env_factory, monkeypatch):
     env = env_factory(active="claude")
     import tandem.runner as runner_mod
     spawns = []
     monkeypatch.setattr(runner_mod, "spawn_hidden",
                         lambda *a, **kw: spawns.append(1))
+    monkeypatch.setattr(runner_mod, "TranscriptWatcher", _QuietWatcher)
     monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: True)
     monkeypatch.setattr(runner_mod, "run_in_pty", lambda *a, **kw: 0)
     r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink)
@@ -1181,6 +1244,7 @@ def test_fire_kills_its_child_when_the_slot_is_already_closed(env_factory,
 
     monkeypatch.setattr(runner_mod, "FlipMonitor", CapturingMonitor)
     monkeypatch.setattr(runner_mod, "spawn_hidden", fake_spawn_hidden)
+    monkeypatch.setattr(runner_mod, "TranscriptWatcher", _QuietWatcher)
     monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: True)
     monkeypatch.setattr(sys, "stdin", _StdinWithFileno())
     monkeypatch.setattr(runner_mod, "run_in_pty", lambda *a, **kw: 0)
@@ -1189,6 +1253,9 @@ def test_fire_kills_its_child_when_the_slot_is_already_closed(env_factory,
     assert spawns == [] and r.warm_child is None   # nothing fired during the run
 
     monitors[0].on_flip_decided()                  # the in-flight spawn lands
+    deadline = time.time() + 3
+    while not spawns and time.time() < deadline:
+        time.sleep(0.02)
     assert len(spawns) == 1 and spawns[0].killed   # reaped, not stranded
     assert r.warm_child is None                    # and never adopted
 
