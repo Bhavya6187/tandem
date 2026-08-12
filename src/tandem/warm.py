@@ -15,6 +15,7 @@ import select
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import paths
 from .config import load_harness_args
@@ -97,6 +98,8 @@ class WarmChild:
         while not self._stop.is_set():
             try:
                 ready, _, _ = select.select([self.child.fd], [], [], 0.2)
+            except InterruptedError:
+                continue  # signal (e.g. SIGWINCH) — loop again, like the pump
             except (OSError, ValueError):
                 return   # fd gone: child died or was released oddly
             if not ready:
@@ -110,11 +113,15 @@ class WarmChild:
     def alive(self) -> bool:
         return _is_alive(self.child)
 
-    def release(self):
+    def release(self) -> Any | None:
         """Stop and join the discard reader, hand the raw child over.
-        Exactly one reader may own the fd — the pump takes over next."""
+        Exactly one reader may own the fd — the pump takes over next — so a
+        reader that refuses to join means there is nothing safe to hand
+        over: returns None, and the caller falls back to a cold spawn."""
         self._stop.set()
         self._reader.join(timeout=2)
+        if self._reader.is_alive():
+            return None   # never hand over an fd we still own
         return self.child
 
     def kill(self) -> None:

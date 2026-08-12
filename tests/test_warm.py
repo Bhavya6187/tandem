@@ -1,5 +1,6 @@
 """warm.py: launch recipes, hidden children, and the standby manager."""
 
+import dataclasses
 import os
 import time
 
@@ -92,6 +93,23 @@ def test_shadow_size_reads_bytes(env_factory):
     assert _shadow_size(env.session, "claude") is None
 
 
+def test_shadow_size_none_without_session_id(env_factory):
+    env = env_factory(active="claude")
+    unpaired = dataclasses.replace(env.session, codex_session_id=None)
+    assert _shadow_size(unpaired, "codex") is None
+
+
+def test_shadow_size_none_when_transcript_vanishes(env_factory, monkeypatch):
+    """The rollout can be deleted between path resolution and stat()."""
+    env = env_factory(active="claude")
+    from tandem.harness.codex import CodexAdapter
+
+    doomed = env.codex_shadow
+    monkeypatch.setattr(CodexAdapter, "transcript_path", lambda s, cwd, sid: doomed)
+    doomed.unlink()
+    assert _shadow_size(env.session, "codex") is None
+
+
 def test_warm_child_discards_output_without_blocking(env_factory):
     env = env_factory()
     fake = _FakePty()
@@ -120,6 +138,29 @@ def test_release_joins_reader_and_returns_child(env_factory):
     got = wc.release()
     assert got is fake
     assert not wc._reader.is_alive()
+
+
+class _WedgedReader:
+    """A reader thread that never joins — join() returns, is_alive() stays True."""
+
+    def join(self, timeout=None):
+        return None
+
+    def is_alive(self):
+        return True
+
+
+def test_release_refuses_to_hand_over_a_still_owned_fd(env_factory):
+    env = env_factory()
+    fake = _FakePty()
+    wc = WarmChild(_recipe(env), fake, shadow_size=0)
+    real = wc._reader
+    wc._reader = _WedgedReader()
+    # two readers on one fd would split the harness's output stream: the
+    # caller must be told to cold-spawn instead
+    assert wc.release() is None
+    wc._reader = real
+    assert wc.release() is fake
 
 
 def test_kill_runs_the_short_ladder(env_factory, monkeypatch):
