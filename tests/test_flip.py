@@ -1,6 +1,7 @@
 """Flip loop tests with a fake harness runner."""
 
 import sqlite3
+import threading
 
 import pytest
 
@@ -70,7 +71,7 @@ def test_resume_hint_prints_even_when_the_loop_raises(sess, capsys, monkeypatch)
     """The hint is the only place the id is shown, so it must survive an
     unexpected exception escaping the loop."""
 
-    def boom(tandem_id, run_harness, first, reports):
+    def boom(tandem_id, run_harness, first, reports, carry):
         raise RuntimeError("terminal went away")
 
     monkeypatch.setattr(flip, "_flip_loop", boom)
@@ -234,10 +235,12 @@ class FakeInteractiveRunner:
     script: list = []
     seen: list = []
 
-    def __init__(self, session, sink_factory=None):
+    def __init__(self, session, sink_factory=None, adopt_child=None):
         self.session = session
         self.reports = []
         self.flip_requested = False
+        self.adopt_child = adopt_child
+        self.warm_child = None   # the real runner's standby-out attribute
 
     def run(self):
         FakeInteractiveRunner.seen.append(self.session.active)
@@ -250,11 +253,17 @@ class FakeInteractiveRunner:
         return 0
 
 
-def _fake_runner_session(monkeypatch, sess, script):
+def _fake_runner_session(monkeypatch, sess, script,
+                         runner=FakeInteractiveRunner, tty=True):
+    """Run a whole session through `run_session`'s own closure with `runner`
+    standing in for the real InteractiveRunner. `tty` drives the closure's
+    handover gate: under pytest stdin is never a terminal, and these fakes
+    are all standing in for interactive runs."""
     from tandem import runner as runner_mod
 
     _flipping_switch(monkeypatch)
-    monkeypatch.setattr(runner_mod, "InteractiveRunner", FakeInteractiveRunner)
+    monkeypatch.setattr(runner_mod, "InteractiveRunner", runner)
+    monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: tty)
     FakeInteractiveRunner.script = list(script)
     FakeInteractiveRunner.seen = []
     flip.run_session(sess.tandem_id, None)
@@ -326,3 +335,231 @@ def test_flip_reports_switch_outcome(sess, capsys, monkeypatch):
     assert "memory: CLAUDE.md has no tandem markers" in cap.err
     assert "transcript for newly active harness does not exist yet" in cap.err
     assert "run `tandem doctor` for details." in cap.err
+
+
+class FakeStandby:
+    def __init__(self, side="codex", size=10, alive=True):
+        class _R:
+            pass
+        self.recipe = _R()
+        self.recipe.side = side
+        self.shadow_size = size
+        self._alive = alive
+        self.killed = False
+
+    def alive(self):
+        return self._alive
+
+    def kill(self):
+        self.killed = True
+        self._alive = False
+
+
+def _gate(monkeypatch, standby, new_active="codex", size=10, actions=None):
+    from tandem import flip
+    import tandem.warm as warm
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: size)
+    mem = FakeMem()
+    if actions:
+        mem.actions = list(actions)
+    return flip._standby_fresh(standby, new_active, object(), mem)
+
+
+def test_gate_accepts_a_fresh_standby(monkeypatch):
+    assert _gate(monkeypatch, FakeStandby(side="codex", size=10)) is True
+
+
+def test_gate_rejects_dead_wrong_side_grown_or_memory(monkeypatch):
+    assert _gate(monkeypatch, None) is False
+    assert _gate(monkeypatch, FakeStandby(alive=False)) is False
+    assert _gate(monkeypatch, FakeStandby(side="claude")) is False
+    assert _gate(monkeypatch, FakeStandby(size=10), size=11) is False
+    assert _gate(monkeypatch, FakeStandby(size=10),
+                 actions=["wrote AGENTS.md"]) is False
+
+
+class BlockingStandby(FakeStandby):
+    """A standby whose kill ladder hangs, standing in for the real one: quit
+    keystrokes plus TERM/KILL timeouts put 0.5-5s between `kill()` and a dead
+    process."""
+
+    def __init__(self, release, **kw):
+        super().__init__(**kw)
+        self.release = release
+        self.kill_entered = threading.Event()
+
+    def kill(self):
+        self.kill_entered.set()
+        self.release.wait(10)
+        super().kill()
+
+
+def test_stale_standby_is_killed_at_the_gate(sess, monkeypatch, capsys):
+    from tandem import flip
+    import tandem.warm as warm
+    _flipping_switch(monkeypatch)
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 999)
+    stale = FakeStandby(side="codex", size=10)   # snapshot != 999 -> stale
+    runs = []
+
+    def run_harness(session):
+        runs.append(session.active)
+        return 0, False
+
+    carry = {"standby": stale}
+    flip._switch(sess.tandem_id, run_harness, 0, carry=carry)
+    for t in carry["reapers"]:   # the reap is off-thread; the exit joins it
+        t.join(timeout=10)
+    assert stale.killed
+    assert carry["standby"] is None
+    assert runs   # the flip still landed, on a cold spawn
+
+
+def test_the_gates_kill_does_not_delay_the_flip(sess, monkeypatch, capsys):
+    """The teardown of a stale standby costs seconds of quit-key ladder, and
+    it lands on exactly the flips warmup exists to make instant. So the gate
+    hands the kill to a reaper thread and re-enters immediately; the session's
+    exit is what joins it."""
+    import tandem.warm as warm
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 999)
+    release = threading.Event()
+    stale = BlockingStandby(release, side="codex", size=10)
+    adopted = []
+
+    class Runner(_adopting_runner(adopted, stale)):
+        def run(self):
+            if self.session.active == "codex":
+                # the post-flip run: the harness is already launching while
+                # the stale standby is still going down the ladder
+                assert stale.kill_entered.wait(10)
+                assert not stale.killed
+                release.set()
+            return super().run()
+
+    _fake_runner_session(monkeypatch, sess, [([], True), ([], False)],
+                         runner=Runner)
+    assert adopted == [None, None]   # stale: never handed to the next run
+    assert stale.killed              # run_session's exit joined the reaper
+
+
+def test_plain_exit_kills_the_leftover_standby(sess, monkeypatch, capsys):
+    """No flip pending means nothing will ever adopt it: the exit path is the
+    last chance to reap a hidden harness."""
+    leftover = FakeStandby()
+
+    class Runner(FakeInteractiveRunner):
+        def run(self):
+            self.warm_child = leftover
+            return super().run()
+
+    _fake_runner_session(monkeypatch, sess, [([], False)], runner=Runner)
+    assert leftover.killed
+
+
+def _adopting_runner(adopted, standby):
+    """A fake runner that records what it was handed and warms `standby` on
+    its first run — the flip loop must carry that into the next run."""
+
+    class Runner(FakeInteractiveRunner):
+        def __init__(self, session, sink_factory=None, adopt_child=None):
+            super().__init__(session, sink_factory)
+            adopted.append(adopt_child)
+
+        def run(self):
+            code = super().run()
+            if len(adopted) == 1:
+                self.warm_child = standby
+            return code
+
+    return Runner
+
+
+def test_fresh_standby_is_adopted_on_flip(sess, monkeypatch, capsys):
+    import tandem.warm as warm
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 10)
+    fresh = FakeStandby(side="codex", size=10)
+    adopted = []
+    _fake_runner_session(monkeypatch, sess, [([], True), ([], False)],
+                         runner=_adopting_runner(adopted, fresh))
+    # first run adopts nothing; the post-flip run adopts the fresh standby
+    assert adopted[0] is None
+    assert adopted[1] is fresh
+    assert not fresh.killed
+
+
+def test_adopted_standby_is_not_reused_by_the_flip_back(sess, monkeypatch, capsys):
+    """A consumed standby leaves the carry, so a launch failure that flips
+    back cannot hand the same child to the other side."""
+    import tandem.warm as warm
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 10)
+    fresh = FakeStandby(side="codex", size=10)
+    adopted = []
+
+    class Runner(_adopting_runner(adopted, fresh)):
+        def run(self):
+            if self.session.active == "codex":
+                raise FileNotFoundError("codex: command not found")
+            return super().run()
+
+    _fake_runner_session(monkeypatch, sess, [([], True), ([], False)],
+                         runner=Runner)
+    assert adopted == [None, fresh, None]   # flipped, failed, flipped back cold
+
+
+def test_a_non_tty_run_never_adopts_the_standby(sess, monkeypatch, capsys):
+    """`run_in_pty` ignores a pre-spawned child when stdin is not a terminal,
+    so handing one over would strand a hidden harness: kill it instead."""
+    import tandem.warm as warm
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 10)
+    fresh = FakeStandby(side="codex", size=10)
+    adopted = []
+    _fake_runner_session(monkeypatch, sess, [([], True), ([], False)],
+                         runner=_adopting_runner(adopted, fresh), tty=False)
+    assert adopted == [None, None]
+    assert fresh.killed
+
+
+def test_a_run_that_raises_still_hands_its_standby_to_the_carry(
+    sess, monkeypatch, capsys
+):
+    """The runner publishes `warm_child` from its own finally, so a run that
+    raises with a flip already fired still has one. The closure must store it
+    back or the last reference to a live hidden harness is dropped."""
+    kept = FakeStandby()
+
+    class Runner(FakeInteractiveRunner):
+        def run(self):
+            self.warm_child = kept        # the runner's finally got this far
+            raise RuntimeError("terminal went away")
+
+    _fake_runner_session(monkeypatch, sess, [([], False)], runner=Runner)
+    assert kept.killed   # reached the carry, then the exit reaped it
+
+
+def test_a_raising_store_still_reaps_the_leftover_standby(sess, monkeypatch, capsys):
+    """The exit's bookkeeping is the last thing standing between a hidden
+    harness and nobody at all: a locked sqlite (a concurrent `tandem sub`
+    holds its own store) must not be the reason one survives the session."""
+    leftover = FakeStandby()
+    armed = []
+
+    class Runner(FakeInteractiveRunner):
+        def run(self):
+            self.warm_child = leftover
+            armed.append(True)   # from here the exit's store call blows up
+            return super().run()
+
+    real_store = flip.StateStore
+
+    def guarded(*a, **kw):
+        if armed:
+            raise sqlite3.OperationalError("database is locked")
+        return real_store(*a, **kw)
+
+    monkeypatch.setattr(flip, "StateStore", guarded)
+    with pytest.raises(sqlite3.OperationalError):
+        _fake_runner_session(monkeypatch, sess, [([], False)], runner=Runner)
+    assert leftover.killed
+    assert f"to continue this session: tandem resume {sess.tandem_id}" in (
+        capsys.readouterr().out          # the hint still came first
+    )

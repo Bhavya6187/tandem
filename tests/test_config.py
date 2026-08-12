@@ -125,7 +125,7 @@ def _write_config(tmp_path, monkeypatch, text):
 def test_frame_defaults_without_config(tmp_path, monkeypatch):
     monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
     cfg = load_frame_config()
-    assert cfg == FrameConfig(flip_byte=0x1D, bar=True)
+    assert cfg == FrameConfig(flip_byte=0x1D, bar=True, warm=True)
 
 
 def test_frame_flip_key_ctrl_name(tmp_path, monkeypatch):
@@ -147,6 +147,23 @@ def test_frame_flip_key_printable_rejected(tmp_path, monkeypatch):
 def test_frame_bar_off(tmp_path, monkeypatch):
     _write_config(tmp_path, monkeypatch, '[frame]\nbar = false\n')
     assert load_frame_config().bar is False
+
+
+def test_frame_warm_defaults_true(tmp_path, monkeypatch):
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+    assert load_frame_config().warm is True
+
+
+def test_frame_warm_off(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, "[frame]\nwarm = false\n")
+    assert load_frame_config().warm is False
+
+
+def test_frame_warm_garbage_falls_back_to_default(tmp_path, monkeypatch):
+    # a truthy-looking string must not read as "on" — warm gates process
+    # spawning, so only a real bool may turn it off.
+    _write_config(tmp_path, monkeypatch, '[frame]\nwarm = "yes"\n')
+    assert load_frame_config().warm is True
 
 
 def test_frame_flip_key_multichar_casefold_does_not_raise(tmp_path, monkeypatch):

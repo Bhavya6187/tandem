@@ -226,14 +226,19 @@ class _FakeStdin:
 
 class _PumpChild:
     """Stub PtyProcess whose `fd` is a real pipe the test feeds. Closing the
-    write end is how a test ends the pump (read -> EOF -> loop breaks)."""
+    write end is how a test ends the pump (read -> EOF -> loop breaks).
 
-    def __init__(self):
+    `dims` is the size it was spawned at, as a warm child would carry: the
+    default models the deliberate one-column-narrow warm spawn against a 24x80
+    terminal with the bar on (target (23, 80))."""
+
+    def __init__(self, dims=(23, 79)):
         self.rd, self.wr = os.pipe()
         self.pid = os.getpid()
         self.exitstatus = 0
         self.writes = []
         self.winsizes = []
+        self._dims = dims
 
     @property
     def fd(self):
@@ -254,11 +259,38 @@ class _PumpChild:
     def setwinsize(self, rows, cols):
         self.winsizes.append((rows, cols))
 
+    def getwinsize(self):
+        # like the real pty: what was last set, or what it was spawned at
+        return self.winsizes[-1] if self.winsizes else self._dims
+
     def sendeof(self):
         pass
 
     def wait(self):
         return 0
+
+    def eof(self):
+        """Close the write end: the pump reads EOF and the loop ends. Forgets
+        the fd before closing it, so a second call (or a watchdog racing the
+        cleanup) can never close a number the OS has already handed out again."""
+        wr, self.wr = self.wr, -1
+        if wr >= 0:
+            os.close(wr)
+
+    def close(self):
+        self.eof()
+        rd, self.rd = self.rd, -1
+        if rd >= 0:
+            os.close(rd)
+
+
+def _quiet(teardown) -> None:
+    """Run an fd teardown tolerantly: a stray EBADF must not mask the real
+    failure a test is trying to report (nor explode in a watchdog thread)."""
+    try:
+        teardown()
+    except OSError:
+        pass
 
 
 class _Pump:
@@ -306,24 +338,46 @@ class _Pump:
             time.sleep(0.02)
         return False
 
-    def run(self, drive) -> int:
+    def run(self, drive, child=None, eof=None) -> int:
+        # `child` is the pre-spawned stub run_in_pty should adopt instead of
+        # spawning; `eof` names the stub whose pipe ends the pump, which is the
+        # adopted child when it is adopted and the stubbed fresh spawn when it
+        # is not.
+        stubs = [self.child] + ([child] if child is not None else [])
+        ender = eof if eof is not None else self.child
+        watchdogs = []
+
         def driver():
             try:
                 assert self.painted.wait(timeout=5)
                 drive()
             finally:
-                os.close(self.child.wr)     # EOF: ends the pump
+                _quiet(ender.eof)           # EOF: ends the pump
+                # If the pump turned out to be reading the *other* stub, that
+                # EOF lands nowhere: end those too, late enough not to muddy
+                # the result, so a wrong adoption fails the assertions instead
+                # of hanging the suite forever.
+                for stub in stubs:
+                    if stub is not ender:
+                        w = threading.Timer(5, _quiet, args=(stub.eof,))
+                        w.daemon = True
+                        w.start()
+                        watchdogs.append(w)
         thread = threading.Thread(target=driver, daemon=True)
         thread.start()
         try:
-            return run_in_pty(["fake-harness"], frame=self.frame)
+            return run_in_pty(["fake-harness"], frame=self.frame, child=child)
         finally:
             thread.join(timeout=5)
-            for fd in (self.master, self.slave, self.child.rd):
+            for w in watchdogs:
+                w.cancel()
+            for fd in (self.master, self.slave):
                 try:
                     os.close(fd)
                 except OSError:
                     pass
+            for stub in stubs:
+                _quiet(stub.close)
 
 
 def test_pump_drops_the_bar_when_the_child_region_covers_the_bar_row(monkeypatch):
@@ -422,3 +476,85 @@ def test_drop_bar_survives_a_sigwinch_landing_inside_its_own_teardown(monkeypatc
     clears = [w for w in pump.writes if b"\x1b[2K" in w]
     assert len(clears) == 1                 # torn down exactly once
     assert not any(b"\x1b[7m" in w for w in pump.writes[pump.writes.index(clears[0]):])
+
+
+# -- adopting a warmed child ----------------------------------------------
+
+
+def _record_spawns(monkeypatch, pump) -> list[dict]:
+    """Re-stub PtyProcess.spawn over _Pump's own stub so fresh spawns are
+    recorded (kwargs) as well as served."""
+    spawns: list[dict] = []
+    monkeypatch.setattr(
+        ptyrun, "PtyProcess",
+        type("_Spawner", (), {"spawn": staticmethod(
+            lambda *a, **kw: spawns.append(kw) or pump.child
+        )}),
+    )
+    return spawns
+
+
+def test_adopted_child_skips_spawn_and_gets_true_dims(monkeypatch):
+    pump = _Pump(monkeypatch, rows=24, cols=80)
+    adopted = _PumpChild()
+    spawns = _record_spawns(monkeypatch, pump)
+    # the adopted child is the live one, so its pipe is what ends the pump
+    assert pump.run(lambda: None, child=adopted, eof=adopted) == 0
+    assert not spawns                          # no fresh spawn happened
+    # attach corrected the deliberate one-column-narrow spawn: with the bar
+    # on at 24x80 the child's true dims are (23, 80)
+    assert (23, 80) in adopted.winsizes
+
+
+def test_attach_resize_nudges_a_child_already_sitting_on_the_target(monkeypatch):
+    """setwinsize to the dims a child already has delivers no SIGWINCH, so the
+    TUI never repaints and the flip lands on a blank screen. The warm spawn is
+    narrow precisely to avoid that, but a terminal resized during the warm
+    window can put the child exactly on target anyway — so attach forces a real
+    change and only then sets the truth."""
+    pump = _Pump(monkeypatch, rows=24, cols=80)
+    adopted = _PumpChild(dims=(23, 80))        # already the target
+    assert pump.run(lambda: None, child=adopted, eof=adopted) == 0
+    assert adopted.winsizes == [(22, 79), (23, 80)]   # nudge, then the truth
+    assert adopted.getwinsize() == (23, 80)           # ends correct
+
+
+def test_attach_resize_on_a_child_that_died_in_the_gap_still_exits_cleanly(
+    monkeypatch,
+):
+    # the adopted child can die between the liveness check and the resize;
+    # the pump must swallow that, not orphan the terminal
+    pump = _Pump(monkeypatch, rows=24, cols=80)
+    adopted = _PumpChild()
+
+    def gone(*_a):
+        raise OSError("child died in the gap")
+
+    adopted.setwinsize = gone
+    assert pump.run(lambda: None, child=adopted, eof=adopted) == 0
+    assert pump.painted.is_set()               # pump ran anyway
+
+
+def test_dead_adopted_child_falls_back_to_fresh_spawn(monkeypatch):
+    pump = _Pump(monkeypatch, rows=24, cols=80)
+    dead = _PumpChild()
+    dead.isalive = lambda: False
+    spawns = _record_spawns(monkeypatch, pump)
+    # eof defaults to _Pump's stubbed fresh spawn: the live child here
+    assert pump.run(lambda: None, child=dead) == 0
+    # the dead child was never attached (no resize reached it); the pump
+    # ran on a real fresh spawn at true dims instead and ended via its EOF
+    assert dead.winsizes == []
+    assert [kw["dimensions"] for kw in spawns] == [(23, 80)]
+    assert pump.painted.is_set()
+
+
+def test_non_tty_fallback_ignores_an_adopted_child(capfd):
+    # the runner gates warming on tty, so a warmed child never legitimately
+    # reaches the subprocess fallback — but if one does it must be left alone
+    # (a _StubChild has no fd/setwinsize at all: touching it would raise)
+    child = _StubChild()
+    code = run_in_pty([sys.executable, "-c", "print('cold-ok')"], child=child)
+    assert code == 0
+    assert "cold-ok" in capfd.readouterr().out
+    assert child.writes == []

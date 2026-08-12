@@ -172,18 +172,29 @@ def run_in_pty(
     env: dict | None = None,
     frame: FrameIO | None = None,
     control: PtyControl | None = None,
+    child=None,
 ) -> int:
     """Run argv on a pty, mirroring the controlling terminal. Returns the
     child's exit status. Falls back to a plain subprocess when stdin is not
     a tty (tests, pipes). With `frame`, tandem reserves the bottom row for
     the status bar and watches for the flip keybind; with `control`, the
-    child is attached for cross-thread termination."""
+    child is attached for cross-thread termination.
+
+    With `child` (a live, pre-spawned PtyProcess from process warmup), the
+    spawn is skipped and the child is adopted: it was spawned one column
+    narrow on purpose, and the attach resize below makes sure the child's
+    dims really change — the kernel delivers SIGWINCH and the TUI repaints
+    itself, which is the entire hidden-boot handover. A dead `child` falls
+    back to a fresh spawn: the flip must land somewhere."""
     try:
         stdin_fd = sys.stdin.fileno()
         is_tty = os.isatty(stdin_fd)
     except (ValueError, OSError, io.UnsupportedOperation):
         is_tty = False
     if not is_tty:
+        # A pre-spawned `child` never legitimately reaches here: the flip
+        # loop's own `_stdin_tty` gate kills a standby rather than hand it to
+        # a path that spawns cold and would leave it unreaped.
         return subprocess.run(argv, cwd=cwd, env=env).returncode
 
     rows, cols = _winsize(stdin_fd)
@@ -200,12 +211,14 @@ def run_in_pty(
         else None
     )
 
-    child = PtyProcess.spawn(
-        argv,
-        cwd=cwd,
-        env=env or dict(os.environ),
-        dimensions=_child_dims(rows, cols, bar_on),
-    )
+    adopted = child is not None and _is_alive(child)
+    if not adopted:
+        child = PtyProcess.spawn(
+            argv,
+            cwd=cwd,
+            env=env or dict(os.environ),
+            dimensions=_child_dims(rows, cols, bar_on),
+        )
     # attach before anything can block: terminate() reads a missing child as
     # "dead", so a late attach would report death on a live harness.
     if control is not None:
@@ -308,6 +321,28 @@ def run_in_pty(
     old_attrs = termios.tcgetattr(stdin_fd)
     try:
         tty.setraw(stdin_fd)
+        if adopted:
+            # The warm child was spawned one column narrow so this resize is
+            # normally a real change. It is not guaranteed to be: the user can
+            # resize the terminal during the warm window and land the child
+            # exactly on target. setwinsize to the dims a child already has
+            # delivers no SIGWINCH at all, so nudge it off target first — a
+            # resize that signals nothing is a flip onto a blank screen.
+            target = _child_dims(rows, cols, bar_on)
+            try:
+                try:
+                    on_target = child.getwinsize() == target
+                except Exception:
+                    # The probe is an optimisation; the resize below is the
+                    # handover itself. A probe that raises must not take the
+                    # resize down with it, so read it as "not on target" and
+                    # go straight to the real setwinsize.
+                    on_target = False
+                if on_target:
+                    child.setwinsize(max(1, target[0] - 1), max(1, target[1] - 1))
+                child.setwinsize(*target)
+            except Exception:
+                pass   # child died in the gap: the liveness loop ends the pump
         paint()
         # seeded from the state just painted, so an already-armed frame does
         # not draw a redundant repaint on the first iteration
