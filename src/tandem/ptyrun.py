@@ -172,12 +172,20 @@ def run_in_pty(
     env: dict | None = None,
     frame: FrameIO | None = None,
     control: PtyControl | None = None,
+    child=None,
 ) -> int:
     """Run argv on a pty, mirroring the controlling terminal. Returns the
     child's exit status. Falls back to a plain subprocess when stdin is not
     a tty (tests, pipes). With `frame`, tandem reserves the bottom row for
     the status bar and watches for the flip keybind; with `control`, the
-    child is attached for cross-thread termination."""
+    child is attached for cross-thread termination.
+
+    With `child` (a live, pre-spawned PtyProcess from process warmup), the
+    spawn is skipped and the child is adopted: it was spawned one column
+    narrow on purpose, so the setwinsize to true dims below is always a
+    real change — the kernel delivers SIGWINCH and the TUI repaints
+    itself, which is the entire hidden-boot handover. A dead `child` falls
+    back to a fresh spawn: the flip must land somewhere."""
     try:
         stdin_fd = sys.stdin.fileno()
         is_tty = os.isatty(stdin_fd)
@@ -200,12 +208,14 @@ def run_in_pty(
         else None
     )
 
-    child = PtyProcess.spawn(
-        argv,
-        cwd=cwd,
-        env=env or dict(os.environ),
-        dimensions=_child_dims(rows, cols, bar_on),
-    )
+    adopted = child is not None and _is_alive(child)
+    if not adopted:
+        child = PtyProcess.spawn(
+            argv,
+            cwd=cwd,
+            env=env or dict(os.environ),
+            dimensions=_child_dims(rows, cols, bar_on),
+        )
     # attach before anything can block: terminate() reads a missing child as
     # "dead", so a late attach would report death on a live harness.
     if control is not None:
@@ -308,6 +318,11 @@ def run_in_pty(
     old_attrs = termios.tcgetattr(stdin_fd)
     try:
         tty.setraw(stdin_fd)
+        if adopted:
+            try:
+                child.setwinsize(*_child_dims(rows, cols, bar_on))
+            except Exception:
+                pass   # child died in the gap: the liveness loop ends the pump
         paint()
         # seeded from the state just painted, so an already-armed frame does
         # not draw a redundant repaint on the first iteration
