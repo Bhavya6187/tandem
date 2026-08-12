@@ -182,8 +182,8 @@ def run_in_pty(
 
     With `child` (a live, pre-spawned PtyProcess from process warmup), the
     spawn is skipped and the child is adopted: it was spawned one column
-    narrow on purpose, so the setwinsize to true dims below is always a
-    real change — the kernel delivers SIGWINCH and the TUI repaints
+    narrow on purpose, and the attach resize below makes sure the child's
+    dims really change — the kernel delivers SIGWINCH and the TUI repaints
     itself, which is the entire hidden-boot handover. A dead `child` falls
     back to a fresh spawn: the flip must land somewhere."""
     try:
@@ -319,8 +319,17 @@ def run_in_pty(
     try:
         tty.setraw(stdin_fd)
         if adopted:
+            # The warm child was spawned one column narrow so this resize is
+            # normally a real change. It is not guaranteed to be: the user can
+            # resize the terminal during the warm window and land the child
+            # exactly on target. setwinsize to the dims a child already has
+            # delivers no SIGWINCH at all, so nudge it off target first — a
+            # resize that signals nothing is a flip onto a blank screen.
+            target = _child_dims(rows, cols, bar_on)
             try:
-                child.setwinsize(*_child_dims(rows, cols, bar_on))
+                if child.getwinsize() == target:
+                    child.setwinsize(max(1, target[0] - 1), max(1, target[1] - 1))
+                child.setwinsize(*target)
             except Exception:
                 pass   # child died in the gap: the liveness loop ends the pump
         paint()
