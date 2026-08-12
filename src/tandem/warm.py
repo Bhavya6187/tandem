@@ -1,9 +1,16 @@
-"""Process warmup: pre-booted standby harnesses for instant flips.
+"""Process warmup: the incoming harness boots while the outgoing one dies.
+
+Nothing here runs on its own schedule. The runner fires `spawn_hidden`
+from the monitor thread the moment a flip is decided, so the child boots
+through the outgoing harness's teardown; whether that child is still
+usable by the time the flip lands is flip.py's freshness gate to decide,
+and this module only hands it the evidence (the recipe, the shadow-size
+snapshot).
 
 `LaunchRecipe` is the frozen record of how a harness invocation was (or
 will be) launched. It exists because config is read per call
 (`hook_argv_extra` re-reads the user's config.toml), so the recipe a
-standby was spawned with must travel with it — the adopting runner reuses
+child was spawned with must travel with it — the adopting runner reuses
 the recorded recipe verbatim instead of rebuilding one that could
 disagree with what is actually running.
 """
@@ -13,7 +20,6 @@ from __future__ import annotations
 import os
 import select
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,7 +45,7 @@ class LaunchRecipe:
 
 def build_launch(session: PairedSession, side: str) -> LaunchRecipe:
     """The argv/sentinel/transcript for launching `side` of this session.
-    Extracted from InteractiveRunner.run() so the standby and the runner
+    Extracted from InteractiveRunner.run() so the warm fire and the runner
     build launches identically; argv order is interactive + user [args] +
     hook extras (tests pin the order)."""
     adapter = get_adapter(side)
@@ -66,7 +72,7 @@ def build_launch(session: PairedSession, side: str) -> LaunchRecipe:
 def _shadow_size(session: PairedSession, side: str) -> int | None:
     """Byte size of `side`'s transcript right now; None when the side has
     no id or no file yet. The freshness contract's one number: any growth
-    means content synced in behind a standby's back."""
+    means content synced in behind the warm child's back."""
     sid = getattr(session, f"{side}_session_id")
     if not sid:
         return None
@@ -161,241 +167,3 @@ def spawn_hidden(
         dimensions=(max(1, rows - 1), max(1, cols - 1)),
     )
     return WarmChild(recipe, child, shadow_size)
-
-
-def _ensure_shadow_default(session: PairedSession) -> PairedSession | None:
-    """Create the shadow transcript if it legitimately does not exist yet,
-    via the same late-create helpers switch_session uses (same
-    orientation: shadow side, pre-flip; their guards make the at-fire
-    calls no-ops afterwards). Returns a refreshed session, or None when
-    the state store has lost the row."""
-    from . import ops
-    from .state import StateStore
-
-    try:
-        with StateStore() as store:
-            fresh = store.get_session(session.tandem_id)
-            if fresh is None:
-                return None
-            if fresh.shadow == "codex" and not fresh.codex_session_id:
-                ops._create_codex_shadow_late(store, fresh)
-                fresh = store.get_session(session.tandem_id) or fresh
-            elif fresh.shadow == "claude" and fresh.claude_session_id:
-                expected = get_adapter("claude").expected_transcript_path(
-                    fresh.cwd, fresh.claude_session_id
-                )
-                never_ran = (
-                    store.get_cursor(fresh.tandem_id, "claude").byte_offset == 0
-                )
-                if not expected.exists() and never_ran:
-                    ops._create_claude_shadow_late(store, fresh)
-            return fresh
-    except Exception:
-        return None
-
-
-class WarmStandby:
-    """Holds at most one WarmChild. Spawns when the active side is idle,
-    the shadow transcript has been byte-stable for the debounce window,
-    and memory files are synced; kills+respawns when the shadow grows
-    (a turn synced in behind the standby's back). Reads only three
-    inputs — the idle probe, the shadow file stat, memory-sync state —
-    and shares no protocol with the tail loop."""
-
-    def __init__(self, session: PairedSession, is_idle, *, enabled: bool = True,
-                 winsize=None, spawner=spawn_hidden, clock=time.monotonic,
-                 sync_memory=None, ensure_shadow=None,
-                 poll_s: float = 1.0, debounce_s: float = 1.5,
-                 max_retries: int = 2):
-        self.session = session
-        self.is_idle = is_idle
-        self.enabled = enabled
-        self.winsize = winsize or (lambda: (24, 80))
-        self.spawner = spawner
-        self.clock = clock
-        self.sync_memory = sync_memory
-        self.ensure_shadow = ensure_shadow or _ensure_shadow_default
-        self.poll_s = poll_s
-        self.debounce_s = debounce_s
-        self.max_retries = max_retries
-        self.child: WarmChild | None = None
-        # Memory-sync actions from the most recent spawn's sync, held for the
-        # runner to report on the way out — see `_spawn`.
-        self.memory_actions: list[str] = []
-        self._last_size: int | None = None
-        self._stable_since: float | None = None
-        self._retries = 0
-        # When the child in the slot was spawned; -inf so the very first
-        # invalidation is never read as self-inflicted.
-        self._last_spawn = float("-inf")
-        self._ensure_refused = False
-        # guards every transition of the `child` slot (and nothing else — the
-        # kill ladder takes seconds and must never run under it)
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._thread = threading.Thread(
-            target=self._run, name="tandem-warm", daemon=True
-        )
-
-    def start(self) -> None:
-        if self.enabled:
-            self._thread.start()
-
-    def shutdown(self, keep_child: bool) -> WarmChild | None:
-        """Stop warming. Returns the live child for adoption when
-        `keep_child`, else kills it. The runner calls this from its
-        finally, after the monitor settles flip_requested."""
-        self._stop.set()
-        if self._thread.is_alive():
-            self._thread.join(timeout=5)
-        with self._lock:
-            child, self.child = self.child, None
-        if child is None:
-            return None
-        if keep_child and child.alive():
-            return child
-        child.kill()
-        return None
-
-    def _run(self) -> None:
-        while not self._stop.wait(self.poll_s):
-            try:
-                self._tick()
-            except Exception:
-                pass   # opportunistic: the warm thread must never die noisily
-
-    def _tick(self) -> None:
-        size = _shadow_size(self.session, self.session.shadow)
-        doomed: WarmChild | None = None
-        note: str | None = None
-        with self._lock:
-            child = self.child
-            if child is not None:
-                if not child.alive():
-                    # the process is gone, but its discard reader still owns
-                    # the fd and, through the thread, the WarmChild itself
-                    doomed, self.child = child, None   # consumes a retry
-                    self._retries += 1
-                    note = "standby exited before attach"
-                elif size != child.shadow_size:
-                    doomed, self.child = child, None   # a turn synced in
-                    if self.clock() - self._last_spawn < 2 * self.debounce_s:
-                        # ...or the standby's own resume appended to the
-                        # transcript it booted from, which no amount of
-                        # respawning will fix. Growth landing on top of a
-                        # spawn is charged to the budget instead of re-arming
-                        # it, so the loop terminates in a marker the doctor
-                        # can show rather than churning every debounce
-                        # forever. `_last_size` moves with it: leaving it
-                        # behind would send the tail below through
-                        # `_invalidated()` and undo this in the same tick.
-                        self._retries += 1
-                        self._last_size = size
-                        note = "standby invalidated itself moments after spawning"
-                    else:
-                        self._invalidated()
-                    self._stable_since = None
-                else:
-                    return                  # fresh and waiting: nothing to do
-        # empty the slot first, kill outside the lock: a shutdown racing us
-        # must never adopt a child that is already going down the ladder
-        if doomed is not None:
-            doomed.kill()
-        if note is not None:
-            self._note_failure(note)
-        if not self.is_idle():
-            self._stable_since = None
-            return
-        now = self.clock()
-        if size != self._last_size:
-            self._last_size = size
-            self._stable_since = now
-            self._invalidated()     # new content with no child held: also an
-            return                  # invalidation, so the budget re-arms
-        if self._stable_since is None:
-            self._stable_since = now
-            return
-        if now - self._stable_since < self.debounce_s:
-            return
-        if self._retries > self.max_retries:
-            return                      # gave up until the next invalidation
-        self._spawn(size)
-
-    def _invalidated(self) -> None:
-        """A real content change starts a new idle period: the retry budget
-        re-arms (giving up is only ever 'until the next invalidation') and
-        so does the ensure-shadow latch, since the file may exist now.
-
-        'Real' is the whole load here — growth a standby caused itself is
-        filtered out by the respawn floor in `_tick` before it reaches this."""
-        self._retries = 0
-        self._ensure_refused = False
-
-    def _spawn(self, size: int | None) -> None:
-        session = self.session
-        if size is None:
-            if self._ensure_refused:
-                return   # already asked once and got nothing; asking again
-                         # every poll just churns the state store forever
-            session = self.ensure_shadow(session)
-            if session is None:
-                self._retries += 1
-                self._note_failure("session row vanished from the state store")
-                return
-            self.session = session
-            size = _shadow_size(session, session.shadow)
-            if size is None:
-                # e.g. claude's consumed-then-missing transcript: that must
-                # keep hard-failing at flip time — never boot a blank session
-                self._ensure_refused = True
-                return
-        try:
-            if self.sync_memory is not None:
-                report = self.sync_memory()
-            else:
-                from .memory_sync import sync_memory_files
-                report = sync_memory_files(session.cwd)
-            # The sync that actually did the work happens here, so the flip's
-            # own sync finds nothing left to report: hold the action lines for
-            # the runner to print, or the user never hears that tandem wrote
-            # their AGENTS.md. Only a real report counts — the injected test
-            # seam returns None.
-            actions = getattr(report, "actions", None)
-            if actions is not None:
-                self.memory_actions = list(actions)
-        except Exception:
-            pass   # memory-sync failures surface at flip time as today
-        try:
-            # build_launch is inside the budget too: its sentinel mkdir can
-            # fail (read-only home, full disk), and an uncounted failure
-            # would retry at poll_s forever without ever telling the doctor
-            recipe = build_launch(session, session.shadow)
-            child = self.spawner(recipe, self.winsize(), size)
-            self._last_spawn = self.clock()   # anchors the respawn floor
-        except Exception as exc:
-            self._retries += 1
-            self._note_failure(f"spawn failed: {type(exc).__name__}: {exc}")
-            return
-        with self._lock:
-            # shutdown sets _stop before it takes the lock, so one of us wins
-            # cleanly: either it finds this child in the slot and disposes of
-            # it, or we see the flag and kill it ourselves. Checking the flag
-            # and filling the slot must be one step — a shutdown landing
-            # between them would strand a setsid-detached hidden harness.
-            if not self._stop.is_set():
-                self.child = child
-                return
-        child.kill()
-
-    def _note_failure(self, reason: str) -> None:
-        """Leave the doctor a trail only once the budget is exhausted — a
-        silently broken warmup otherwise just reads as 'flip feels slow'."""
-        if self._retries <= self.max_retries:
-            return
-        marker = paths.tandem_home() / "tmp" / \
-            f"{self.session.tandem_id}-warm-failed"
-        try:
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text(reason + "\n")
-        except OSError:
-            pass

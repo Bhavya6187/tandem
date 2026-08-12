@@ -39,24 +39,24 @@ swallow the settings tandem appends after it and break turn tracking.
 Malformed values (a non-list, empty or non-string elements) are
 silently ignored rather than failing the launch.
 
-## [frame] — the flip key, the tab bar, and warm standby
+## [frame] — the flip key, the tab bar, and warm flips
 
 The frame is tandem's own surface inside a running session: one reserved
 keybind that flips to the other harness, the one-line tab bar on the
-bottom terminal row, and the pre-booted standby harness behind the flip.
+bottom terminal row, and the pipelined boot behind the flip.
 
 ```toml
 [frame]
 flip_key = "ctrl-]"
 bar = true
-warm = true   # pre-boot the other harness so Ctrl-] attaches instantly; false = cold flips
+warm = true   # boot the incoming harness while the outgoing one shuts down
 ```
 
 | key | default | meaning |
 | --- | --- | --- |
 | `flip_key` | `"ctrl-]"` | The flip keybind, consumed by tandem (never forwarded). Accepts `ctrl-<char>` or a hex byte like `"0x1d"`; printable keys are rejected (they would swallow typing). The bar relabels itself to match (`ctrl-t` shows `^T flips`). |
 | `bar` | `true` | The one-line tab bar on the bottom terminal row. `false` hides it; the flip still works. |
-| `warm` | `true` | Pre-boot the other harness in the background so the first flip attaches instantly. `false` gives cold flips: nothing is started until you press the key, and the first flip waits for the harness to boot. |
+| `warm` | `true` | Overlap the two halves of a flip: the incoming harness starts booting the moment you press the key, while the outgoing one is still shutting down. `false` gives fully serial flips — the boot only begins once the old harness is gone. |
 
 An unparseable value falls back to the default rather than failing the
 launch. If a terminal can't sustain the bar, tandem drops it for the rest
@@ -67,11 +67,10 @@ bar's row floor also drops it for the session, but that is tandem's own
 policy rather than a conflict, so nothing is recorded and `doctor` stays
 quiet.
 
-Warming costs something, so it is worth knowing what: while a session runs,
-tandem keeps a second harness process resident (you'll see it in `ps`, and
-claude's in `claude agents`), and it boots a fresh one in the background
-after every turn that syncs across. If warming keeps failing — the binary is
-missing, no ptys left — tandem gives up for that session and leaves a marker;
-`tandem doctor` then warns about it, with the reason, until you delete the
-marker file it names. Flips still work, cold. Set `warm = false` to turn the
-standby off for good.
+Warming is pipelining, not a background service: pressing `Ctrl-]` starts
+the incoming harness immediately and tears the outgoing one down at the
+same time, so the flip lands at about the incoming harness's own start-up
+speed instead of that plus the shutdown. Nothing exists before you press
+the key and nothing survives the flip — between flips a tandem session is
+exactly one harness process. `warm = false` restores the fully serial
+flip, which is slower but does the same thing.
