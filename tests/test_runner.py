@@ -16,6 +16,10 @@ class _Sink:
     def close(self): ...
 
 
+def _null_sink(store, session, source):
+    return _Sink()
+
+
 def _run_capturing_argv(env, monkeypatch):
     calls = {}
     monkeypatch.setattr(
@@ -364,7 +368,7 @@ def test_runner_publishes_the_discovered_codex_rollout_to_the_monitor(
 
     monkeypatch.setattr(runner, "FlipMonitor", capture)
 
-    def fake_run_in_pty(argv, cwd=None, frame=None, control=None):
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
         deadline = time.time() + 3
         while made["monitor"].transcript is None and time.time() < deadline:
             time.sleep(0.02)
@@ -491,7 +495,7 @@ def test_runner_passes_frame_and_control(env_factory, monkeypatch):
     env = env_factory(active="claude")
     seen = {}
 
-    def fake_run_in_pty(argv, cwd=None, frame=None, control=None):
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
         seen.update(frame=frame, control=control)
         return 0
 
@@ -518,7 +522,8 @@ def test_runner_labels_a_rebound_flip_key_for_the_bar(env_factory, monkeypatch):
     seen = {}
     monkeypatch.setattr(
         runner, "run_in_pty",
-        lambda argv, cwd=None, frame=None, control=None: seen.update(frame=frame) or 0,
+        lambda argv, cwd=None, frame=None, control=None, child=None:
+            seen.update(frame=frame) or 0,
     )
     runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
     assert seen["frame"].flip_byte == 0x14
@@ -536,7 +541,7 @@ def test_runner_reports_flip_requested(env_factory, monkeypatch):
     env = env_factory(active="claude")
     sentinel = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-claude.turn"
 
-    def fake_run_in_pty(argv, cwd=None, frame=None, control=None):
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
         control.attach(_DeadChild())
         frame.on_flip()  # user pressed the keybind
         deadline = time.time() + 3
@@ -559,7 +564,7 @@ def test_runner_reports_flip_requested(env_factory, monkeypatch):
 def test_runner_writes_bar_drop_marker(env_factory, monkeypatch, capsys):
     env = env_factory(active="claude")
 
-    def fake_run_in_pty(argv, cwd=None, frame=None, control=None):
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
         frame.bar_dropped = True
         return 0
 
@@ -587,7 +592,7 @@ def test_runner_holds_its_reports_back_for_a_flip(env_factory, monkeypatch, caps
     env = env_factory(active="claude")
     sentinel = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-claude.turn"
 
-    def fake_run_in_pty(argv, cwd=None, frame=None, control=None):
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
         control.attach(_DeadChild())
         frame.bar_dropped = True
         frame.on_flip()
@@ -619,7 +624,7 @@ def _run_capturing_monitor(env, monkeypatch):
     monkeypatch.setattr(runner, "FlipMonitor", capture)
     monkeypatch.setattr(
         runner, "run_in_pty",
-        lambda argv, cwd=None, frame=None, control=None: 0,
+        lambda argv, cwd=None, frame=None, control=None, child=None: 0,
     )
     runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
     return made["monitor"]
@@ -867,7 +872,7 @@ def test_runner_wires_status_probe_for_claude(env_factory, monkeypatch):
     monkeypatch.setattr(runner, "FlipMonitor", capture)
     monkeypatch.setattr(
         runner, "run_in_pty",
-        lambda argv, cwd=None, frame=None, control=None: 0,
+        lambda argv, cwd=None, frame=None, control=None, child=None: 0,
     )
     runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
     probe = made["kw"]["status_probe"]
@@ -894,7 +899,7 @@ def test_runner_wires_no_probe_for_codex(env_factory, monkeypatch):
     monkeypatch.setattr(runner, "FlipMonitor", capture)
     monkeypatch.setattr(
         runner, "run_in_pty",
-        lambda argv, cwd=None, frame=None, control=None: 0,
+        lambda argv, cwd=None, frame=None, control=None, child=None: 0,
     )
     runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
     assert made["kw"]["status_probe"] is None
@@ -927,7 +932,7 @@ def test_runner_probe_swallows_raising_session_status(env_factory, monkeypatch):
     monkeypatch.setattr(runner, "FlipMonitor", capture)
     monkeypatch.setattr(
         runner, "run_in_pty",
-        lambda argv, cwd=None, frame=None, control=None: 0,
+        lambda argv, cwd=None, frame=None, control=None, child=None: 0,
     )
     runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
     from tandem.harness.claude_code import ClaudeCodeAdapter
@@ -936,3 +941,248 @@ def test_runner_probe_swallows_raising_session_status(env_factory, monkeypatch):
         lambda self, sid: (_ for _ in ()).throw(OverflowError()),
     )
     assert made["kw"]["status_probe"]() is None
+
+
+# -- the warm standby wiring ----------------------------------------------
+
+
+def test_idle_probe_claude_busy_and_waiting(env_factory):
+    from tandem.runner import _idle_probe
+
+    class FakeMonitor:
+        flip_requested = False
+        transcript = None
+
+    class BusyAdapter:
+        def session_status(self, sid):
+            return "busy"
+
+    class WaitingAdapter:
+        def session_status(self, sid):
+            return "waiting"
+
+    class RaisingAdapter:
+        def session_status(self, sid):
+            raise OSError("registry unreadable")
+
+    m = FakeMonitor()
+    assert _idle_probe("claude", BusyAdapter(), "sid", m, None)() is False
+    assert _idle_probe("claude", WaitingAdapter(), "sid", m, None)() is True
+    # eager on drift, like the flip probe: the freshness gate protects us
+    assert _idle_probe("claude", RaisingAdapter(), "sid", m, None)() is True
+    # a pending flip reads idle regardless of status
+    m.flip_requested = True
+    assert _idle_probe("claude", BusyAdapter(), "sid", m, None)() is True
+
+
+def test_idle_probe_codex_mtime_rule(tmp_path):
+    from tandem.runner import _idle_probe
+
+    class FakeMonitor:
+        flip_requested = False
+        transcript = tmp_path / "rollout.jsonl"
+
+    sentinel = tmp_path / "s.turn"
+    m = FakeMonitor()
+    m.transcript.write_text("{}\n")
+    _touch(m.transcript, 1000)
+    idle = _idle_probe("codex", None, None, m, sentinel)
+    assert idle() is False            # no sentinel touch yet: can't know
+    sentinel.touch()
+    _touch(sentinel, 2000)
+    assert idle() is True             # sentinel newer: between turns
+    _touch(m.transcript, 3000)
+    assert idle() is False            # transcript moved: mid-turn
+
+
+def test_runner_hands_standby_over_only_on_flip(env_factory, monkeypatch):
+    """The runner adopts nothing here; it must shutdown(keep_child=flip)."""
+    import tandem.runner as runner_mod
+    env = env_factory(active="claude")
+    shutdowns = []
+
+    class FakeStandby:
+        def __init__(self, *a, **kw):
+            self.kw = kw
+
+        def start(self):
+            pass
+
+        def shutdown(self, keep_child):
+            shutdowns.append(keep_child)
+            return "the-child" if keep_child else None
+
+    monkeypatch.setattr(runner_mod, "WarmStandby", FakeStandby)
+    monkeypatch.setattr(runner_mod, "run_in_pty",
+                        lambda *a, **kw: 0)
+    r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink)
+    code = r.run()
+    assert code == 0
+    assert shutdowns == [False]       # no flip: child killed, not handed over
+    assert r.warm_child is None
+
+
+def test_runner_adopts_a_live_child(env_factory, monkeypatch):
+    import tandem.runner as runner_mod
+    from tandem.warm import build_launch
+    env = env_factory(active="claude")
+    recipe = build_launch(env.session, "claude")
+    seen = {}
+
+    class FakeWarmChild:
+        def __init__(self):
+            self.recipe = recipe
+            self.released = False
+
+        def alive(self):
+            return True
+
+        def release(self):
+            self.released = True
+            return "raw-child"
+
+    def fake_run_in_pty(argv, cwd=None, env=None, frame=None, control=None,
+                        child=None):
+        seen["argv"] = argv
+        seen["child"] = child
+        return 0
+
+    monkeypatch.setattr(runner_mod, "run_in_pty", fake_run_in_pty)
+    wc = FakeWarmChild()
+    r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink,
+                                     adopt_child=wc)
+    r.run()
+    assert wc.released
+    assert seen["child"] == "raw-child"
+    assert seen["argv"] == recipe.argv     # the recorded recipe, not a rebuild
+
+
+def test_runner_kills_a_child_that_refuses_to_release(env_factory, monkeypatch):
+    # release() returns None when the discard reader still owns the fd. The
+    # raw None goes to run_in_pty (a cold spawn), and the WarmChild must be
+    # killed: nothing else is left to reap the hidden process.
+    import tandem.runner as runner_mod
+    from tandem.warm import build_launch
+    env = env_factory(active="claude")
+    recipe = build_launch(env.session, "claude")
+    seen = {}
+
+    class WedgedWarmChild:
+        def __init__(self):
+            self.recipe = recipe
+            self.killed = False
+
+        def alive(self):
+            return True
+
+        def release(self):
+            return None          # reader refused to join
+
+        def kill(self):
+            self.killed = True
+
+    def fake_run_in_pty(argv, cwd=None, env=None, frame=None, control=None,
+                        child=None):
+        seen["child"] = child
+        return 0
+
+    monkeypatch.setattr(runner_mod, "run_in_pty", fake_run_in_pty)
+    wc = WedgedWarmChild()
+    runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink,
+                                 adopt_child=wc).run()
+    assert seen["child"] is None    # cold spawn, not a half-owned fd
+    assert wc.killed
+
+
+def test_runner_ignores_a_dead_or_mismatched_adoptee(env_factory, monkeypatch):
+    # Neither a dead child nor one warmed for the other side is adoptable:
+    # the runner rebuilds its own recipe and spawns cold.
+    import tandem.runner as runner_mod
+    from tandem.warm import build_launch
+    env = env_factory(active="claude")
+    seen = {}
+
+    class Adoptee:
+        def __init__(self, side, is_alive):
+            self.recipe = build_launch(env.session, side)
+            self._alive = is_alive
+            self.released = False
+
+        def alive(self):
+            return self._alive
+
+        def release(self):
+            self.released = True
+            return "raw-child"
+
+    def fake_run_in_pty(argv, cwd=None, env=None, frame=None, control=None,
+                        child=None):
+        seen["child"] = child
+        return 0
+
+    monkeypatch.setattr(runner_mod, "run_in_pty", fake_run_in_pty)
+    for adoptee in (Adoptee("claude", False), Adoptee("codex", True)):
+        runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink,
+                                     adopt_child=adoptee).run()
+        assert seen["child"] is None
+        assert not adoptee.released
+
+
+def test_runner_warming_is_off_when_config_says_so(env_factory, monkeypatch):
+    # [frame] warm = false must reach the standby as enabled=False (the tty
+    # gate is already false under pytest, so this pins the config half).
+    import tandem.runner as runner_mod
+    env = env_factory(active="claude")
+    (paths.tandem_home() / "config.toml").write_text('[frame]\nwarm = false\n')
+    made = {}
+
+    class FakeStandby:
+        def __init__(self, session, is_idle, **kw):
+            made["kw"] = kw
+            made["is_idle"] = is_idle
+
+        def start(self):
+            pass
+
+        def shutdown(self, keep_child):
+            return None
+
+    monkeypatch.setattr(runner_mod, "WarmStandby", FakeStandby)
+    monkeypatch.setattr(runner_mod, "run_in_pty", lambda *a, **kw: 0)
+    runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink).run()
+    assert made["kw"]["enabled"] is False
+    assert callable(made["is_idle"])
+
+
+def test_runner_shuts_the_standby_down_when_the_pty_raises(env_factory,
+                                                           monkeypatch):
+    # Every exit path of run() must dispose of the standby: a started-then-
+    # abandoned one leaves a hidden harness running with nobody to reap it.
+    import tandem.runner as runner_mod
+    env = env_factory(active="claude")
+    shutdowns = []
+
+    class FakeStandby:
+        def __init__(self, *a, **kw):
+            pass
+
+        def start(self):
+            pass
+
+        def shutdown(self, keep_child):
+            shutdowns.append(keep_child)
+            return None
+
+    def boom(*a, **kw):
+        raise RuntimeError("pty exploded")
+
+    monkeypatch.setattr(runner_mod, "WarmStandby", FakeStandby)
+    monkeypatch.setattr(runner_mod, "run_in_pty", boom)
+    r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink)
+    try:
+        r.run()
+    except RuntimeError:
+        pass
+    else:                                   # pragma: no cover - guard
+        raise AssertionError("run() swallowed the pty failure")
+    assert shutdowns == [False]

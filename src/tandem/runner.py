@@ -9,7 +9,10 @@ line, so a crash resumes from the last confirmed entry.
 
 from __future__ import annotations
 
+import io
 import json
+import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -19,11 +22,11 @@ from . import paths
 from .config import load_frame_config
 from .events import SessionContext
 from .harness import get_adapter
-from .ptyrun import FrameIO, PtyControl, run_in_pty
+from .ptyrun import FrameIO, PtyControl, _winsize, run_in_pty
 from .state import PairedSession, StateStore, SyncCursor
 from .tailer import JsonlTailer, TailedLine, TranscriptTruncated, TranscriptWatcher
 from .util import json_line
-from .warm import build_launch
+from .warm import WarmChild, WarmStandby, build_launch
 
 
 class EventSink(Protocol):
@@ -125,6 +128,33 @@ def _key_label(byte: int) -> str:
     if 0x00 < byte < 0x20:
         return "^" + chr(byte + 0x40)
     return f"0x{byte:02x}"
+
+
+def _idle_probe(active, adapter, active_sid, monitor, sentinel):
+    """Non-blocking 'is the active side idle right now?' for the warm
+    standby. A pending flip counts as idle — that clause is the entire
+    pipelined mid-turn fallback: the moment the monitor fires, warming may
+    proceed as soon as the shadow settles. Claude reads its session
+    registry (exceptions read idle — eager like the flip probe; the
+    freshness gate protects correctness). Codex reads the sentinel/
+    transcript mtimes; with no sentinel touch ever (user-configured
+    notify) it never reads idle, so warming degrades to flip-time-only."""
+    if active == "claude":
+        def idle() -> bool:
+            if monitor.flip_requested:
+                return True
+            try:
+                return adapter.session_status(active_sid) != "busy"
+            except Exception:
+                return True
+        return idle
+
+    def idle() -> bool:
+        if monitor.flip_requested:
+            return True
+        t, s = _mtime(monitor.transcript), _mtime(sentinel)
+        return t > 0 and s >= t
+    return idle
 
 
 def wait_until_safe(
@@ -404,11 +434,19 @@ class InteractiveRunner:
     """Runs the active harness in PTY passthrough with the tail loop on a
     background thread."""
 
-    def __init__(self, session: PairedSession, sink_factory: SinkFactory):
+    def __init__(self, session: PairedSession, sink_factory: SinkFactory,
+                 adopt_child: WarmChild | None = None):
         self.session = session
         self.sink_factory = sink_factory
+        # A standby warmed by the *previous* run, handed over by the flip
+        # loop: adopted when it is alive and was warmed for the side this
+        # run is launching.
+        self.adopt_child = adopt_child
         # set here too so the attributes exist even if run() raises early
         self.flip_requested = False
+        # The standby this run warmed, surrendered only when a flip was
+        # requested (otherwise shutdown killed it and this stays None).
+        self.warm_child: WarmChild | None = None
         # Formatted, ready-to-print report lines for the session that just
         # ran. `run()` prints them itself on a normal exit; on a flip it does
         # not, because the flip's screen clear would wipe them a moment
@@ -420,12 +458,20 @@ class InteractiveRunner:
         active = session.active
         adapter = get_adapter(active)
         active_sid = getattr(session, f"{active}_session_id")
+        adopting = (
+            self.adopt_child is not None
+            and self.adopt_child.recipe.side == active
+            and self.adopt_child.alive()
+        )
         # One recipe, bound once: hook_argv_extra re-reads config per call
         # (codex checks the user's config.toml for a notify handler), so the
         # argv actually launched and marker_wired must come from the same
         # snapshot — which is also what lets a warm standby be adopted with
-        # the exact recipe it was spawned under.
-        recipe = build_launch(session, active)
+        # the exact recipe it was spawned under. Bound at spawn time for an
+        # adopted child (the recipe it actually booted under), at launch time
+        # otherwise: rebuilding for an adopted child could disagree with what
+        # is already running.
+        recipe = self.adopt_child.recipe if adopting else build_launch(session, active)
         transcript = recipe.transcript
         sentinel = recipe.sentinel
         argv = recipe.argv
@@ -453,6 +499,19 @@ class InteractiveRunner:
             # answers, is how codex opts out.
             status_probe=claude_probe if active == "claude" else None,
         )
+        try:
+            warm_tty = os.isatty(sys.stdin.fileno())
+        except (ValueError, OSError, io.UnsupportedOperation):
+            warm_tty = False
+        # Fresh per run: start() is not re-entrant, and the idle probe closes
+        # over this run's monitor. The non-tty path never flips, so warming
+        # there would only ever leak a hidden harness.
+        standby = WarmStandby(
+            session,
+            _idle_probe(active, adapter, active_sid, monitor, sentinel),
+            enabled=frame_cfg.warm and warm_tty,
+            winsize=lambda: _winsize(sys.stdin.fileno()),
+        )
         frame = FrameIO(
             flip_byte=frame_cfg.flip_byte,
             on_flip=monitor.flip_pressed,
@@ -463,6 +522,7 @@ class InteractiveRunner:
             key_label=_key_label(frame_cfg.flip_byte),
         )
         self.flip_requested = False
+        self.warm_child = None
         self.reports = []
 
         stop = threading.Event()
@@ -537,7 +597,19 @@ class InteractiveRunner:
         thread.start()
         monitor.start()   # before the try: stop() on an unstarted thread raises
         try:
-            code = run_in_pty(argv, cwd=session.cwd, frame=frame, control=control)
+            # Inside the try, unlike monitor.start(): shutdown() tolerates a
+            # thread that never started, and everything below can raise — a
+            # standby started and then abandoned leaks a hidden harness.
+            standby.start()
+            # A release that returns None means the discard reader still owns
+            # the fd, so there is nothing safe to hand over: run_in_pty spawns
+            # cold on child=None, and the WarmChild must be killed here or the
+            # hidden process outlives the run with nothing left to reap it.
+            pre_spawned = self.adopt_child.release() if adopting else None
+            if adopting and pre_spawned is None:
+                self.adopt_child.kill()
+            code = run_in_pty(argv, cwd=session.cwd, frame=frame,
+                              control=control, child=pre_spawned)
         finally:
             stop.set()
             # stop() first, and only then read the monitor: `flip_requested`
@@ -545,8 +617,10 @@ class InteractiveRunner:
             # the join races the flip thread.
             monitor.stop()
             thread.join(timeout=10)
-            sentinel.unlink(missing_ok=True)
             self.flip_requested = monitor.flip_requested
+            # after flip_requested settles: only a flip keeps the child
+            self.warm_child = standby.shutdown(keep_child=self.flip_requested)
+            sentinel.unlink(missing_ok=True)
         if frame.bar_dropped:
             marker = paths.tandem_home() / "tmp" / f"{session.tandem_id}-bar-dropped"
             try:

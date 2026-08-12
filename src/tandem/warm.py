@@ -143,9 +143,10 @@ def spawn_hidden(
     recipe: LaunchRecipe, dims: tuple[int, int], shadow_size: int, *, spawn=None
 ) -> WarmChild:
     """Spawn the recipe on a hidden PTY, one column narrow on purpose: the
-    attach-time setwinsize to true dims is then always a real change, so
-    the kernel delivers SIGWINCH and the TUI repaints itself — the whole
-    handover repaint story."""
+    attach path guarantees the resize to true dims is a real change (it
+    nudges the child first when the dims already match), so the kernel
+    delivers SIGWINCH and the TUI repaints itself — the whole handover
+    repaint story."""
     rows, cols = dims
     if spawn is None:   # deferred: ptyprocess import stays off the hot path
         from ptyprocess import PtyProcess
