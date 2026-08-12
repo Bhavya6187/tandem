@@ -5,7 +5,14 @@ import os
 import time
 
 from tandem import paths
-from tandem.warm import WarmChild, _shadow_size, build_launch, spawn_hidden
+from tandem.warm import (
+    WarmChild,
+    WarmStandby,
+    _ensure_shadow_default,
+    _shadow_size,
+    build_launch,
+    spawn_hidden,
+)
 
 
 def test_build_launch_claude_resume(env_factory):
@@ -209,3 +216,225 @@ def test_spawn_hidden_floors_tiny_windows(env_factory):
         assert dimensions == (1, 1)
         return _FakePty()
     spawn_hidden(_recipe(env), (1, 1), 0, spawn=fake_spawn).release()
+
+
+class _Clock:
+    def __init__(self):
+        self.t = 100.0
+
+    def __call__(self):
+        return self.t
+
+
+class _Spawned:
+    """Stands in for WarmChild in manager tests."""
+
+    def __init__(self, recipe, shadow_size):
+        self.recipe = recipe
+        self.shadow_size = shadow_size
+        self.killed = False
+        self._alive = True
+
+    def alive(self):
+        return self._alive
+
+    def kill(self):
+        self.killed = True
+        self._alive = False
+
+
+def _standby(env, **kw):
+    clock = kw.pop("clock", _Clock())
+    spawned = []
+
+    def spawner(recipe, dims, shadow_size):
+        wc = _Spawned(recipe, shadow_size)
+        spawned.append(wc)
+        return wc
+
+    sb = WarmStandby(
+        env.session,
+        kw.pop("is_idle", lambda: True),
+        winsize=lambda: (40, 120),
+        spawner=kw.pop("spawner", spawner),
+        clock=clock,
+        sync_memory=kw.pop("sync_memory", lambda: None),
+        ensure_shadow=kw.pop("ensure_shadow", lambda s: s),
+        **kw,
+    )
+    return sb, clock, spawned
+
+
+def _settle(sb, clock, ticks=4, step=1.0):
+    """Drive the state machine directly — no thread, no sleeps."""
+    for _ in range(ticks):
+        clock.t += step
+        sb._tick()
+
+
+def test_spawns_after_idle_and_debounce(env_factory):
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env)
+    sb._tick()             # first sighting: starts the stability window
+    assert not spawned
+    _settle(sb, clock)     # > 1.5s stable
+    assert len(spawned) == 1
+    assert spawned[0].recipe.side == "codex"
+    assert spawned[0].shadow_size == env.codex_shadow.stat().st_size
+
+
+def test_no_spawn_while_busy(env_factory):
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env, is_idle=lambda: False)
+    _settle(sb, clock, ticks=6)
+    assert not spawned
+
+
+def test_shadow_growth_restarts_debounce(env_factory):
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env)
+    sb._tick()
+    clock.t += 1.0
+    with open(env.codex_shadow, "a") as f:
+        f.write("{}\n")      # a turn synced in
+    sb._tick()               # sees the new size: window restarts
+    clock.t += 1.0
+    sb._tick()               # only 1.0s stable — still waiting
+    assert not spawned
+    clock.t += 1.0
+    sb._tick()
+    assert len(spawned) == 1
+
+
+def test_held_child_invalidated_on_shadow_growth(env_factory):
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env)
+    _settle(sb, clock)
+    assert len(spawned) == 1
+    with open(env.codex_shadow, "a") as f:
+        f.write("{}\n")
+    sb._tick()
+    assert spawned[0].killed
+    _settle(sb, clock)       # respawns once stable again
+    assert len(spawned) == 2
+
+
+def test_fresh_child_is_left_alone(env_factory):
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env)
+    _settle(sb, clock)
+    _settle(sb, clock, ticks=10)
+    assert len(spawned) == 1
+    assert not spawned[0].killed
+
+
+def test_self_dying_children_consume_retries_then_marker(env_factory):
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env, max_retries=2)
+    for expected in (1, 2, 3):
+        _settle(sb, clock)
+        assert len(spawned) == expected
+        spawned[-1]._alive = False    # boot crash
+        sb._tick()                    # notices the death
+    _settle(sb, clock, ticks=10)
+    assert len(spawned) == 3          # 1 initial + 2 retries, then gave up
+    marker = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-warm-failed"
+    assert marker.exists()
+    assert "exited" in marker.read_text()
+
+
+def test_missing_shadow_calls_ensure_and_refuses_without_file(env_factory):
+    env = env_factory(active="claude")
+    env.codex_shadow.unlink()
+    calls = []
+
+    def ensure(session):
+        calls.append(session.tandem_id)
+        return session          # "created nothing" (data-loss guard case)
+
+    sb, clock, spawned = _standby(env, ensure_shadow=ensure)
+    _settle(sb, clock)
+    assert calls                # ensure ran
+    assert not spawned          # but no file -> never a blank --session-id
+
+
+def test_memory_sync_runs_before_spawn(env_factory):
+    env = env_factory(active="claude")
+    order = []
+    sb, clock, spawned = _standby(
+        env, sync_memory=lambda: order.append("sync"),
+        spawner=lambda r, d, s: order.append("spawn") or _Spawned(r, s),
+    )
+    _settle(sb, clock)
+    assert order == ["sync", "spawn"]
+
+
+def test_shutdown_keep_child_hands_it_over(env_factory):
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env)
+    _settle(sb, clock)
+    child = sb.shutdown(keep_child=True)
+    assert child is spawned[0] and not child.killed
+    assert sb.child is None
+
+
+def test_shutdown_without_keep_kills(env_factory):
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env)
+    _settle(sb, clock)
+    assert sb.shutdown(keep_child=False) is None
+    assert spawned[0].killed
+
+
+def test_disabled_standby_never_starts_its_thread(env_factory):
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env, enabled=False)
+    sb.start()
+    assert not sb._thread.is_alive()
+    assert sb.shutdown(keep_child=True) is None
+
+
+def test_dead_child_is_killed_so_its_reader_lets_go(env_factory):
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env)
+    _settle(sb, clock)
+    spawned[0]._alive = False
+    sb._tick()
+    # the process is gone, but the discard reader still owns the pty fd and
+    # keeps the WarmChild referenced: dropping the handle alone leaks it
+    assert spawned[0].killed
+
+
+def test_spawn_racing_shutdown_kills_rather_than_orphans(env_factory):
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env)
+    sb._stop.set()   # shutdown already joined and emptied the child slot
+    sb._spawn(_shadow_size(env.session, "codex"))
+    assert len(spawned) == 1 and spawned[0].killed
+    assert sb.child is None
+
+
+def test_ensure_shadow_default_never_mints_over_a_recorded_codex_id(env_factory):
+    """File gone but the id still recorded: minting a replacement rollout
+    here would be rejected by the runner's mtime-cutoff discovery, so the
+    recorded id survives untouched and the standby simply refuses."""
+    env = env_factory(active="claude")
+    env.codex_shadow.unlink()
+    fresh = _ensure_shadow_default(env.session)
+    assert fresh is not None
+    assert fresh.codex_session_id == env.session.codex_session_id
+    assert _shadow_size(fresh, "codex") is None
+
+
+def test_spawn_failures_consume_retries_then_marker(env_factory):
+    """A spawner that keeps blowing up (bad argv, no pty) must give up on
+    the same budget a crash-on-boot child does, not retry every poll."""
+    def boom(recipe, dims, shadow_size):
+        raise OSError("no ptys left")
+
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env, spawner=boom, max_retries=2)
+    _settle(sb, clock, ticks=12)
+    assert sb.child is None
+    marker = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-warm-failed"
+    assert "spawn failed: OSError: no ptys left" in marker.read_text()
