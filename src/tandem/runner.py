@@ -543,8 +543,8 @@ class InteractiveRunner:
         # by making "fill the slot" and "close it" one step, so whichever
         # side loses kills the child instead of stranding it.
         # The non-tty path never flips, so a spawn there could only ever
-        # leak a hidden harness: the gate is read at fire time, off the
-        # same two inputs the standby's `enabled` used to take.
+        # leak a hidden harness: the gate is read at fire time, and takes
+        # both the [frame] `warm` flag and a real stdin tty.
         fired: dict = {"child": None, "closed": False}
         fired_lock = threading.Lock()
 

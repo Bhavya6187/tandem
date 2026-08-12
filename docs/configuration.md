@@ -56,7 +56,7 @@ warm = true   # boot the incoming harness while the outgoing one shuts down
 | --- | --- | --- |
 | `flip_key` | `"ctrl-]"` | The flip keybind, consumed by tandem (never forwarded). Accepts `ctrl-<char>` or a hex byte like `"0x1d"`; printable keys are rejected (they would swallow typing). The bar relabels itself to match (`ctrl-t` shows `^T flips`). |
 | `bar` | `true` | The one-line tab bar on the bottom terminal row. `false` hides it; the flip still works. |
-| `warm` | `true` | Overlap the two halves of a flip: the incoming harness starts booting the moment you press the key, while the outgoing one is still shutting down. `false` gives fully serial flips — the boot only begins once the old harness is gone. |
+| `warm` | `true` | Overlap the two halves of a flip: the incoming harness starts booting the moment the flip fires (a mid-turn press waits for the turn boundary first), while the outgoing one is still shutting down. `false` gives fully serial flips — the boot only begins once the old harness is gone. |
 
 An unparseable value falls back to the default rather than failing the
 launch. If a terminal can't sustain the bar, tandem drops it for the rest
@@ -67,9 +67,10 @@ bar's row floor also drops it for the session, but that is tandem's own
 policy rather than a conflict, so nothing is recorded and `doctor` stays
 quiet.
 
-Warming is pipelining, not a background service: pressing `Ctrl-]` starts
-the incoming harness immediately and tears the outgoing one down at the
-same time, so the flip lands at about the incoming harness's own start-up
+Warming is pipelining, not a background service: the moment the flip
+fires — a mid-turn `Ctrl-]` waits for the turn boundary first — the
+incoming harness starts and the outgoing one is torn down at the same
+time, so the flip lands at about the incoming harness's own start-up
 speed instead of that plus the shutdown. Nothing exists before you press
 the key and nothing survives the flip — between flips a tandem session is
 exactly one harness process. `warm = false` restores the fully serial

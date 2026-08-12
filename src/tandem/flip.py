@@ -106,7 +106,7 @@ def _reap(standby, carry: dict) -> None:
     The kill ladder is slow by construction — quit keystrokes, then the
     unconditional soft/term waits — so killing a stale standby inline would
     put seconds between the user's Ctrl-] and the next harness starting,
-    on precisely the flips warmup exists to make instant. The child is
+    on precisely the flips warmup exists to speed up. The child is
     already out of the carry, so nothing can adopt it while it dies."""
     thread = threading.Thread(
         target=_kill, args=(standby,), name="tandem-warm-reap", daemon=True

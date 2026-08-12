@@ -1149,6 +1149,50 @@ def test_no_flip_leaves_no_fire_spawn(env_factory, monkeypatch):
     assert not r.flip_requested and spawns == [] and r.warm_child is None
 
 
+def test_fire_kills_its_child_when_the_slot_is_already_closed(env_factory,
+                                                             monkeypatch):
+    # The one case monitor.stop()'s join cannot cover: its timeout expires
+    # with a spawn still in flight, so the runner's finally reads and closes
+    # the slot first and the fire lands after. Driven by calling the fire
+    # hook once run() has returned — the slot is then closed for good, which
+    # is exactly the state an expired join leaves behind. The child must be
+    # killed by the fire itself; nothing else is left to reap it.
+    import tandem.runner as runner_mod
+    env = env_factory(active="claude")
+    monitors = []
+
+    class CapturingMonitor(runner_mod.FlipMonitor):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            monitors.append(self)
+
+    class FakeChild:
+        def __init__(self):
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+
+    spawns = []
+
+    def fake_spawn_hidden(recipe, dims, shadow_size):
+        spawns.append(FakeChild())
+        return spawns[-1]
+
+    monkeypatch.setattr(runner_mod, "FlipMonitor", CapturingMonitor)
+    monkeypatch.setattr(runner_mod, "spawn_hidden", fake_spawn_hidden)
+    monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: True)
+    monkeypatch.setattr(sys, "stdin", _StdinWithFileno())
+    monkeypatch.setattr(runner_mod, "run_in_pty", lambda *a, **kw: 0)
+    r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink)
+    r.run()
+    assert spawns == [] and r.warm_child is None   # nothing fired during the run
+
+    monitors[0].on_flip_decided()                  # the in-flight spawn lands
+    assert len(spawns) == 1 and spawns[0].killed   # reaped, not stranded
+    assert r.warm_child is None                    # and never adopted
+
+
 def test_runner_adopts_a_live_child(env_factory, monkeypatch):
     import tandem.runner as runner_mod
     from tandem.warm import build_launch

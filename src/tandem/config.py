@@ -3,7 +3,7 @@
 [subagents] controls codex subagent routing; [claude] / [codex] hold an
 `args` list appended to every interactive launch of that harness; [frame]
 holds the meta-harness flip keybind, its status bar toggle, and the
-warm-standby toggle.
+pipelined-flip toggle.
 
 Unknown keys are ignored and every error yields defaults — configuration
 must never be the reason a launch breaks or subagent routing stops (the
@@ -87,7 +87,7 @@ def load_harness_args(harness: str) -> list[str]:
 class FrameConfig:
     flip_byte: int = 0x1D   # Ctrl-]
     bar: bool = True
-    warm: bool = True       # pre-boot the standby harness so the flip is instant
+    warm: bool = True       # boot the other harness during the flip's teardown
 
 
 def _parse_flip_key(value: str) -> int | None:
@@ -111,7 +111,7 @@ def _parse_flip_key(value: str) -> int | None:
 
 def load_frame_config() -> FrameConfig:
     """[frame] table: the flip keybind, the status bar toggle, and the
-    warm-standby toggle."""
+    pipelined-flip toggle."""
     raw = _read_config().get("frame")
     if not isinstance(raw, dict):
         return FrameConfig()
