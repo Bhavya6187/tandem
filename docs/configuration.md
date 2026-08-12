@@ -66,3 +66,12 @@ you'd rather keep the bar off for good. Shrinking the window below the
 bar's row floor also drops it for the session, but that is tandem's own
 policy rather than a conflict, so nothing is recorded and `doctor` stays
 quiet.
+
+Warming costs something, so it is worth knowing what: while a session runs,
+tandem keeps a second harness process resident (you'll see it in `ps`, and
+claude's in `claude agents`), and it boots a fresh one in the background
+after every turn that syncs across. If warming keeps failing — the binary is
+missing, no ptys left — tandem gives up for that session and leaves a marker;
+`tandem doctor` then warns about it, with the reason, until you delete the
+marker file it names. Flips still work, cold. Set `warm = false` to turn the
+standby off for good.

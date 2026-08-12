@@ -12,15 +12,6 @@ from tandem import paths, runner
 from tandem.runner import FlipMonitor, wait_until_safe
 
 
-@pytest.fixture(autouse=True)
-def _warm_gate_closed(monkeypatch):
-    """No test may boot a hidden harness for real. `pytest -s` on a real
-    terminal leaves stdin a tty, which would open the warm gate in every
-    runner test here; pin it shut, and let the two tests that exercise the
-    gate reopen it themselves."""
-    monkeypatch.setattr(runner, "_stdin_tty", lambda: False)
-
-
 class _Sink:
     def handle(self, line, ctx, cursor): ...
 
@@ -1013,6 +1004,7 @@ def test_runner_hands_standby_over_only_on_flip(env_factory, monkeypatch):
     shutdowns = []
 
     class FakeStandby:
+        memory_actions: list = []   # the real one always has it
         def __init__(self, *a, **kw):
             self.kw = kw
 
@@ -1042,6 +1034,7 @@ def test_runner_hands_the_standby_over_on_a_flip(env_factory, monkeypatch):
     shutdowns = []
 
     class FakeStandby:
+        memory_actions: list = []   # the real one always has it
         def __init__(self, *a, **kw):
             pass
 
@@ -1204,7 +1197,9 @@ def test_runner_kills_an_adoptee_it_never_handed_over(env_factory, monkeypatch):
 
 def test_runner_ignores_a_dead_or_mismatched_adoptee(env_factory, monkeypatch):
     # Neither a dead child nor one warmed for the other side is adoptable:
-    # the runner rebuilds its own recipe and spawns cold.
+    # the runner rebuilds its own recipe and spawns cold. It still reaps
+    # them — the carry was emptied to build this runner, so a live wrong-side
+    # standby dropped here would outlive the session with nobody to kill it.
     import tandem.runner as runner_mod
     from tandem.warm import build_launch
     env = env_factory(active="claude")
@@ -1215,6 +1210,7 @@ def test_runner_ignores_a_dead_or_mismatched_adoptee(env_factory, monkeypatch):
             self.recipe = build_launch(env.session, side)
             self._alive = is_alive
             self.released = False
+            self.killed = False
 
         def alive(self):
             return self._alive
@@ -1222,6 +1218,9 @@ def test_runner_ignores_a_dead_or_mismatched_adoptee(env_factory, monkeypatch):
         def release(self):
             self.released = True
             return "raw-child"
+
+        def kill(self):
+            self.killed = True
 
     def fake_run_in_pty(argv, cwd=None, env=None, frame=None, control=None,
                         child=None):
@@ -1235,16 +1234,18 @@ def test_runner_ignores_a_dead_or_mismatched_adoptee(env_factory, monkeypatch):
                                      adopt_child=adoptee).run()
         assert seen["child"] is None
         assert not adoptee.released
+        assert adoptee.killed
 
 
 def _standby_enabled_for(env, monkeypatch):
-    """Run once with a real terminal underneath (the autouse fixture pins
+    """Run once with a real terminal underneath (conftest's autouse fixture
     `_stdin_tty` shut, so the tty half has to be reopened by hand) and
     report the `enabled` the runner computed for its standby."""
     import tandem.runner as runner_mod
     made = {}
 
     class FakeStandby:
+        memory_actions: list = []   # the real one always has it
         def __init__(self, session, is_idle, **kw):
             made["kw"] = kw
             made["is_idle"] = is_idle
@@ -1276,13 +1277,14 @@ def test_runner_warming_follows_the_config_flag(env_factory, monkeypatch):
 
 def test_runner_never_warms_without_a_tty(env_factory, monkeypatch):
     # The non-tty path never flips, so a standby there could only ever leak
-    # a hidden harness — config on, gate still shut. (The autouse fixture
+    # a hidden harness — config on, gate still shut. (conftest's autouse
     # supplies the non-tty half.)
     import tandem.runner as runner_mod
     env = env_factory(active="claude")
     made = {}
 
     class FakeStandby:
+        memory_actions: list = []   # the real one always has it
         def __init__(self, session, is_idle, **kw):
             made["kw"] = kw
 
@@ -1307,6 +1309,7 @@ def test_runner_shuts_the_standby_down_when_the_pty_raises(env_factory,
     shutdowns = []
 
     class FakeStandby:
+        memory_actions: list = []   # the real one always has it
         def __init__(self, *a, **kw):
             pass
 
@@ -1330,3 +1333,31 @@ def test_runner_shuts_the_standby_down_when_the_pty_raises(env_factory,
     else:                                   # pragma: no cover - guard
         raise AssertionError("run() swallowed the pty failure")
     assert shutdowns == [False]
+
+
+def test_runner_reports_the_standbys_memory_sync_actions(env_factory,
+                                                         monkeypatch):
+    """The standby syncs memory before every hidden boot, which leaves the
+    flip's own sync with nothing to report. Without this the user silently
+    loses the 'created AGENTS.md' line warmup stole from them."""
+    import tandem.runner as runner_mod
+    env = env_factory(active="claude")
+    made = {}
+
+    class FakeStandby:
+        def __init__(self, *a, **kw):
+            self.memory_actions = ["created AGENTS.md from CLAUDE.md"]
+            made["sb"] = self
+
+        def start(self):
+            pass
+
+        def shutdown(self, keep_child):
+            return None
+
+    monkeypatch.setattr(runner_mod, "WarmStandby", FakeStandby)
+    monkeypatch.setattr(runner_mod, "run_in_pty", lambda *a, **kw: 0)
+    r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink)
+    r.run()
+    assert "tandem: memory: created AGENTS.md from CLAUDE.md" in r.reports
+    assert made["sb"].memory_actions == []   # reported once, then cleared

@@ -148,7 +148,10 @@ def spawn_hidden(
     delivers SIGWINCH and the TUI repaints itself — the whole handover
     repaint story."""
     rows, cols = dims
-    if spawn is None:   # deferred: ptyprocess import stays off the hot path
+    if spawn is None:
+        # `spawn` is the test seam (ptyprocess is already imported by ptyrun,
+        # so this costs nothing and saves nothing); the import sits here so
+        # the seam is the only thing a test has to substitute.
         from ptyprocess import PtyProcess
         spawn = PtyProcess.spawn
     child = spawn(
@@ -216,9 +219,15 @@ class WarmStandby:
         self.debounce_s = debounce_s
         self.max_retries = max_retries
         self.child: WarmChild | None = None
+        # Memory-sync actions from the most recent spawn's sync, held for the
+        # runner to report on the way out — see `_spawn`.
+        self.memory_actions: list[str] = []
         self._last_size: int | None = None
         self._stable_since: float | None = None
         self._retries = 0
+        # When the child in the slot was spawned; -inf so the very first
+        # invalidation is never read as self-inflicted.
+        self._last_spawn = float("-inf")
         self._ensure_refused = False
         # guards every transition of the `child` slot (and nothing else — the
         # kill ladder takes seconds and must never run under it)
@@ -270,7 +279,21 @@ class WarmStandby:
                     note = "standby exited before attach"
                 elif size != child.shadow_size:
                     doomed, self.child = child, None   # a turn synced in
-                    self._invalidated()
+                    if self.clock() - self._last_spawn < 2 * self.debounce_s:
+                        # ...or the standby's own resume appended to the
+                        # transcript it booted from, which no amount of
+                        # respawning will fix. Growth landing on top of a
+                        # spawn is charged to the budget instead of re-arming
+                        # it, so the loop terminates in a marker the doctor
+                        # can show rather than churning every debounce
+                        # forever. `_last_size` moves with it: leaving it
+                        # behind would send the tail below through
+                        # `_invalidated()` and undo this in the same tick.
+                        self._retries += 1
+                        self._last_size = size
+                        note = "standby invalidated itself moments after spawning"
+                    else:
+                        self._invalidated()
                     self._stable_since = None
                 else:
                     return                  # fresh and waiting: nothing to do
@@ -301,7 +324,10 @@ class WarmStandby:
     def _invalidated(self) -> None:
         """A real content change starts a new idle period: the retry budget
         re-arms (giving up is only ever 'until the next invalidation') and
-        so does the ensure-shadow latch, since the file may exist now."""
+        so does the ensure-shadow latch, since the file may exist now.
+
+        'Real' is the whole load here — growth a standby caused itself is
+        filtered out by the respawn floor in `_tick` before it reaches this."""
         self._retries = 0
         self._ensure_refused = False
 
@@ -325,10 +351,18 @@ class WarmStandby:
                 return
         try:
             if self.sync_memory is not None:
-                self.sync_memory()
+                report = self.sync_memory()
             else:
                 from .memory_sync import sync_memory_files
-                sync_memory_files(session.cwd)
+                report = sync_memory_files(session.cwd)
+            # The sync that actually did the work happens here, so the flip's
+            # own sync finds nothing left to report: hold the action lines for
+            # the runner to print, or the user never hears that tandem wrote
+            # their AGENTS.md. Only a real report counts — the injected test
+            # seam returns None.
+            actions = getattr(report, "actions", None)
+            if actions is not None:
+                self.memory_actions = list(actions)
         except Exception:
             pass   # memory-sync failures surface at flip time as today
         try:
@@ -337,6 +371,7 @@ class WarmStandby:
             # would retry at poll_s forever without ever telling the doctor
             recipe = build_launch(session, session.shadow)
             child = self.spawner(recipe, self.winsize(), size)
+            self._last_spawn = self.clock()   # anchors the respawn floor
         except Exception as exc:
             self._retries += 1
             self._note_failure(f"spawn failed: {type(exc).__name__}: {exc}")

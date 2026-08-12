@@ -319,6 +319,48 @@ def test_held_child_invalidated_on_shadow_growth(env_factory):
     assert len(spawned) == 2
 
 
+def _grow(env):
+    with open(env.codex_shadow, "a") as f:
+        f.write("{}\n")
+
+
+def test_self_inflicted_growth_consumes_the_budget_then_marks(env_factory):
+    """Growth landing right on top of a spawn is the standby's own resume
+    appending to the transcript it booted from. Re-arming the budget there
+    is an endless boot->grow->kill->respawn loop with nothing in the
+    doctor's trail, so the floor counts it as a retry instead."""
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env, max_retries=2)
+    for expected in (1, 2, 3):
+        _settle(sb, clock)
+        assert len(spawned) == expected
+        _grow(env)
+        clock.t += 0.5              # well inside 2 * debounce_s of the spawn
+        sb._tick()                  # invalidates itself
+        assert spawned[-1].killed
+    _settle(sb, clock, ticks=10)
+    assert len(spawned) == 3        # 1 + 2 retries, then it stops churning
+    marker = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-warm-failed"
+    assert marker.exists()
+    assert "invalidated itself" in marker.read_text()
+
+
+def test_paced_invalidation_still_re_arms_the_budget(env_factory):
+    """The floor only catches growth on top of a spawn: a turn syncing in at
+    user pace is a real invalidation and re-arms, exactly as before."""
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env, max_retries=2)
+    _settle(sb, clock)
+    assert len(spawned) == 1
+    clock.t += 5.0                  # past 2 * debounce_s since the spawn
+    _grow(env)
+    sb._tick()
+    assert spawned[0].killed
+    assert sb._retries == 0         # a real invalidation costs no budget
+    _settle(sb, clock)
+    assert len(spawned) == 2
+
+
 def test_fresh_child_is_left_alone(env_factory):
     env = env_factory(active="claude")
     sb, clock, spawned = _standby(env)
@@ -367,6 +409,25 @@ def test_memory_sync_runs_before_spawn(env_factory):
     )
     _settle(sb, clock)
     assert order == ["sync", "spawn"]
+    assert sb.memory_actions == []   # an injected seam returning None
+
+
+def test_memory_sync_actions_are_held_for_the_runner(env_factory, monkeypatch):
+    """The standby's sync is the one that does the work, so the flip's own
+    sync reports nothing: the action lines have to survive from here or the
+    user never hears that tandem wrote their AGENTS.md."""
+    from tandem.memory_sync import MemorySyncReport
+
+    env = env_factory(active="claude")
+    report = MemorySyncReport()
+    report.actions.append("created AGENTS.md from CLAUDE.md (shared block)")
+    monkeypatch.setattr(
+        "tandem.memory_sync.sync_memory_files", lambda cwd: report
+    )
+    sb, clock, spawned = _standby(env, sync_memory=None)
+    _settle(sb, clock)
+    assert len(spawned) == 1
+    assert sb.memory_actions == ["created AGENTS.md from CLAUDE.md (shared block)"]
 
 
 def test_shutdown_keep_child_hands_it_over(env_factory):

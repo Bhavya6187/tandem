@@ -1,6 +1,7 @@
 """Flip loop tests with a fake harness runner."""
 
 import sqlite3
+import threading
 
 import pytest
 
@@ -377,6 +378,22 @@ def test_gate_rejects_dead_wrong_side_grown_or_memory(monkeypatch):
                  actions=["wrote AGENTS.md"]) is False
 
 
+class BlockingStandby(FakeStandby):
+    """A standby whose kill ladder hangs, standing in for the real one: quit
+    keystrokes plus TERM/KILL timeouts put 0.5-5s between `kill()` and a dead
+    process."""
+
+    def __init__(self, release, **kw):
+        super().__init__(**kw)
+        self.release = release
+        self.kill_entered = threading.Event()
+
+    def kill(self):
+        self.kill_entered.set()
+        self.release.wait(10)
+        super().kill()
+
+
 def test_stale_standby_is_killed_at_the_gate(sess, monkeypatch, capsys):
     from tandem import flip
     import tandem.warm as warm
@@ -391,9 +408,38 @@ def test_stale_standby_is_killed_at_the_gate(sess, monkeypatch, capsys):
 
     carry = {"standby": stale}
     flip._switch(sess.tandem_id, run_harness, 0, carry=carry)
+    for t in carry["reapers"]:   # the reap is off-thread; the exit joins it
+        t.join(timeout=10)
     assert stale.killed
     assert carry["standby"] is None
     assert runs   # the flip still landed, on a cold spawn
+
+
+def test_the_gates_kill_does_not_delay_the_flip(sess, monkeypatch, capsys):
+    """The teardown of a stale standby costs seconds of quit-key ladder, and
+    it lands on exactly the flips warmup exists to make instant. So the gate
+    hands the kill to a reaper thread and re-enters immediately; the session's
+    exit is what joins it."""
+    import tandem.warm as warm
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 999)
+    release = threading.Event()
+    stale = BlockingStandby(release, side="codex", size=10)
+    adopted = []
+
+    class Runner(_adopting_runner(adopted, stale)):
+        def run(self):
+            if self.session.active == "codex":
+                # the post-flip run: the harness is already launching while
+                # the stale standby is still going down the ladder
+                assert stale.kill_entered.wait(10)
+                assert not stale.killed
+                release.set()
+            return super().run()
+
+    _fake_runner_session(monkeypatch, sess, [([], True), ([], False)],
+                         runner=Runner)
+    assert adopted == [None, None]   # stale: never handed to the next run
+    assert stale.killed              # run_session's exit joined the reaper
 
 
 def test_plain_exit_kills_the_leftover_standby(sess, monkeypatch, capsys):

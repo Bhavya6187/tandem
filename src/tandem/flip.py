@@ -9,6 +9,7 @@ the resume hint and return to the OS shell.
 from __future__ import annotations
 
 import sys
+import threading
 
 import click
 
@@ -29,8 +30,10 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
     reports: list[str] = []
     # The standby travels across flips here: popped for adoption by the
     # next run, refilled from the runner that just ended. Injected test
-    # runners never touch it.
-    carry: dict = {"standby": None}
+    # runners never touch it. `reapers` collects the threads tearing down
+    # standbys the gate rejected — the flip does not wait for them, this
+    # function's finally does.
+    carry: dict = {"standby": None, "reapers": []}
     if run_harness is None:
 
         def run_harness(session):
@@ -72,11 +75,18 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
             with StateStore() as store:
                 store.touch_used(tandem_id)
         finally:
-            # Nothing will ever adopt it now — the session is over.
+            # Nothing will ever adopt it now — the session is over. Killed
+            # inline: the user is on their way back to the OS shell, and a
+            # hidden harness must be dead before tandem's own process is.
             leftover = carry.get("standby")
             if leftover is not None:
                 carry["standby"] = None
                 _kill(leftover)
+            # Then the stale ones the gate handed to reaper threads mid-flip.
+            # Bounded: a wedged ladder may cost the exit 10s per standby, but
+            # never the session — and there is at most one per flip.
+            for thread in carry.get("reapers", ()):
+                thread.join(timeout=10)
     return code
 
 
@@ -87,6 +97,26 @@ def _kill(standby) -> None:
         standby.kill()
     except Exception:
         pass
+
+
+def _reap(standby, carry: dict) -> None:
+    """Kill a standby on a background thread and record the thread so the
+    session's exit can join it.
+
+    The kill ladder is slow by construction — quit keystrokes, then the
+    unconditional soft/term waits — so killing a stale standby inline would
+    put seconds between the user's Ctrl-] and the next harness starting,
+    on precisely the flips warmup exists to make instant. The child is
+    already out of the carry, so nothing can adopt it while it dies."""
+    thread = threading.Thread(
+        target=_kill, args=(standby,), name="tandem-warm-reap", daemon=True
+    )
+    reapers = carry.setdefault("reapers", [])
+    # Only the ones still running are worth carrying: a long session flips
+    # many times, and a finished reaper has nothing left to join.
+    reapers[:] = [t for t in reapers if t.is_alive()]
+    reapers.append(thread)
+    thread.start()
 
 
 def _norm(res) -> tuple[int, bool]:
@@ -195,7 +225,8 @@ def _switch(
     and the state it snapshotted are finally comparable against what the
     next run will actually launch. A stale one is killed here and nowhere
     else — the runner silently ignores an adoptee it cannot use, so a wrong
-    side that survived this gate would leak."""
+    side that survived this gate would leak — but killed on a reaper thread,
+    since the ladder's own timeouts would otherwise be charged to the flip."""
     with StateStore() as store:
         session = store.get_session(tandem_id)
         if session is None:
@@ -221,7 +252,7 @@ def _switch(
             standby, new_active, session, mem
         ):
             carry["standby"] = None
-            _kill(standby)
+            _reap(standby, carry)   # off-thread: the flip must not wait
     code, flip, launched = _try_enter(tandem_id, run_harness)
     if launched or not fall_back:
         return code, flip

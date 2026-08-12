@@ -476,7 +476,12 @@ class InteractiveRunner:
         here, or a detached harness outlives the session with nobody left to
         kill it. `_released` marks the handover: past it the child belongs to
         the pty (or was already killed for refusing to release), and killing
-        it again would terminate the harness the user is looking at."""
+        it again would terminate the harness the user is looking at.
+
+        An adoptee we decline to adopt (warmed for the other side, or
+        already dead) is reaped by the same guard: nothing downstream ever
+        looks at it again, so dropping it silently would strand whatever
+        part of it is still alive."""
         adopting = (
             self.adopt_child is not None
             and self.adopt_child.recipe.side == self.session.active
@@ -486,7 +491,10 @@ class InteractiveRunner:
         try:
             return self._run(adopting)
         finally:
-            if adopting and not self._released:
+            # `_released` is only ever set on the adopting path, so this
+            # covers both: a handover that never happened, and an adoptee
+            # that was never adoptable in the first place.
+            if self.adopt_child is not None and not self._released:
                 try:
                     self.adopt_child.kill()
                 except Exception:
@@ -654,8 +662,18 @@ class InteractiveRunner:
             monitor.stop()
             thread.join(timeout=10)
             self.flip_requested = monitor.flip_requested
-            # after flip_requested settles: only a flip keeps the child
+            # after flip_requested settles: only a flip keeps the child.
+            # The join inside can cost up to 5s when the warm thread is
+            # mid-kill, which is the price of never abandoning a hidden
+            # harness; the flip's own stale teardown is what got moved off
+            # this path (see flip._reap).
             self.warm_child = standby.shutdown(keep_child=self.flip_requested)
+            # The standby ran the memory sync before each hidden boot, so by
+            # flip time `switch_session`'s own sync has nothing left to do and
+            # reports nothing: these lines are the only word the user gets
+            # that tandem wrote their AGENTS.md. Read once, then cleared.
+            notes.extend(f"memory: {a}" for a in standby.memory_actions)
+            standby.memory_actions = []
             sentinel.unlink(missing_ok=True)
         if frame.bar_dropped:
             marker = paths.tandem_home() / "tmp" / f"{session.tandem_id}-bar-dropped"

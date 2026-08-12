@@ -134,6 +134,17 @@ class Env:
         )
 
 
+@pytest.fixture(autouse=True)
+def _warm_gate_closed(monkeypatch):
+    """No test may boot a hidden harness for real. Under plain `pytest` stdin
+    is not a terminal and the warm gate is shut anyway, but `pytest -s` on a
+    real terminal leaves it open — so pin it suite-wide, and let the handful
+    of tests that exercise the gate reopen it themselves."""
+    from tandem import runner
+
+    monkeypatch.setattr(runner, "_stdin_tty", lambda: False)
+
+
 @pytest.fixture
 def env_factory(tmp_path, monkeypatch):
     def make(active="claude"):

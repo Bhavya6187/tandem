@@ -192,6 +192,9 @@ def run_in_pty(
     except (ValueError, OSError, io.UnsupportedOperation):
         is_tty = False
     if not is_tty:
+        # A pre-spawned `child` never legitimately reaches here: the flip
+        # loop's own `_stdin_tty` gate kills a standby rather than hand it to
+        # a path that spawns cold and would leave it unreaped.
         return subprocess.run(argv, cwd=cwd, env=env).returncode
 
     rows, cols = _winsize(stdin_fd)
@@ -327,7 +330,15 @@ def run_in_pty(
             # resize that signals nothing is a flip onto a blank screen.
             target = _child_dims(rows, cols, bar_on)
             try:
-                if child.getwinsize() == target:
+                try:
+                    on_target = child.getwinsize() == target
+                except Exception:
+                    # The probe is an optimisation; the resize below is the
+                    # handover itself. A probe that raises must not take the
+                    # resize down with it, so read it as "not on target" and
+                    # go straight to the real setwinsize.
+                    on_target = False
+                if on_target:
                     child.setwinsize(max(1, target[0] - 1), max(1, target[1] - 1))
                 child.setwinsize(*target)
             except Exception:

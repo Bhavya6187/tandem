@@ -173,6 +173,26 @@ class TestDoctor:
         assert "spawn failed: FileNotFoundError: codex" in joined
         assert "[frame] warm = false" in joined
 
+    def test_warm_failure_reason_is_flattened_and_clamped(self, env_factory):
+        """The reason is an exception message: it can arrive multi-line and
+        arbitrarily long, and a doctor check is one line."""
+        from tandem import paths
+
+        env = env_factory()
+        marker = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-warm-failed"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        reason = "spawn failed: OSError: " + "x" * 400
+        marker.write_text(reason + "\nTraceback:\n  line two\n")
+        report = run_doctor(env.store, env.session)
+        line = next(
+            c.message for c in report.checks
+            if c.status == "warn" and "warmup" in c.message
+        )
+        assert "\n" not in line            # flattened to the first line
+        assert "line two" not in line
+        assert reason[:200] in line        # ...and clamped to 200 chars of it
+        assert reason[:201] not in line
+
     def test_quiet_without_warm_failure_marker(self, env_factory):
         env = env_factory()
         report = run_doctor(env.store, env.session)

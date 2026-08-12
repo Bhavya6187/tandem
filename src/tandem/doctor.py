@@ -236,9 +236,16 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
     warm_marker = paths.tandem_home() / "tmp" / f"{session.tandem_id}-warm-failed"
     if warm_marker.exists():
         try:
+            # ValueError too: read_text decodes, and a marker that got
+            # truncated or scribbled on comes back as UnicodeDecodeError.
             reason = warm_marker.read_text().strip()
-        except OSError:
+        except (OSError, ValueError):
             reason = ""
+        if reason:
+            # One line, bounded: the reason carries an exception message
+            # (an argv, a path, a traceback-ish string), and the doctor's
+            # check list is not the place for a paragraph.
+            reason = reason.splitlines()[0][:200]
         report.warn(
             "process warmup gave up in a previous session"
             + (f" ({reason})" if reason else "")
