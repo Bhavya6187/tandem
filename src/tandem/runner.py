@@ -454,6 +454,7 @@ class InteractiveRunner:
         # run is launching.
         self.adopt_child = adopt_child
         # set here too so the attributes exist even if run() raises early
+        self._released = False
         self.flip_requested = False
         # The standby this run warmed, surrendered only when a flip was
         # requested (otherwise shutdown killed it and this stays None).
@@ -465,15 +466,37 @@ class InteractiveRunner:
         self.reports: list[str] = []
 
     def run(self) -> int:
+        """Run the harness, and own the adoptee's disposal while doing it.
+
+        Between the moment adoption is decided and the handover to
+        `run_in_pty`, this run is the *only* thing holding the hidden child:
+        the flip loop popped it out of its carry before constructing us, and
+        only ever gets `warm_child` back. So anything that raises in between
+        — a malformed config, a thread that will not start — has to reap it
+        here, or a detached harness outlives the session with nobody left to
+        kill it. `_released` marks the handover: past it the child belongs to
+        the pty (or was already killed for refusing to release), and killing
+        it again would terminate the harness the user is looking at."""
+        adopting = (
+            self.adopt_child is not None
+            and self.adopt_child.recipe.side == self.session.active
+            and self.adopt_child.alive()
+        )
+        self._released = False
+        try:
+            return self._run(adopting)
+        finally:
+            if adopting and not self._released:
+                try:
+                    self.adopt_child.kill()
+                except Exception:
+                    pass   # never mask the failure that got us here
+
+    def _run(self, adopting: bool) -> int:
         session = self.session
         active = session.active
         adapter = get_adapter(active)
         active_sid = getattr(session, f"{active}_session_id")
-        adopting = (
-            self.adopt_child is not None
-            and self.adopt_child.recipe.side == active
-            and self.adopt_child.alive()
-        )
         # One recipe, bound once: hook_argv_extra re-reads config per call
         # (codex checks the user's config.toml for a notify handler), so the
         # argv actually launched and marker_wired must come from the same
@@ -613,8 +636,14 @@ class InteractiveRunner:
             # cold on child=None, and the WarmChild must be killed here or the
             # hidden process outlives the run with nothing left to reap it.
             pre_spawned = self.adopt_child.release() if adopting else None
-            if adopting and pre_spawned is None:
-                self.adopt_child.kill()
+            if adopting:
+                # The handover is settled from here on: either run_in_pty
+                # takes the raw child, or the kill below reaps the WarmChild
+                # that would not give it up. Either way `run`'s guard must
+                # not dispose of it a second time.
+                self._released = True
+                if pre_spawned is None:
+                    self.adopt_child.kill()
             code = run_in_pty(argv, cwd=session.cwd, frame=frame,
                               control=control, child=pre_spawned)
         finally:

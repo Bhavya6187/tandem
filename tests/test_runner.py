@@ -1153,6 +1153,55 @@ def test_runner_kills_a_child_that_refuses_to_release(env_factory, monkeypatch):
     assert wc.killed
 
 
+def test_runner_kills_an_adoptee_it_never_handed_over(env_factory, monkeypatch):
+    """Anything raising between "we will adopt this" and the handover leaves
+    the hidden child unowned: the flip loop popped it out of its carry to
+    build this runner and only ever gets `warm_child` back. So the runner
+    reaps it — and, on the other side of the same guard, never reaps one it
+    did hand over, which would terminate the harness the user is looking at."""
+    import tandem.runner as runner_mod
+    from tandem.warm import build_launch
+    env = env_factory(active="claude")
+    recipe = build_launch(env.session, "claude")
+
+    class Adoptee:
+        def __init__(self):
+            self.recipe = recipe
+            self.released = False
+            self.killed = False
+
+        def alive(self):
+            return True
+
+        def release(self):
+            self.released = True
+            return "raw-child"
+
+        def kill(self):
+            self.killed = True
+
+    def boom():
+        raise ValueError("bad [frame] table in config.toml")
+
+    with monkeypatch.context() as m:
+        # a pre-handover step that raises; the config parse is the realistic
+        # one, but the guard is not specific to it
+        m.setattr(runner_mod, "load_frame_config", boom)
+        never = Adoptee()
+        with pytest.raises(ValueError):
+            runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink,
+                                         adopt_child=never).run()
+    assert never.killed
+    assert not never.released
+
+    monkeypatch.setattr(runner_mod, "run_in_pty", lambda *a, **kw: 0)
+    handed = Adoptee()
+    runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink,
+                                 adopt_child=handed).run()
+    assert handed.released
+    assert not handed.killed   # it is the running harness now
+
+
 def test_runner_ignores_a_dead_or_mismatched_adoptee(env_factory, monkeypatch):
     # Neither a dead child nor one warmed for the other side is adoptable:
     # the runner rebuilds its own recipe and spawns cold.

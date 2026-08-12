@@ -65,13 +65,18 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
     finally:
         # Hint first: state bookkeeping must not be able to swallow it.
         click.echo(f"to continue this session: tandem resume {tandem_id}")
-        with StateStore() as store:
-            store.touch_used(tandem_id)
-        # Nothing will ever adopt it now — the session is over.
-        leftover = carry.get("standby")
-        if leftover is not None:
-            carry["standby"] = None
-            _kill(leftover)
+        # Nested so the reap survives a raising store — a locked sqlite (a
+        # concurrent `tandem sub` holds its own) must not be the reason a
+        # hidden harness outlives the session with nothing left to reap it.
+        try:
+            with StateStore() as store:
+                store.touch_used(tandem_id)
+        finally:
+            # Nothing will ever adopt it now — the session is over.
+            leftover = carry.get("standby")
+            if leftover is not None:
+                carry["standby"] = None
+                _kill(leftover)
     return code
 
 

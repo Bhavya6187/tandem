@@ -471,3 +471,49 @@ def test_a_non_tty_run_never_adopts_the_standby(sess, monkeypatch, capsys):
                          runner=_adopting_runner(adopted, fresh), tty=False)
     assert adopted == [None, None]
     assert fresh.killed
+
+
+def test_a_run_that_raises_still_hands_its_standby_to_the_carry(
+    sess, monkeypatch, capsys
+):
+    """The runner publishes `warm_child` from its own finally, so a run that
+    raises with a flip already fired still has one. The closure must store it
+    back or the last reference to a live hidden harness is dropped."""
+    kept = FakeStandby()
+
+    class Runner(FakeInteractiveRunner):
+        def run(self):
+            self.warm_child = kept        # the runner's finally got this far
+            raise RuntimeError("terminal went away")
+
+    _fake_runner_session(monkeypatch, sess, [([], False)], runner=Runner)
+    assert kept.killed   # reached the carry, then the exit reaped it
+
+
+def test_a_raising_store_still_reaps_the_leftover_standby(sess, monkeypatch, capsys):
+    """The exit's bookkeeping is the last thing standing between a hidden
+    harness and nobody at all: a locked sqlite (a concurrent `tandem sub`
+    holds its own store) must not be the reason one survives the session."""
+    leftover = FakeStandby()
+    armed = []
+
+    class Runner(FakeInteractiveRunner):
+        def run(self):
+            self.warm_child = leftover
+            armed.append(True)   # from here the exit's store call blows up
+            return super().run()
+
+    real_store = flip.StateStore
+
+    def guarded(*a, **kw):
+        if armed:
+            raise sqlite3.OperationalError("database is locked")
+        return real_store(*a, **kw)
+
+    monkeypatch.setattr(flip, "StateStore", guarded)
+    with pytest.raises(sqlite3.OperationalError):
+        _fake_runner_session(monkeypatch, sess, [([], False)], runner=Runner)
+    assert leftover.killed
+    assert f"to continue this session: tandem resume {sess.tandem_id}" in (
+        capsys.readouterr().out          # the hint still came first
+    )
