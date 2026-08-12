@@ -26,7 +26,7 @@ from .ptyrun import FrameIO, PtyControl, _winsize, run_in_pty
 from .state import PairedSession, StateStore, SyncCursor
 from .tailer import JsonlTailer, TailedLine, TranscriptTruncated, TranscriptWatcher
 from .util import json_line
-from .warm import WarmChild, WarmStandby, build_launch
+from .warm import WarmChild, _shadow_size, build_launch, spawn_hidden
 
 
 class EventSink(Protocol):
@@ -141,33 +141,6 @@ def _stdin_tty() -> bool:
         return False
 
 
-def _idle_probe(active, adapter, active_sid, monitor, sentinel):
-    """Non-blocking 'is the active side idle right now?' for the warm
-    standby. A pending flip counts as idle — that clause is the entire
-    pipelined mid-turn fallback: the moment the monitor fires, warming may
-    proceed as soon as the shadow settles. Claude reads its session
-    registry (exceptions read idle — eager like the flip probe; the
-    freshness gate protects correctness). Codex reads the sentinel/
-    transcript mtimes; with no sentinel touch ever (user-configured
-    notify) it never reads idle, so warming degrades to flip-time-only."""
-    if active == "claude":
-        def idle() -> bool:
-            if monitor.flip_requested:
-                return True
-            try:
-                return adapter.session_status(active_sid) != "busy"
-            except Exception:
-                return True
-        return idle
-
-    def idle() -> bool:
-        if monitor.flip_requested:
-            return True
-        t, s = _mtime(monitor.transcript), _mtime(sentinel)
-        return t > 0 and s >= t
-    return idle
-
-
 def wait_until_safe(
     transcript: Path | None,
     sentinel: Path | None,
@@ -280,13 +253,21 @@ class FlipMonitor:
 
     `status_probe` (claude only) reads the harness's own session
     registry and, when present, replaces the transcript/sentinel rules
-    entirely — see `wait_until_safe`."""
+    entirely — see `wait_until_safe`.
+
+    `on_flip_decided` fires once, on this thread, in the gap between the
+    decision and the ladder — the runner spawns the incoming harness there,
+    so its boot overlaps the outgoing one's teardown. It is called with the
+    flag already set (`flip_requested` is what makes the flip inevitable, and
+    a callback must not be able to take it back) and its exceptions are
+    swallowed: a failed hook costs a cold flip, never the flip itself."""
 
     def __init__(self, control, quit_bytes: list[bytes],
                  transcript: Path | None, sentinel: Path,
                  marker_wired: bool = False,
                  quiesce: float | None = None, poll: float = 0.2,
-                 status_probe: Callable[[], str | None] | None = None):
+                 status_probe: Callable[[], str | None] | None = None,
+                 on_flip_decided: Callable[[], None] | None = None):
         self.control = control
         self.quit_bytes = quit_bytes
         self.transcript = transcript
@@ -295,6 +276,7 @@ class FlipMonitor:
         self.quiesce = _quiesce_default(marker_wired) if quiesce is None else quiesce
         self.poll = poll
         self.status_probe = status_probe
+        self.on_flip_decided = on_flip_decided
         self.flip_requested = False
         self.how = ""
         self._armed = threading.Event()
@@ -356,6 +338,11 @@ class FlipMonitor:
             if not ok:
                 continue  # cancelled: back to waiting for the next arm
             self.flip_requested = True
+            if self.on_flip_decided is not None:
+                try:
+                    self.on_flip_decided()
+                except Exception:
+                    pass   # a failed fire means a cold flip, never a dead thread
             self.how = self.control.terminate(self.quit_bytes)
             return
 
@@ -456,8 +443,8 @@ class InteractiveRunner:
         # set here too so the attributes exist even if run() raises early
         self._released = False
         self.flip_requested = False
-        # The standby this run warmed, surrendered only when a flip was
-        # requested (otherwise shutdown killed it and this stays None).
+        # The harness this run fired at its flip decision, surrendered to the
+        # flip loop's carry. Only a flip can fill it: no flip, no fire.
         self.warm_child: WarmChild | None = None
         # Formatted, ready-to-print report lines for the session that just
         # ran. `run()` prints them itself on a normal exit; on a flip it does
@@ -541,15 +528,40 @@ class InteractiveRunner:
             # answers, is how codex opts out.
             status_probe=claude_probe if active == "claude" else None,
         )
-        # Fresh per run: start() is not re-entrant, and the idle probe closes
-        # over this run's monitor. The non-tty path never flips, so warming
-        # there would only ever leak a hidden harness.
-        standby = WarmStandby(
-            session,
-            _idle_probe(active, adapter, active_sid, monitor, sentinel),
-            enabled=frame_cfg.warm and _stdin_tty(),
-            winsize=lambda: _winsize(sys.stdin.fileno()),
-        )
+        # Fired at most once, on the monitor thread, between the flip
+        # decision and the ladder: the incoming harness boots while the
+        # outgoing one dies. The finally below reads the slot only after
+        # monitor.stop() joins that thread, so the handoff is normally
+        # uncontended; the lock covers the one case the join cannot — a
+        # stop() whose timeout expires with a spawn still in flight —
+        # by making "fill the slot" and "close it" one step, so whichever
+        # side loses kills the child instead of stranding it.
+        # The non-tty path never flips, so a spawn there could only ever
+        # leak a hidden harness: the gate is read at fire time, off the
+        # same two inputs the standby's `enabled` used to take.
+        fired: dict = {"child": None, "closed": False}
+        fired_lock = threading.Lock()
+
+        def fire_warm() -> None:
+            if not (frame_cfg.warm and _stdin_tty()):
+                return
+            shadow = session.shadow
+            size = _shadow_size(session, shadow)
+            if size is None:
+                return   # no shadow file yet: switch_session's late-create
+                         # + a cold spawn own that flip; never fresh-mint
+            recipe = build_launch(session, shadow)
+            child = spawn_hidden(recipe, _winsize(sys.stdin.fileno()), size)
+            with fired_lock:
+                if not fired["closed"]:
+                    fired["child"] = child
+                    return
+            child.kill()   # the runner already read the slot and left
+
+        # The monitor exists before the closure does, so the hook is wired by
+        # assignment — `monitor.start()` is called far below, which is what
+        # makes a plain write safe: the thread has not run yet.
+        monitor.on_flip_decided = fire_warm
         frame = FrameIO(
             flip_byte=frame_cfg.flip_byte,
             on_flip=monitor.flip_pressed,
@@ -635,10 +647,6 @@ class InteractiveRunner:
         thread.start()
         monitor.start()   # before the try: stop() on an unstarted thread raises
         try:
-            # Inside the try, unlike monitor.start(): shutdown() tolerates a
-            # thread that never started, and everything below can raise — a
-            # standby started and then abandoned leaks a hidden harness.
-            standby.start()
             # A release that returns None means the discard reader still owns
             # the fd, so there is nothing safe to hand over: run_in_pty spawns
             # cold on child=None, and the WarmChild must be killed here or the
@@ -663,17 +671,18 @@ class InteractiveRunner:
             thread.join(timeout=10)
             self.flip_requested = monitor.flip_requested
             # after flip_requested settles: only a flip keeps the child.
-            # The join inside can cost up to 5s when the warm thread is
-            # mid-kill, which is the price of never abandoning a hidden
-            # harness; the flip's own stale teardown is what got moved off
-            # this path (see flip._reap).
-            self.warm_child = standby.shutdown(keep_child=self.flip_requested)
-            # The standby ran the memory sync before each hidden boot, so by
-            # flip time `switch_session`'s own sync has nothing left to do and
-            # reports nothing: these lines are the only word the user gets
-            # that tandem wrote their AGENTS.md. Read once, then cleared.
-            notes.extend(f"memory: {a}" for a in standby.memory_actions)
-            standby.memory_actions = []
+            with fired_lock:
+                child, fired["child"] = fired["child"], None
+                fired["closed"] = True
+            if child is not None and self.flip_requested:
+                self.warm_child = child
+            elif child is not None:
+                # a fire-spawn only exists because the flip fired, but the
+                # guard costs nothing: never leak a hidden harness
+                try:
+                    child.kill()
+                except Exception:
+                    pass
             sentinel.unlink(missing_ok=True)
         if frame.bar_dropped:
             marker = paths.tandem_home() / "tmp" / f"{session.tandem_id}-bar-dropped"
