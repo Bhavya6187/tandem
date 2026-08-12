@@ -70,7 +70,7 @@ def test_resume_hint_prints_even_when_the_loop_raises(sess, capsys, monkeypatch)
     """The hint is the only place the id is shown, so it must survive an
     unexpected exception escaping the loop."""
 
-    def boom(tandem_id, run_harness, first, reports):
+    def boom(tandem_id, run_harness, first, reports, carry):
         raise RuntimeError("terminal went away")
 
     monkeypatch.setattr(flip, "_flip_loop", boom)
@@ -234,10 +234,12 @@ class FakeInteractiveRunner:
     script: list = []
     seen: list = []
 
-    def __init__(self, session, sink_factory=None):
+    def __init__(self, session, sink_factory=None, adopt_child=None):
         self.session = session
         self.reports = []
         self.flip_requested = False
+        self.adopt_child = adopt_child
+        self.warm_child = None   # the real runner's standby-out attribute
 
     def run(self):
         FakeInteractiveRunner.seen.append(self.session.active)
@@ -250,11 +252,17 @@ class FakeInteractiveRunner:
         return 0
 
 
-def _fake_runner_session(monkeypatch, sess, script):
+def _fake_runner_session(monkeypatch, sess, script,
+                         runner=FakeInteractiveRunner, tty=True):
+    """Run a whole session through `run_session`'s own closure with `runner`
+    standing in for the real InteractiveRunner. `tty` drives the closure's
+    handover gate: under pytest stdin is never a terminal, and these fakes
+    are all standing in for interactive runs."""
     from tandem import runner as runner_mod
 
     _flipping_switch(monkeypatch)
-    monkeypatch.setattr(runner_mod, "InteractiveRunner", FakeInteractiveRunner)
+    monkeypatch.setattr(runner_mod, "InteractiveRunner", runner)
+    monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: tty)
     FakeInteractiveRunner.script = list(script)
     FakeInteractiveRunner.seen = []
     flip.run_session(sess.tandem_id, None)
@@ -326,3 +334,140 @@ def test_flip_reports_switch_outcome(sess, capsys, monkeypatch):
     assert "memory: CLAUDE.md has no tandem markers" in cap.err
     assert "transcript for newly active harness does not exist yet" in cap.err
     assert "run `tandem doctor` for details." in cap.err
+
+
+class FakeStandby:
+    def __init__(self, side="codex", size=10, alive=True):
+        class _R:
+            pass
+        self.recipe = _R()
+        self.recipe.side = side
+        self.shadow_size = size
+        self._alive = alive
+        self.killed = False
+
+    def alive(self):
+        return self._alive
+
+    def kill(self):
+        self.killed = True
+        self._alive = False
+
+
+def _gate(monkeypatch, standby, new_active="codex", size=10, actions=None):
+    from tandem import flip
+    import tandem.warm as warm
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: size)
+    mem = FakeMem()
+    if actions:
+        mem.actions = list(actions)
+    return flip._standby_fresh(standby, new_active, object(), mem)
+
+
+def test_gate_accepts_a_fresh_standby(monkeypatch):
+    assert _gate(monkeypatch, FakeStandby(side="codex", size=10)) is True
+
+
+def test_gate_rejects_dead_wrong_side_grown_or_memory(monkeypatch):
+    assert _gate(monkeypatch, None) is False
+    assert _gate(monkeypatch, FakeStandby(alive=False)) is False
+    assert _gate(monkeypatch, FakeStandby(side="claude")) is False
+    assert _gate(monkeypatch, FakeStandby(size=10), size=11) is False
+    assert _gate(monkeypatch, FakeStandby(size=10),
+                 actions=["wrote AGENTS.md"]) is False
+
+
+def test_stale_standby_is_killed_at_the_gate(sess, monkeypatch, capsys):
+    from tandem import flip
+    import tandem.warm as warm
+    _flipping_switch(monkeypatch)
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 999)
+    stale = FakeStandby(side="codex", size=10)   # snapshot != 999 -> stale
+    runs = []
+
+    def run_harness(session):
+        runs.append(session.active)
+        return 0, False
+
+    carry = {"standby": stale}
+    flip._switch(sess.tandem_id, run_harness, 0, carry=carry)
+    assert stale.killed
+    assert carry["standby"] is None
+    assert runs   # the flip still landed, on a cold spawn
+
+
+def test_plain_exit_kills_the_leftover_standby(sess, monkeypatch, capsys):
+    """No flip pending means nothing will ever adopt it: the exit path is the
+    last chance to reap a hidden harness."""
+    leftover = FakeStandby()
+
+    class Runner(FakeInteractiveRunner):
+        def run(self):
+            self.warm_child = leftover
+            return super().run()
+
+    _fake_runner_session(monkeypatch, sess, [([], False)], runner=Runner)
+    assert leftover.killed
+
+
+def _adopting_runner(adopted, standby):
+    """A fake runner that records what it was handed and warms `standby` on
+    its first run — the flip loop must carry that into the next run."""
+
+    class Runner(FakeInteractiveRunner):
+        def __init__(self, session, sink_factory=None, adopt_child=None):
+            super().__init__(session, sink_factory)
+            adopted.append(adopt_child)
+
+        def run(self):
+            code = super().run()
+            if len(adopted) == 1:
+                self.warm_child = standby
+            return code
+
+    return Runner
+
+
+def test_fresh_standby_is_adopted_on_flip(sess, monkeypatch, capsys):
+    import tandem.warm as warm
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 10)
+    fresh = FakeStandby(side="codex", size=10)
+    adopted = []
+    _fake_runner_session(monkeypatch, sess, [([], True), ([], False)],
+                         runner=_adopting_runner(adopted, fresh))
+    # first run adopts nothing; the post-flip run adopts the fresh standby
+    assert adopted[0] is None
+    assert adopted[1] is fresh
+    assert not fresh.killed
+
+
+def test_adopted_standby_is_not_reused_by_the_flip_back(sess, monkeypatch, capsys):
+    """A consumed standby leaves the carry, so a launch failure that flips
+    back cannot hand the same child to the other side."""
+    import tandem.warm as warm
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 10)
+    fresh = FakeStandby(side="codex", size=10)
+    adopted = []
+
+    class Runner(_adopting_runner(adopted, fresh)):
+        def run(self):
+            if self.session.active == "codex":
+                raise FileNotFoundError("codex: command not found")
+            return super().run()
+
+    _fake_runner_session(monkeypatch, sess, [([], True), ([], False)],
+                         runner=Runner)
+    assert adopted == [None, fresh, None]   # flipped, failed, flipped back cold
+
+
+def test_a_non_tty_run_never_adopts_the_standby(sess, monkeypatch, capsys):
+    """`run_in_pty` ignores a pre-spawned child when stdin is not a terminal,
+    so handing one over would strand a hidden harness: kill it instead."""
+    import tandem.warm as warm
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 10)
+    fresh = FakeStandby(side="codex", size=10)
+    adopted = []
+    _fake_runner_session(monkeypatch, sess, [([], True), ([], False)],
+                         runner=_adopting_runner(adopted, fresh), tty=False)
+    assert adopted == [None, None]
+    assert fresh.killed
