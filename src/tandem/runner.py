@@ -130,6 +130,17 @@ def _key_label(byte: int) -> str:
     return f"0x{byte:02x}"
 
 
+def _stdin_tty() -> bool:
+    """Is stdin a real terminal? The one probe the warm gate reads (ptyrun
+    keeps its own for the pump). A module-level function so tests can flip
+    it: under pytest stdin is never a tty, which would otherwise pin the
+    gate closed and make the config half of it untestable."""
+    try:
+        return os.isatty(sys.stdin.fileno())
+    except (ValueError, OSError, io.UnsupportedOperation):
+        return False
+
+
 def _idle_probe(active, adapter, active_sid, monitor, sentinel):
     """Non-blocking 'is the active side idle right now?' for the warm
     standby. A pending flip counts as idle — that clause is the entire
@@ -499,17 +510,13 @@ class InteractiveRunner:
             # answers, is how codex opts out.
             status_probe=claude_probe if active == "claude" else None,
         )
-        try:
-            warm_tty = os.isatty(sys.stdin.fileno())
-        except (ValueError, OSError, io.UnsupportedOperation):
-            warm_tty = False
         # Fresh per run: start() is not re-entrant, and the idle probe closes
         # over this run's monitor. The non-tty path never flips, so warming
         # there would only ever leak a hidden harness.
         standby = WarmStandby(
             session,
             _idle_probe(active, adapter, active_sid, monitor, sentinel),
-            enabled=frame_cfg.warm and warm_tty,
+            enabled=frame_cfg.warm and _stdin_tty(),
             winsize=lambda: _winsize(sys.stdin.fileno()),
         )
         frame = FrameIO(

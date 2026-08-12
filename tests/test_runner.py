@@ -6,8 +6,19 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from tandem import paths, runner
 from tandem.runner import FlipMonitor, wait_until_safe
+
+
+@pytest.fixture(autouse=True)
+def _warm_gate_closed(monkeypatch):
+    """No test may boot a hidden harness for real. `pytest -s` on a real
+    terminal leaves stdin a tty, which would open the warm gate in every
+    runner test here; pin it shut, and let the two tests that exercise the
+    gate reopen it themselves."""
+    monkeypatch.setattr(runner, "_stdin_tty", lambda: False)
 
 
 class _Sink:
@@ -946,7 +957,7 @@ def test_runner_probe_swallows_raising_session_status(env_factory, monkeypatch):
 # -- the warm standby wiring ----------------------------------------------
 
 
-def test_idle_probe_claude_busy_and_waiting(env_factory):
+def test_idle_probe_claude_busy_and_waiting():
     from tandem.runner import _idle_probe
 
     class FakeMonitor:
@@ -1022,6 +1033,47 @@ def test_runner_hands_standby_over_only_on_flip(env_factory, monkeypatch):
     assert r.warm_child is None
 
 
+def test_runner_hands_the_standby_over_on_a_flip(env_factory, monkeypatch):
+    # The other half of the handover: a flip must keep the warmed child and
+    # publish it, or the whole feature quietly degrades to cold spawns.
+    import tandem.runner as runner_mod
+    env = env_factory(active="claude")
+    sentinel = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-claude.turn"
+    shutdowns = []
+
+    class FakeStandby:
+        def __init__(self, *a, **kw):
+            pass
+
+        def start(self):
+            pass
+
+        def shutdown(self, keep_child):
+            shutdowns.append(keep_child)
+            return "the-child" if keep_child else None
+
+    def fake_run_in_pty(argv, cwd=None, env=None, frame=None, control=None,
+                        child=None):
+        control.attach(_DeadChild())
+        frame.on_flip()               # user pressed the keybind
+        deadline = time.time() + 3
+        while not frame.armed() and time.time() < deadline:
+            time.sleep(0.02)
+        sentinel.touch()              # turn-complete marker: the wait releases
+        deadline = time.time() + 3
+        while frame.armed() and time.time() < deadline:
+            time.sleep(0.02)
+        return 0
+
+    monkeypatch.setattr(runner_mod, "WarmStandby", FakeStandby)
+    monkeypatch.setattr(runner_mod, "run_in_pty", fake_run_in_pty)
+    r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink)
+    r.run()
+    assert r.flip_requested is True
+    assert shutdowns == [True]        # a flip keeps the child alive...
+    assert r.warm_child == "the-child"   # ...and hands it to the next run
+
+
 def test_runner_adopts_a_live_child(env_factory, monkeypatch):
     import tandem.runner as runner_mod
     from tandem.warm import build_launch
@@ -1047,6 +1099,13 @@ def test_runner_adopts_a_live_child(env_factory, monkeypatch):
         seen["child"] = child
         return 0
 
+    def no_rebuild(*a, **kw):
+        # The recipe is bound once, at spawn time: hook_argv_extra re-reads
+        # config per call, so a rebuild here could disagree with the argv the
+        # adopted child is already running under.
+        raise AssertionError("adoption must not rebuild the launch recipe")
+
+    monkeypatch.setattr(runner_mod, "build_launch", no_rebuild)
     monkeypatch.setattr(runner_mod, "run_in_pty", fake_run_in_pty)
     wc = FakeWarmChild()
     r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink,
@@ -1122,18 +1181,18 @@ def test_runner_ignores_a_dead_or_mismatched_adoptee(env_factory, monkeypatch):
 
     monkeypatch.setattr(runner_mod, "run_in_pty", fake_run_in_pty)
     for adoptee in (Adoptee("claude", False), Adoptee("codex", True)):
+        seen.clear()   # or the second iteration could pass on stale evidence
         runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink,
                                      adopt_child=adoptee).run()
         assert seen["child"] is None
         assert not adoptee.released
 
 
-def test_runner_warming_is_off_when_config_says_so(env_factory, monkeypatch):
-    # [frame] warm = false must reach the standby as enabled=False (the tty
-    # gate is already false under pytest, so this pins the config half).
+def _standby_enabled_for(env, monkeypatch):
+    """Run once with a real terminal underneath (the autouse fixture pins
+    `_stdin_tty` shut, so the tty half has to be reopened by hand) and
+    report the `enabled` the runner computed for its standby."""
     import tandem.runner as runner_mod
-    env = env_factory(active="claude")
-    (paths.tandem_home() / "config.toml").write_text('[frame]\nwarm = false\n')
     made = {}
 
     class FakeStandby:
@@ -1147,11 +1206,47 @@ def test_runner_warming_is_off_when_config_says_so(env_factory, monkeypatch):
         def shutdown(self, keep_child):
             return None
 
+    monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: True)
+    monkeypatch.setattr(runner_mod, "WarmStandby", FakeStandby)
+    monkeypatch.setattr(runner_mod, "run_in_pty", lambda *a, **kw: 0)
+    runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink).run()
+    assert callable(made["is_idle"])
+    return made["kw"]["enabled"]
+
+
+def test_runner_warming_follows_the_config_flag(env_factory, monkeypatch):
+    # Both halves of the gate: on a real terminal the default config warms,
+    # and [frame] warm = false is what turns it off. Asserted with the tty
+    # half forced open, or "enabled" would read False either way and the
+    # config could be dropped from the gate unnoticed.
+    env = env_factory(active="claude")
+    assert _standby_enabled_for(env, monkeypatch) is True
+    (paths.tandem_home() / "config.toml").write_text('[frame]\nwarm = false\n')
+    assert _standby_enabled_for(env, monkeypatch) is False
+
+
+def test_runner_never_warms_without_a_tty(env_factory, monkeypatch):
+    # The non-tty path never flips, so a standby there could only ever leak
+    # a hidden harness — config on, gate still shut. (The autouse fixture
+    # supplies the non-tty half.)
+    import tandem.runner as runner_mod
+    env = env_factory(active="claude")
+    made = {}
+
+    class FakeStandby:
+        def __init__(self, session, is_idle, **kw):
+            made["kw"] = kw
+
+        def start(self):
+            pass
+
+        def shutdown(self, keep_child):
+            return None
+
     monkeypatch.setattr(runner_mod, "WarmStandby", FakeStandby)
     monkeypatch.setattr(runner_mod, "run_in_pty", lambda *a, **kw: 0)
     runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink).run()
     assert made["kw"]["enabled"] is False
-    assert callable(made["is_idle"])
 
 
 def test_runner_shuts_the_standby_down_when_the_pty_raises(env_factory,
