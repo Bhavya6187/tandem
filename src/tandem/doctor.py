@@ -229,6 +229,24 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
             " or delete the marker to retry: " + str(bar_marker)
         )
 
+    # Written by the warm standby when it exhausted its spawn retries;
+    # nothing deletes it, so the warning repeats until the user does. The
+    # budget re-arms on the next shadow invalidation, so this is a past
+    # event that may already have recovered — never a present-tense claim.
+    warm_marker = paths.tandem_home() / "tmp" / f"{session.tandem_id}-warm-failed"
+    if warm_marker.exists():
+        try:
+            reason = warm_marker.read_text().strip()
+        except OSError:
+            reason = ""
+        report.warn(
+            "process warmup gave up in a previous session"
+            + (f" ({reason})" if reason else "")
+            + " — flips fall back to a cold start; set [frame] warm = false"
+            " to keep it off, or delete the marker to retry: "
+            + str(warm_marker)
+        )
+
     qdir = paths.quarantine_dir(session.tandem_id)
     qfiles = sorted(qdir.iterdir()) if qdir.is_dir() else []
     if qfiles:

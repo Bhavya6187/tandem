@@ -159,3 +159,21 @@ class TestDoctor:
         env = env_factory()
         report = run_doctor(env.store, env.session)
         assert not any("status bar" in c.message for c in report.checks)
+
+    def test_doctor_reports_warm_failure_marker(self, env_factory):
+        from tandem import paths
+
+        env = env_factory()
+        marker = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-warm-failed"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("spawn failed: FileNotFoundError: codex\n")
+        report = run_doctor(env.store, env.session)
+        joined = "\n".join(c.message for c in report.checks if c.status == "warn")
+        assert "warmup" in joined
+        assert "spawn failed: FileNotFoundError: codex" in joined
+        assert "[frame] warm = false" in joined
+
+    def test_quiet_without_warm_failure_marker(self, env_factory):
+        env = env_factory()
+        report = run_doctor(env.store, env.session)
+        assert not any("warmup" in c.message for c in report.checks)
