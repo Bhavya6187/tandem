@@ -218,6 +218,10 @@ class WarmStandby:
         self._last_size: int | None = None
         self._stable_since: float | None = None
         self._retries = 0
+        self._ensure_refused = False
+        # guards every transition of the `child` slot (and nothing else — the
+        # kill ladder takes seconds and must never run under it)
+        self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name="tandem-warm", daemon=True
@@ -234,7 +238,8 @@ class WarmStandby:
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join(timeout=5)
-        child, self.child = self.child, None
+        with self._lock:
+            child, self.child = self.child, None
         if child is None:
             return None
         if keep_child and child.alive():
@@ -251,21 +256,29 @@ class WarmStandby:
 
     def _tick(self) -> None:
         size = _shadow_size(self.session, self.session.shadow)
-        if self.child is not None:
-            if not self.child.alive():
-                # kill() anyway: the process is gone but its discard reader
-                # still holds the fd (and, via the thread, the child itself)
-                self.child.kill()
-                self.child = None       # boot crash: consumes a retry
-                self._retries += 1
-                self._note_failure("standby exited before attach")
-            elif size != self.child.shadow_size:
-                self.child.kill()       # stale: a turn synced in behind it
-                self.child = None
-                self._retries = 0       # content change = a new idle period
-                self._stable_since = None
-            else:
-                return                  # fresh and waiting: nothing to do
+        doomed: WarmChild | None = None
+        note: str | None = None
+        with self._lock:
+            child = self.child
+            if child is not None:
+                if not child.alive():
+                    # the process is gone, but its discard reader still owns
+                    # the fd and, through the thread, the WarmChild itself
+                    doomed, self.child = child, None   # consumes a retry
+                    self._retries += 1
+                    note = "standby exited before attach"
+                elif size != child.shadow_size:
+                    doomed, self.child = child, None   # a turn synced in
+                    self._invalidated()
+                    self._stable_since = None
+                else:
+                    return                  # fresh and waiting: nothing to do
+        # empty the slot first, kill outside the lock: a shutdown racing us
+        # must never adopt a child that is already going down the ladder
+        if doomed is not None:
+            doomed.kill()
+        if note is not None:
+            self._note_failure(note)
         if not self.is_idle():
             self._stable_since = None
             return
@@ -273,7 +286,8 @@ class WarmStandby:
         if size != self._last_size:
             self._last_size = size
             self._stable_since = now
-            return
+            self._invalidated()     # new content with no child held: also an
+            return                  # invalidation, so the budget re-arms
         if self._stable_since is None:
             self._stable_since = now
             return
@@ -283,9 +297,19 @@ class WarmStandby:
             return                      # gave up until the next invalidation
         self._spawn(size)
 
+    def _invalidated(self) -> None:
+        """A real content change starts a new idle period: the retry budget
+        re-arms (giving up is only ever 'until the next invalidation') and
+        so does the ensure-shadow latch, since the file may exist now."""
+        self._retries = 0
+        self._ensure_refused = False
+
     def _spawn(self, size: int | None) -> None:
         session = self.session
         if size is None:
+            if self._ensure_refused:
+                return   # already asked once and got nothing; asking again
+                         # every poll just churns the state store forever
             session = self.ensure_shadow(session)
             if session is None:
                 self._retries += 1
@@ -296,6 +320,7 @@ class WarmStandby:
             if size is None:
                 # e.g. claude's consumed-then-missing transcript: that must
                 # keep hard-failing at flip time — never boot a blank session
+                self._ensure_refused = True
                 return
         try:
             if self.sync_memory is not None:
@@ -315,12 +340,16 @@ class WarmStandby:
             self._retries += 1
             self._note_failure(f"spawn failed: {type(exc).__name__}: {exc}")
             return
-        if self._stop.is_set():
-            # shutdown raced past its join while we were spawning: nobody
-            # would ever adopt or kill this one, so it dies here
-            child.kill()
-            return
-        self.child = child
+        with self._lock:
+            # shutdown sets _stop before it takes the lock, so one of us wins
+            # cleanly: either it finds this child in the slot and disposes of
+            # it, or we see the flag and kill it ourselves. Checking the flag
+            # and filling the slot must be one step — a shutdown landing
+            # between them would strand a setsid-detached hidden harness.
+            if not self._stop.is_set():
+                self.child = child
+                return
+        child.kill()
 
     def _note_failure(self, reason: str) -> None:
         """Leave the doctor a trail only once the budget is exhausted — a

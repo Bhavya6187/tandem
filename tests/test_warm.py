@@ -394,7 +394,7 @@ def test_disabled_standby_never_starts_its_thread(env_factory):
     assert sb.shutdown(keep_child=True) is None
 
 
-def test_dead_child_is_killed_so_its_reader_lets_go(env_factory):
+def test_dead_child_gets_kill_called(env_factory):
     env = env_factory(active="claude")
     sb, clock, spawned = _standby(env)
     _settle(sb, clock)
@@ -429,12 +429,70 @@ def test_ensure_shadow_default_never_mints_over_a_recorded_codex_id(env_factory)
 def test_spawn_failures_consume_retries_then_marker(env_factory):
     """A spawner that keeps blowing up (bad argv, no pty) must give up on
     the same budget a crash-on-boot child does, not retry every poll."""
+    attempts = []
+
     def boom(recipe, dims, shadow_size):
+        attempts.append(recipe)
         raise OSError("no ptys left")
 
     env = env_factory(active="claude")
     sb, clock, spawned = _standby(env, spawner=boom, max_retries=2)
     _settle(sb, clock, ticks=12)
+    assert len(attempts) == 3    # 1 + 2 retries over 12 ticks, then it stops
     assert sb.child is None
     marker = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-warm-failed"
     assert "spawn failed: OSError: no ptys left" in marker.read_text()
+
+
+def test_build_launch_failures_consume_retries_too(env_factory, monkeypatch):
+    """Recipe building is inside the budget: its sentinel mkdir can fail on a
+    read-only home, and an uncounted failure would retry forever in silence."""
+    attempts = []
+
+    def boom(session, side):
+        attempts.append(side)
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr("tandem.warm.build_launch", boom)
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env, max_retries=2)
+    _settle(sb, clock, ticks=12)
+    assert len(attempts) == 3
+    assert not spawned
+    marker = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-warm-failed"
+    assert "spawn failed: OSError: read-only file system" in marker.read_text()
+
+
+def _burn_the_budget(sb, clock, spawned):
+    for _ in range(3):
+        _settle(sb, clock)
+        spawned[-1]._alive = False    # boot crash
+        sb._tick()
+    _settle(sb, clock, ticks=4)
+
+
+def test_new_content_after_giving_up_resumes_warming(env_factory):
+    """Giving up is only ever 'until the next invalidation': a turn syncing
+    in starts a new idle period, so the retry budget re-arms."""
+    env = env_factory(active="claude")
+    sb, clock, spawned = _standby(env, max_retries=2)
+    _burn_the_budget(sb, clock, spawned)
+    assert len(spawned) == 3
+    with open(env.codex_shadow, "a") as f:
+        f.write("{}\n")              # a turn synced in
+    _settle(sb, clock, ticks=4)
+    assert len(spawned) == 4
+
+
+def test_ensure_shadow_is_not_re_asked_every_poll(env_factory):
+    """The permanent-refuse case (file gone, un-creatable) must latch, not
+    reopen the state store once a second forever."""
+    env = env_factory(active="claude")
+    env.codex_shadow.unlink()
+    calls = []
+    sb, clock, spawned = _standby(
+        env, ensure_shadow=lambda s: calls.append(s.tandem_id) or s
+    )
+    _settle(sb, clock, ticks=20)
+    assert len(calls) == 1
+    assert not spawned
