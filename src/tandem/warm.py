@@ -10,12 +10,16 @@ disagree with what is actually running.
 
 from __future__ import annotations
 
+import os
+import select
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import paths
 from .config import load_harness_args
 from .harness import get_adapter
+from .ptyrun import PtyControl, _is_alive
 from .state import PairedSession
 
 
@@ -55,3 +59,93 @@ def build_launch(session: PairedSession, side: str) -> LaunchRecipe:
         side=side, argv=argv, sentinel=sentinel, hook_extra=hook_extra,
         transcript=transcript, fresh=fresh, cwd=session.cwd,
     )
+
+
+def _shadow_size(session: PairedSession, side: str) -> int | None:
+    """Byte size of `side`'s transcript right now; None when the side has
+    no id or no file yet. The freshness contract's one number: any growth
+    means content synced in behind a standby's back."""
+    sid = getattr(session, f"{side}_session_id")
+    if not sid:
+        return None
+    path = get_adapter(side).transcript_path(session.cwd, sid)
+    if path is None:
+        return None
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+class WarmChild:
+    """One spawned-but-hidden harness process. Makes no decisions; carries
+    the recipe it was launched under, the shadow-size snapshot the
+    freshness gate compares against, and a discard reader that keeps the
+    hidden PTY drained so the child never blocks on a full buffer."""
+
+    def __init__(self, recipe: LaunchRecipe, child, shadow_size: int):
+        self.recipe = recipe
+        self.child = child
+        self.shadow_size = shadow_size
+        self._stop = threading.Event()
+        self._reader = threading.Thread(
+            target=self._discard, name="tandem-warm-read", daemon=True
+        )
+        self._reader.start()
+
+    def _discard(self) -> None:
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select([self.child.fd], [], [], 0.2)
+            except (OSError, ValueError):
+                return   # fd gone: child died or was released oddly
+            if not ready:
+                continue
+            try:
+                if not self.child.read(65536):
+                    return
+            except (EOFError, OSError):
+                return
+
+    def alive(self) -> bool:
+        return _is_alive(self.child)
+
+    def release(self):
+        """Stop and join the discard reader, hand the raw child over.
+        Exactly one reader may own the fd — the pump takes over next."""
+        self._stop.set()
+        self._reader.join(timeout=2)
+        return self.child
+
+    def kill(self) -> None:
+        """Short version of the ladder: soft quit keys first so the CLI
+        cleans its own state (claude removes its session-registry file),
+        then TERM/KILL to the process group."""
+        self._stop.set()
+        self._reader.join(timeout=2)
+        control = PtyControl()
+        control.attach(self.child)
+        control.terminate(
+            get_adapter(self.recipe.side).quit_keystrokes(),
+            soft_timeout=1.5, term_timeout=1.0,
+        )
+
+
+def spawn_hidden(
+    recipe: LaunchRecipe, dims: tuple[int, int], shadow_size: int, *, spawn=None
+) -> WarmChild:
+    """Spawn the recipe on a hidden PTY, one column narrow on purpose: the
+    attach-time setwinsize to true dims is then always a real change, so
+    the kernel delivers SIGWINCH and the TUI repaints itself — the whole
+    handover repaint story."""
+    rows, cols = dims
+    if spawn is None:   # deferred: ptyprocess import stays off the hot path
+        from ptyprocess import PtyProcess
+        spawn = PtyProcess.spawn
+    child = spawn(
+        recipe.argv,
+        cwd=recipe.cwd,
+        env=dict(os.environ),
+        dimensions=(max(1, rows - 1), max(1, cols - 1)),
+    )
+    return WarmChild(recipe, child, shadow_size)
