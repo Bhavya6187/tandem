@@ -256,8 +256,8 @@ class FlipMonitor:
     entirely — see `wait_until_safe`.
 
     `on_flip_decided` fires once, on this thread, in the gap between the
-    decision and the ladder — the runner starts the incoming harness's launch
-    worker there, so its boot overlaps the outgoing one's teardown. It is
+    decision and the ladder — the runner makes a final freshness check on the
+    resident incoming harness there. It is
     called with the flag already set (`flip_requested` is what makes the flip
     inevitable, and a callback must not be able to take it back) and its
     exceptions are swallowed: a failed hook costs a cold flip, never the flip
@@ -447,8 +447,8 @@ class InteractiveRunner:
         # set here too so the attributes exist even if run() raises early
         self._released = False
         self.flip_requested = False
-        # The harness this run fired at its flip decision, surrendered to the
-        # flip loop's carry. Only a flip can fill it: no flip, no fire.
+        # The resident standby this run surrenders to the flip loop's carry.
+        # A normal exit reaps it instead of publishing it here.
         self.warm_child: WarmChild | None = None
         # Formatted, ready-to-print report lines for the session that just
         # ran. `run()` prints them itself on a normal exit; on a flip it does
@@ -532,19 +532,21 @@ class InteractiveRunner:
             # answers, is how codex opts out.
             status_probe=claude_probe if active == "claude" else None,
         )
-        # Fired at most once, on the monitor thread, between the flip
-        # decision and the ladder. It starts a worker and returns immediately,
-        # so a slow fork/exec cannot hold up teardown of the outgoing harness.
+        # Keeps one shadow harness resident. It starts at runner entry and is
+        # refreshed after a tail drain changes the shadow transcript; the flip
+        # monitor calls it once more between the decision and the ladder as a
+        # final freshness check. Spawn and stale-child teardown stay off the
+        # caller, so neither the PTY pump nor transcript tailing blocks on them.
         # The finally below closes the handoff slot after the ladder: a child
         # that has landed by then is adopted, while a worker that lands later
         # sees the closed slot and kills its child instead of stranding it.
-        # The non-tty path never flips, so a spawn there could only ever
-        # leak a hidden harness: the gate is read at fire time, and takes
-        # both the [frame] `warm` flag and a real stdin tty.
-        fired: dict = {"child": None, "closed": False}
+        # The non-tty path cannot adopt a standby, so a spawn there could only
+        # leak a hidden harness. The gate takes both the [frame] `warm` flag
+        # and a real stdin tty.
+        fired: dict = {"child": None, "closed": False, "spawning": False}
         fired_lock = threading.Lock()
 
-        def fire_warm() -> None:
+        def ensure_warm() -> None:
             if not (frame_cfg.warm and _stdin_tty()):
                 return
             shadow = session.shadow
@@ -554,31 +556,67 @@ class InteractiveRunner:
                          # + a cold spawn own that flip; never fresh-mint
             # not `recipe`: that name is taken by the *active* side's launch,
             # which this closure must never rebuild or shadow
-            shadow_recipe = build_launch(session, shadow)
-            dims = _winsize(sys.stdin.fileno())
+            with fired_lock:
+                current = fired["child"]
+                if (
+                    current is not None
+                    and current.alive()
+                    and current.shadow_size == size
+                ):
+                    return
+                if fired["closed"] or fired["spawning"]:
+                    return
+                fired["spawning"] = True
+
+            try:
+                shadow_recipe = build_launch(session, shadow)
+                dims = _winsize(sys.stdin.fileno())
+            except Exception:
+                with fired_lock:
+                    fired["spawning"] = False
+                return   # standby setup must never cost the active harness
 
             def spawn() -> None:
                 try:
                     child = spawn_hidden(shadow_recipe, dims, size)
                 except Exception:
+                    with fired_lock:
+                        fired["spawning"] = False
                     return   # a failed fire means a cold flip
+                displaced = None
                 with fired_lock:
+                    fired["spawning"] = False
                     if not fired["closed"]:
+                        displaced = fired["child"]
                         fired["child"] = child
-                        return
-                try:
-                    child.kill()   # the runner already read the slot and left
-                except Exception:
-                    pass
+                    else:
+                        displaced = child
+                if displaced is not None:
+                    threading.Thread(
+                        target=lambda: _kill_warm(displaced),
+                        name="tandem-warm-replace", daemon=True,
+                    ).start()
+                # The shadow may have grown while this process was booting.
+                # The tail-side refresh saw `spawning` and deliberately did
+                # not start a duplicate worker, so the landing worker owns the
+                # follow-up that closes that race.
+                if _shadow_size(session, shadow) != size:
+                    ensure_warm()
 
             threading.Thread(
                 target=spawn, name="tandem-warm-fire", daemon=True
             ).start()
 
+        def _kill_warm(child: WarmChild) -> None:
+            try:
+                child.kill()
+            except Exception:
+                pass
+
         # The monitor exists before the closure does, so the hook is wired by
         # assignment — `monitor.start()` is called far below, which is what
         # makes a plain write safe: the thread has not run yet.
-        monitor.on_flip_decided = fire_warm
+        monitor.on_flip_decided = ensure_warm
         frame = FrameIO(
             flip_byte=frame_cfg.flip_byte,
             on_flip=monitor.flip_pressed,
@@ -650,7 +688,9 @@ class InteractiveRunner:
                 try:
                     while not stop.is_set():
                         with ops._sub_lock():
-                            loop.drain()
+                            drained = loop.drain()
+                        if drained:
+                            ensure_warm()
                         watcher.wait()
                     # final drain after the CLI exits
                     with ops._sub_lock():
@@ -663,6 +703,7 @@ class InteractiveRunner:
         thread = threading.Thread(target=tail_thread, name="tandem-tail", daemon=True)
         thread.start()
         monitor.start()   # before the try: stop() on an unstarted thread raises
+        ensure_warm()
         try:
             # A release that returns None means the discard reader still owns
             # the fd, so there is nothing safe to hand over: run_in_pty spawns
