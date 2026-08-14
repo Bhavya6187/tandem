@@ -83,12 +83,16 @@ class Env:
         from tandem.compat import COMPAT
         from tandem.harness.claude_code import ClaudeCodeAdapter
         from tandem.harness.codex import CodexAdapter
+        from tandem.harness.opencode import OpencodeAdapter
 
         monkeypatch.setattr(
             ClaudeCodeAdapter, "detect_version", lambda self: COMPAT["claude"].tested
         )
         monkeypatch.setattr(
             CodexAdapter, "detect_version", lambda self: COMPAT["codex"].tested
+        )
+        monkeypatch.setattr(
+            OpencodeAdapter, "detect_version", lambda self: COMPAT["opencode"].tested
         )
         self.cwd = str(tmp_path / "proj")
         Path(self.cwd).mkdir()
