@@ -208,3 +208,15 @@ def test_bare_tandem_offers_plugin_after_pairing(
     # offered exactly once, after pairing but before entering the session
     assert calls == [0]
     assert len(entered) == 1
+
+
+def test_run_on_nonparticipant_is_a_clean_error(homes, ok_versions, monkeypatch):
+    """`run --on` accepts every supported name at the Click layer, but a
+    target outside this session's participants (e.g. opencode in a PR-1
+    build, or any dropped member) must be a normal error — never a
+    get_adapter KeyError traceback."""
+    _mk_session(homes)
+    r = click.testing.CliRunner().invoke(cli.main, ["run", "--on", "opencode", "hi"])
+    assert r.exit_code == 1
+    assert "not a participant" in r.stderr
+    assert r.exception is None or isinstance(r.exception, SystemExit)
