@@ -30,39 +30,89 @@ def _require_session(store: StateStore) -> PairedSession:
         )
         sys.exit(1)
     store.touch_used(session.tandem_id)
-    return session
+    return _narrow_participants(store, session)
 
 
-def _check_versions(warn_only: bool = False) -> dict[str, str | None]:
+def _resolve_participants(warn_only: bool = False) -> tuple[list[str], dict[str, str | None]]:
+    """participants = configured ∩ installed-and-version-supported-and-ready.
+
+    Not-installed is a normal state: silent skip, zero further probes.
+    Installed but unusable (version below floor, runtime not ready) warns
+    and skips — fail closed. Fewer than two usable is an error naming
+    what's missing (warn-only mode reports instead, for status/resume)."""
+    from .config import load_harnesses
+    from .harness import ADAPTERS
+
     versions: dict[str, str | None] = {}
-    for hid in ("claude", "codex"):
+    usable: list[str] = []
+    for hid in load_harnesses():
+        if hid not in ADAPTERS:
+            versions[hid] = None
+            continue   # named in config but no adapter in this build (PR 1
+                       # ships no opencode adapter): same silence as
+                       # not-installed
         adapter = get_adapter(hid)
         v = adapter.detect_version()
         versions[hid] = v
         if v is None:
-            msg = f"{adapter.display_name} ({adapter.binary}) not found on PATH."
-            if warn_only:
-                click.secho(f"warning: {msg}", fg="yellow", err=True)
-            else:
-                click.secho(f"error: {msg}", fg="red", err=True)
-                sys.exit(1)
-        elif not adapter.version_supported(v):
+            continue                      # silent: the invariant
+        if not adapter.version_supported(v):
             tested = compat.COMPAT[hid].tested
             click.secho(
                 f"warning: {adapter.display_name} version {v!r} is outside the "
                 f"range tandem was built against (tested: {tested}). "
                 f"Run `tandem doctor` before trusting sync.",
-                fg="yellow",
-                err=True,
+                fg="yellow", err=True,
             )
-    return versions
+        ok, reason = adapter.runtime_ready()
+        if not ok:
+            click.secho(
+                f"warning: {adapter.display_name} installed but unusable "
+                f"({reason}) — excluded from this session.",
+                fg="yellow", err=True,
+            )
+            continue
+        usable.append(hid)
+    if len(usable) < 2:
+        missing = [h for h in load_harnesses() if h not in usable]
+        msg = (f"tandem needs at least two usable harnesses; usable: "
+               f"{usable or 'none'}, unavailable: {missing}.")
+        if warn_only:
+            click.secho(f"warning: {msg}", fg="yellow", err=True)
+        else:
+            click.secho(f"error: {msg}", fg="red", err=True)
+            sys.exit(1)
+    return usable, versions
+
+
+def _narrow_participants(store: StateStore, session: PairedSession) -> PairedSession:
+    """Resume rule (spec: Participants/Resume): members gone missing are
+    dropped from the session for good; narrowed list persisted; active moves
+    to the first survivor if it was dropped; <2 survivors is fatal. No
+    dynamic rejoin."""
+    usable, _ = _resolve_participants(warn_only=True)
+    survivors = [h for h in session.participants if h in usable]
+    if survivors == session.participants:
+        return session
+    if len(survivors) < 2:
+        click.secho(
+            f"error: session {session.tandem_id} needs two usable harnesses; "
+            f"surviving: {survivors or 'none'}.", fg="red", err=True)
+        sys.exit(1)
+    dropped = [h for h in session.participants if h not in survivors]
+    click.secho(f"note: dropped {', '.join(dropped)} from this session "
+                f"(not usable here); it will not rejoin.", fg="yellow", err=True)
+    store.set_participants(session.tandem_id, survivors)
+    if session.active not in survivors:
+        store.set_active(session.tandem_id, survivors[0])
+    return store.get_session(session.tandem_id)
 
 
 @click.group(invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="tandem")
 @click.option(
     "--active",
-    type=click.Choice(["claude", "codex"]),
+    type=click.Choice(["claude", "codex", "opencode"]),
     default="claude",
     show_default=True,
     help="Initially active harness for the fresh session.",
@@ -78,47 +128,59 @@ def main(ctx: click.Context, active: str) -> None:
         _interactive(active)
 
 
-def _pair_session(store: StateStore, cwd: str, active: str) -> PairedSession:
-    """Create a fresh paired session: state row, seeded shadow transcript,
-    write-ahead cursor, memory sync. Echoes what it did."""
-    shadow = "codex" if active == "claude" else "claude"
-    claude_sid = get_adapter("claude").mint_session_id()
-    codex_sid = None if active == "codex" else get_adapter("codex").mint_session_id()
-    session = store.create_session(cwd, active, ["claude", "codex"],
-                                   {"claude": claude_sid, "codex": codex_sid})
+def _pair_session(store: StateStore, cwd: str, active: str,
+                  participants: list[str]) -> PairedSession:
+    """Create a fresh N-way session: state row, seeded shadow transcripts,
+    memory sync. Echoes what it did."""
+    native: dict[str, str | None] = {}
+    for hid in participants:
+        if hid == "codex" and hid == active:
+            native[hid] = None   # codex mints its own id on first run
+        else:
+            native[hid] = get_adapter(hid).mint_session_id()
+    session = store.create_session(cwd, active, participants, native)
 
-    ctx = SessionContext(
-        tandem_id=session.tandem_id,
-        cwd=cwd,
-        direction=f"{active}->{shadow}",
-        source_session_id=session.native_id(active),
-        target_session_id=session.native_id(shadow),
-    )
     note = SEED_NOTE.format(
         tandem_id=session.tandem_id,
         other=get_adapter(active).display_name,
     )
-    # The shadow transcript is created now so it is resume-ready from the
+    # Shadow transcripts are created now so they are resume-ready from the
     # first turn. The active side's file is created by the harness itself
     # at first launch (claude is pinned via --session-id; codex mints its
-    # own id which tandem captures on first run).
-    shadow_adapter = get_adapter(shadow)
-    shadow_adapter.create_shadow_transcript(
-        cwd, claude_sid if shadow == "claude" else codex_sid, ctx, note
-    )
-    cursor = store.get_cursor(session.tandem_id, active, shadow)
-    cursor.pending["harness_state"] = ctx.harness_state
-    store.save_cursor(cursor)
+    # own id which tandem captures on first run) — except opencode, whose
+    # `opencode -s <id>` requires the session to already exist, so an
+    # opencode participant is pre-created whether or not it is active.
+    for hid in participants:
+        needs_create = (hid != active) or (hid == "opencode")
+        if not needs_create or native[hid] is None:
+            continue
+        if hid == active:
+            # opencode active: its session must exist before `opencode -s`
+            direction = f"{session.next_active(active)}->{hid}"
+        else:
+            direction = f"{active}->{hid}"
+        ctx = SessionContext(
+            tandem_id=session.tandem_id, cwd=cwd, direction=direction,
+            source_session_id=native.get(direction.split("->")[0]),
+            target_session_id=native[hid],
+        )
+        get_adapter(hid).create_shadow_transcript(cwd, native[hid], ctx, note)
+        cursor = store.get_cursor(session.tandem_id, active,
+                                  hid if hid != active else session.next_active(active))
+        cursor.pending["harness_state"] = ctx.harness_state
+        store.save_cursor(cursor)
 
     from .memory_sync import sync_memory_files
 
     mem = sync_memory_files(cwd)
-    click.echo(f"paired {session.tandem_id} ({active} active, {shadow} shadow)")
+    shadows = [h for h in participants if h != active]
+    click.echo(f"paired {session.tandem_id} ({active} active, "
+               f"{', '.join(shadows)} shadow)")
     for a in mem.actions:
         click.echo(f"  memory: {a}")
     for w in mem.warnings:
         click.secho(f"  memory: {w}", fg="yellow", err=True)
-    if active == "codex":
+    if "codex" in participants and native.get("codex") is None:
         click.echo("  note: codex session id will be captured on first run")
     return session
 
@@ -130,11 +192,11 @@ def status() -> None:
 
     with StateStore() as store:
         session = _require_session(store)
-        versions = _check_versions(warn_only=True)
+        versions = _resolve_participants(warn_only=True)[1]
         click.echo(f"tandem session {session.tandem_id}  ({session.cwd})")
         click.echo(f"  created:   {session.created_at}")
         click.echo(f"  last sync: {session.last_sync_at or 'never'}")
-        for hid in ("claude", "codex"):
+        for hid in session.participants:
             adapter = get_adapter(hid)
             sid = session.native_id(hid)
             role = "ACTIVE" if session.active == hid else "shadow"
@@ -145,7 +207,7 @@ def status() -> None:
             click.echo(f"    file:    {path or '(not created yet)'}")
         from . import ops
 
-        for source in ("claude", "codex"):
+        for source in session.participants:
             # any direction shows the same source-side lag unless one target
             # crashed mid-append — good enough for status
             target = session.targets_for(source)[0]
@@ -192,7 +254,6 @@ def resume(tandem_id: str | None) -> None:
     The id is printed when you leave a session, and shown by `tandem status`.
     """
     cwd = _cwd()
-    _check_versions(warn_only=True)
     with StateStore() as store:
         if tandem_id is None:
             session = store.latest_session_for_cwd(cwd)
@@ -216,6 +277,7 @@ def resume(tandem_id: str | None) -> None:
                 )
                 sys.exit(1)
         store.touch_used(session.tandem_id)
+        session = _narrow_participants(store, session)
     sys.exit(_enter_session(session))
 
 
@@ -236,7 +298,7 @@ def _default_sink_factory(store, session, source, target):
 @click.option(
     "--on",
     "target",
-    type=click.Choice(["claude", "codex"]),
+    type=click.Choice(["claude", "codex", "opencode"]),
     required=True,
     help="Harness to route this one prompt to.",
 )
@@ -583,9 +645,13 @@ def plugin_install_cmd() -> None:
 
 def _interactive(active: str) -> None:
     cwd = _cwd()
-    _check_versions()  # hard: pairing needs both binaries on PATH
+    usable, _ = _resolve_participants()
+    if active not in usable:
+        click.secho(f"error: --active {active} is not usable here "
+                    f"(usable: {', '.join(usable)}).", fg="red", err=True)
+        sys.exit(1)
     with StateStore() as store:
-        session = _pair_session(store, cwd, active)
+        session = _pair_session(store, cwd, active, usable)
     from .plugin_setup import offer_install
 
     offer_install()

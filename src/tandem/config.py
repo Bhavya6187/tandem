@@ -125,3 +125,22 @@ def load_frame_config() -> FrameConfig:
         bar=bar if isinstance(bar, bool) else d.bar,
         warm=warm if isinstance(warm, bool) else d.warm,
     )
+
+
+SUPPORTED_HARNESSES = ("claude", "codex", "opencode")
+
+
+def load_harnesses() -> list[str]:
+    """Top-level `harnesses` key: ordered participant intent. Forgiving like
+    every other key — unknown names dropped, duplicates deduped, anything
+    malformed falls back to all supported. Order defines the flip cycle."""
+    raw = _read_config().get("harnesses")
+    if not isinstance(raw, list):
+        return list(SUPPORTED_HARNESSES)
+    seen: set[str] = set()
+    out: list[str] = []
+    for h in raw:
+        if isinstance(h, str) and h in SUPPORTED_HARNESSES and h not in seen:
+            seen.add(h)
+            out.append(h)
+    return out or list(SUPPORTED_HARNESSES)

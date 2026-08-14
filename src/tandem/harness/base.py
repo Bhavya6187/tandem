@@ -29,6 +29,12 @@ class HarnessAdapter(ABC):
     @abstractmethod
     def version_supported(self, version_text: str) -> bool: ...
 
+    def runtime_ready(self) -> tuple[bool, str]:
+        """Beyond version support: is this installed harness actually usable
+        (storage reachable, schema sane)? Returns (ok, reason). Default
+        True — only adapters with external runtime state override."""
+        return True, ""
+
     # -- session files -------------------------------------------------------
 
     @abstractmethod

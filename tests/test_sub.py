@@ -441,8 +441,9 @@ class TestSubCli:
         from tandem import cli
         monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
         monkeypatch.setattr(
-            cli, "_check_versions",
-            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+            cli, "_resolve_participants",
+            lambda warn_only=False: (["claude", "codex"],
+                                     {"claude": "2.1.220", "codex": "0.145.0"}),
         )
         return cli
 
@@ -505,8 +506,9 @@ class TestSubModelHeader:
         from tandem import cli
         monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
         monkeypatch.setattr(
-            cli, "_check_versions",
-            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+            cli, "_resolve_participants",
+            lambda warn_only=False: (["claude", "codex"],
+                                     {"claude": "2.1.220", "codex": "0.145.0"}),
         )
         return cli
 
@@ -895,8 +897,9 @@ class TestDoctorAndStatus:
         env = env_factory(active="claude")
         monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
         monkeypatch.setattr(
-            cli, "_check_versions",
-            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+            cli, "_resolve_participants",
+            lambda warn_only=False: (["claude", "codex"],
+                                     {"claude": "2.1.220", "codex": "0.145.0"}),
         )
         sub_root = paths.tandem_home() / "subagents" / env.session.tandem_id
         (sub_root / "running").mkdir(parents=True)
@@ -919,8 +922,9 @@ class TestDoctorAndStatus:
         env = env_factory(active="claude")
         monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
         monkeypatch.setattr(
-            cli, "_check_versions",
-            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+            cli, "_resolve_participants",
+            lambda warn_only=False: (["claude", "codex"],
+                                     {"claude": "2.1.220", "codex": "0.145.0"}),
         )
         run_dir = (paths.tandem_home() / "subagents" / env.session.tandem_id
                    / "running")
@@ -954,8 +958,9 @@ class TestDoctorAndStatus:
         env = env_factory(active="claude")
         monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
         monkeypatch.setattr(
-            cli, "_check_versions",
-            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+            cli, "_resolve_participants",
+            lambda warn_only=False: (["claude", "codex"],
+                                     {"claude": "2.1.220", "codex": "0.145.0"}),
         )
         run_dir = (paths.tandem_home() / "subagents" / env.session.tandem_id
                    / "running")

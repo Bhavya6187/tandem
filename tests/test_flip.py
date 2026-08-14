@@ -36,8 +36,8 @@ def fake_runner(log, codes=None):
 
 
 def _flipping_switch(monkeypatch):
-    def fake_switch(store, session):
-        new = "codex" if session.active == "claude" else "claude"
+    def fake_switch(store, session, to=None):
+        new = to or session.next_active(session.active)
         store.set_active(session.tandem_id, new)
         return new, [], FakeMem()
 
@@ -119,7 +119,7 @@ def test_flip_failure_exits_with_the_session_intact(sess, capsys, monkeypatch):
     def run_harness(session):
         return 0, True
 
-    def boom(store, session):
+    def boom(store, session, to=None):
         raise RuntimeError("no flip for you")
 
     monkeypatch.setattr(flip.ops, "switch_session", boom)
@@ -179,7 +179,7 @@ def test_flip_back_does_not_run_when_the_switch_itself_fails(sess, capsys, monke
     """`ops.switch_session` raising means roles never moved: there is nothing
     to flip back from."""
 
-    def boom(store, session):
+    def boom(store, session, to=None):
         raise RuntimeError("no flip for you")
 
     monkeypatch.setattr(flip.ops, "switch_session", boom)
@@ -319,7 +319,7 @@ def test_flip_reports_switch_outcome(sess, capsys, monkeypatch):
 
     problems = ["transcript for newly active harness does not exist yet"]
 
-    def fake_switch(store, session):
+    def fake_switch(store, session, to=None):
         store.set_active(session.tandem_id, "codex")
         return "codex", problems, Mem()
 
@@ -565,3 +565,22 @@ def test_a_raising_store_still_reaps_the_leftover_standby(sess, monkeypatch, cap
     assert f"to continue this session: tandem resume {sess.tandem_id}" in (
         capsys.readouterr().out          # the hint still came first
     )
+
+
+def test_switch_ladder_tries_next_unvisited_then_falls_back(tmp_path, monkeypatch):
+    """3-way cycle: codex won't launch -> try opencode; opencode won't
+    launch -> land back on claude (the old active). Never ping-pongs."""
+    from conftest import Env3
+
+    env = Env3(tmp_path, monkeypatch)   # active=claude
+    attempts = []
+
+    def run_harness(session):
+        attempts.append(session.active)
+        raise OSError("won't start")
+
+    from tandem.flip import _switch
+    code, flipped = _switch(env.session.tandem_id, run_harness, 0, carry=None)
+    # ladder: codex (next), opencode (next unvisited), back to claude
+    assert attempts == ["codex", "opencode", "claude"]
+    assert flipped is False

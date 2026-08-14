@@ -199,26 +199,27 @@ def _standby_fresh(standby, new_active: str, session, mem) -> bool:
 
 
 def _switch(
-    tandem_id: str, run_harness, code: int, fall_back: bool = True,
+    tandem_id: str, run_harness, code: int, visited: set[str] | None = None,
     carry: dict | None = None,
 ) -> tuple[int, bool]:
-    """Flip roles and re-enter the newly active harness. Returns the exit
-    code to carry forward (unchanged if the flip itself failed, 1 if the
-    flip worked but the launch did not) and whether the re-entered harness
-    asked for another flip.
+    """Flip to the next harness in cycle order and re-enter it. Returns the
+    exit code to carry forward (unchanged if the flip itself failed, 1 if
+    the flip worked but the launch did not) and whether the re-entered
+    harness asked for another flip.
 
     Two failures, two answers. The switch itself failing means roles never
     moved, so ending the session at the OS shell is the right landing. The
     switch succeeding and the *launch* failing is worse: the active harness
     cannot start (`codex` uninstalled, a bad `[codex] args`), which is
-    precisely the dead end the spec's ladder exists to avoid. So the first
-    rung is to flip straight back and re-enter the harness the user just
-    left — never strand them.
+    precisely the dead end the spec's ladder exists to avoid. So on a launch
+    failure the ladder tries the next unvisited harness in the cycle; when
+    every other participant has refused, it falls back to the harness the
+    user just left — never strand them.
 
-    `fall_back=False` marks that flip-back attempt: one retry, no ping-pong
-    between two harnesses that both refuse to launch. If it also fails, the
-    loop ends with the error shown — and the session itself is never at
-    risk, since `run_session`'s finally always prints the resume hint.
+    `visited` carries the refusals across recursive attempts — the N-ary
+    generalization of the old no-ping-pong rule. The pre-ladder active is
+    never added until it is attempted as the last resort, so at N=2 the
+    sequence is exactly today's: try other → fail → back to old → stop.
 
     `carry` holds the standby the outgoing run warmed, if any. This is where
     it is judged: the roles have just moved, so the side it was warmed for
@@ -238,8 +239,16 @@ def _switch(
             )
             return code, False
         old = session.active
+        visited = visited or set()
+        target = session.next_active(old)
+        while target in visited and target != old:
+            target = session.next_active(target)
+        if target in visited:
+            click.secho("no harness would start — staying where we were.",
+                        fg="red", err=True)
+            return code, False
         try:
-            new_active, problems, mem = ops.switch_session(store, session)
+            new_active, problems, mem = ops.switch_session(store, session, to=target)
         except Exception as exc:
             click.secho(
                 f"switch failed: {type(exc).__name__}: {exc}", fg="red", err=True
@@ -257,14 +266,26 @@ def _switch(
                 carry["standby"] = None
                 _reap(standby, carry)   # off-thread: the flip must not wait
     code, flip, launched = _try_enter(tandem_id, run_harness)
-    if launched or not fall_back:
+    if launched:
         return code, flip
-    click.secho(
-        f"{new_active} would not start — switching back to {old}.",
-        fg="yellow",
-        err=True,
-    )
-    return _switch(tandem_id, run_harness, code, fall_back=False, carry=carry)
+    visited.add(new_active)
+    remaining = [h for h in session.participants
+                 if h not in visited and h != old]
+    if remaining:
+        click.secho(
+            f"{new_active} would not start — trying {remaining[0]}.",
+            fg="yellow", err=True,
+        )
+    elif old not in visited:
+        click.secho(
+            f"{new_active} would not start — switching back to {old}.",
+            fg="yellow", err=True,
+        )
+    else:
+        click.secho("no harness would start — staying where we were.",
+                    fg="red", err=True)
+        return code, False
+    return _switch(tandem_id, run_harness, code, visited=visited, carry=carry)
 
 
 def _try_enter(tandem_id: str, run_harness) -> tuple[int, bool, bool]:
