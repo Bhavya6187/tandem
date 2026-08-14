@@ -69,11 +69,6 @@ class PairedSession:
         i = self.participants.index(current)
         return self.participants[(i + 1) % len(self.participants)]
 
-    @property
-    def shadow(self) -> str:
-        # transitional N=2 helper; deleted in the fan-out task
-        return self.targets_for(self.active)[0]
-
 
 @dataclass
 class SyncCursor:

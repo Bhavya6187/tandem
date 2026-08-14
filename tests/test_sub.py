@@ -18,7 +18,7 @@ from conftest import claude_user, write_line
 class TestForkShadow:
     def test_fork_copies_shadow_with_new_identity(self, env_factory):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         write_line(env.claude_shadow, claude_user("context before fork"))
 
         fork_id, fork_path = ops.fork_shadow(env.store, env.session)
@@ -40,13 +40,13 @@ class TestForkShadow:
         from tandem.doctor import validate_transcript
 
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         fork_id, fork_path = ops.fork_shadow(env.store, env.session)
         assert validate_transcript("codex", fork_path, fork_id) == []
 
     def test_fork_leaves_shadow_and_cursors_alone(self, env_factory):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         before_bytes = env.codex_shadow.read_bytes()
         before_cursor = env.store.get_cursor(env.session.tandem_id, "codex", "claude")
 
@@ -62,7 +62,7 @@ class TestForkShadow:
         fresh mtime. If rollout discovery returned it, a concurrent fresh-codex
         launch would bind the pair's codex id to the subagent's throwaway."""
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         started = time.time()
         _, fork_path = ops.fork_shadow(env.store, env.session)
 
@@ -183,7 +183,7 @@ class TestRunSub:
     def test_full_context_brief_also_goes_over_stdin(self, env_factory,
                                                      monkeypatch):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         calls = {}
         monkeypatch.setattr(
             ops, "_run",
@@ -216,7 +216,7 @@ class TestRunSub:
     def test_full_context_forks_resumes_and_deletes(self, env_factory,
                                                     monkeypatch):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         calls = {}
         monkeypatch.setattr(
             ops, "_run",
@@ -234,7 +234,7 @@ class TestRunSub:
 
     def test_full_context_keep_forks_retains(self, env_factory, monkeypatch):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         monkeypatch.setattr(ops, "_run", lambda *a, **kw: _R(0))
         ops.run_sub(env.store, env.session, "deep task", context="full",
                     keep_forks=True)
@@ -1175,7 +1175,7 @@ class TestBlockedWriteFooter:
         are not this worker's doing, and reporting them sends the
         orchestrator retrying a write this run never attempted."""
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         write_line(env.codex_shadow, {
             "timestamp": "t", "type": "event_msg",
             "payload": {"type": "patch_apply_end", "stdout": "",
@@ -1252,7 +1252,7 @@ class TestBlockedWriteFooter:
         """Same real shape, but inherited by a --context full fork from an
         earlier interactive turn: not this worker's rejection."""
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         for e in self._rejection_pair():
             write_line(env.codex_shadow, e)
 

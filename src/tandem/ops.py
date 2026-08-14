@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import paths
-from .harness import get_adapter, other
+from .harness import get_adapter
 from .runner import TailLoop, await_codex_rollout
 from .state import PairedSession, StateStore
 from .sync import SyncEngine, SyncSetupError
@@ -46,33 +46,37 @@ def drain_source(
     store: StateStore, session: PairedSession, source: str,
     *, flush_dangling: bool = False,
 ) -> int:
-    """Translate any unsynced tail of `source`'s file into the other file.
-    Pure local file I/O. Returns lines consumed. With flush_dangling=True,
-    close any still-unpaired tool calls with placeholder results afterwards
-    (required when the source is being handed off: both replay APIs reject
-    a dangling call)."""
+    """Translate any unsynced tail of `source` into EVERY other participant.
+    One engine+loop per (source, target) direction; per-direction cursors
+    keep progress independent. Returns total lines consumed across targets.
+    With flush_dangling=True, close any still-unpaired tool calls with
+    placeholder results afterwards (required when the source is being handed
+    off: both replay APIs reject a dangling call)."""
     transcript = source_transcript(session, source)
     if transcript is None:
         return 0
-    engine = SyncEngine(store, session, source)
-    loop = TailLoop(store, session, source, transcript, engine)
     total = 0
-    while True:
-        n = loop.drain()
-        total += n
-        if n == 0:
-            break
-    if loop.errors:
-        raise SyncSetupError("; ".join(loop.errors))
-    if flush_dangling:
-        engine.flush_dangling(loop.ctx, loop.cursor)
+    for target in session.targets_for(source):
+        engine = SyncEngine(store, session, source, target)
+        loop = TailLoop(store, session, source, target, transcript, engine)
+        while True:
+            n = loop.drain()
+            total += n
+            if n == 0:
+                break
+        if loop.errors:
+            raise SyncSetupError("; ".join(loop.errors))
+        if flush_dangling:
+            engine.flush_dangling(loop.ctx, loop.cursor)
     return total
 
 
-def fast_forward(store: StateStore, session: PairedSession, source: str) -> None:
-    """Mark everything currently in `source`'s file as already-synced."""
+def fast_forward(store: StateStore, session: PairedSession, source: str,
+                 target: str) -> None:
+    """Mark everything currently in `source`'s store as already-synced for
+    the (source -> target) direction."""
     transcript = source_transcript(session, source)
-    cursor = store.get_cursor(session.tandem_id, source, other(source))
+    cursor = store.get_cursor(session.tandem_id, source, target)
     if transcript is None:
         cursor.byte_offset = 0
         cursor.line_index = 0
@@ -84,11 +88,20 @@ def fast_forward(store: StateStore, session: PairedSession, source: str) -> None
     store.save_cursor(cursor)
 
 
-def unsynced_lines(session: PairedSession, store: StateStore, source: str) -> int:
+def fast_forward_all(store: StateStore, session: PairedSession, source: str) -> None:
+    """Every outgoing direction of `source` — the flip's anti-echo step.
+    Only runtime-participant directions exist; cursors toward a dropped
+    member are never created, advanced, or inspected."""
+    for target in session.targets_for(source):
+        fast_forward(store, session, source, target)
+
+
+def unsynced_lines(session: PairedSession, store: StateStore, source: str,
+                   target: str) -> int:
     transcript = source_transcript(session, source)
     if transcript is None:
         return 0
-    cursor = store.get_cursor(session.tandem_id, source, other(source))
+    cursor = store.get_cursor(session.tandem_id, source, target)
     try:
         data = transcript.read_bytes()
     except OSError:
@@ -98,13 +111,19 @@ def unsynced_lines(session: PairedSession, store: StateStore, source: str) -> in
     return data[cursor.byte_offset :].count(b"\n")
 
 
-def switch_session(store: StateStore, session: PairedSession):
-    """Flip active/shadow. Returns (new_active, problems-with-new-active-file,
-    memory-sync report). Instant: catch-up drain of the old source + cursor
-    fast-forward, no bulk re-conversion."""
+def switch_session(store: StateStore, session: PairedSession,
+                   to: str | None = None):
+    """Flip active role to `to` (default: next in cycle). Drains the old
+    active into every target, fast-forwards ALL outgoing directions of the
+    new active (anti-echo), then records the switch. Returns (new_active,
+    problems-with-new-active-file, memory-sync report). Instant: catch-up
+    drain of the old source + cursor fast-forward, no bulk re-conversion."""
     from .doctor import validate_transcript
 
-    old_active, new_active = session.active, session.shadow
+    old_active = session.active
+    new_active = to or session.next_active(old_active)
+    if new_active not in session.participants:
+        raise SyncSetupError(f"{new_active} is not a participant")
 
     # If codex never ran (id pending), its shadow file does not exist yet;
     # create it now so the flip has something to resume.
@@ -122,13 +141,15 @@ def switch_session(store: StateStore, session: PairedSession):
         expected = get_adapter("claude").expected_transcript_path(
             session.cwd, session.native_id("claude")
         )
-        never_ran = store.get_cursor(session.tandem_id, "claude",
-                                     other("claude")).byte_offset == 0
+        never_ran = all(
+            store.get_cursor(session.tandem_id, "claude", t).byte_offset == 0
+            for t in session.targets_for("claude")
+        )
         if not expected.exists() and never_ran:
             _create_claude_shadow_late(store, session)
 
     drain_source(store, session, old_active, flush_dangling=True)
-    fast_forward(store, session, new_active)
+    fast_forward_all(store, session, new_active)
     store.set_active(session.tandem_id, new_active)
 
     from .memory_sync import sync_memory_files
@@ -154,7 +175,9 @@ def _create_claude_shadow_late(store: StateStore, session: PairedSession) -> Non
     from .runner import ctx_from_cursor
 
     adapter = get_adapter("claude")
-    cursor = store.get_cursor(session.tandem_id, session.active, session.shadow)
+    # only ever called with new_active == "claude": the ctx belongs to the
+    # (active -> claude) direction
+    cursor = store.get_cursor(session.tandem_id, session.active, "claude")
     ctx = ctx_from_cursor(session, cursor)
     # Any leaf uuid the cursor still holds points into the missing file;
     # the seed is the new file's root, so it must not chain onto it.
@@ -175,7 +198,8 @@ def _create_codex_shadow_late(store: StateStore, session: PairedSession) -> None
 
     adapter = get_adapter("codex")
     sid = adapter.mint_session_id()
-    cursor = store.get_cursor(session.tandem_id, session.active, session.shadow)
+    # only ever called with new_active == "codex": the (active -> codex) ctx
+    cursor = store.get_cursor(session.tandem_id, session.active, "codex")
     ctx = ctx_from_cursor(session, cursor)
     ctx.target_session_id = sid
     note = SEED_NOTE.format(
@@ -199,7 +223,7 @@ def run_oneoff(
     # active side there is nothing to fast-forward — its cursor is live.)
     drain_source(store, session, session.active, flush_dangling=True)
     if target != session.active and sid and source_transcript(session, target) is not None:
-        fast_forward(store, session, target)
+        fast_forward_all(store, session, target)
 
     started = time.time()
     if target == "codex" and not sid:
@@ -221,23 +245,33 @@ def run_oneoff(
                 fast_forward_to_zero.line_index = 0
                 store.save_cursor(fast_forward_to_zero)
 
-    # Echo suppression (see the module docstring): this drain appends
-    # tandem's translation of the target's turn to the OTHER harness's file.
-    # Those appends are by construction already represented in the target's
-    # file, so the echo side's cursor has to move past them — otherwise its
-    # next drain translates them straight back, duplicating call ids and text.
-    echo_side = other(target)
-    echo_pre_size = _file_size(source_transcript(session, echo_side))
-    echo_pre_offset = store.get_cursor(session.tandem_id, echo_side, target).byte_offset
+    # Echo suppression per direction (see the module docstring): the drain
+    # below appends tandem's translation of the target's turn into every
+    # other participant's file. Those appends are by construction already
+    # represented in the target's file, so each recipient that was fully
+    # synced before the drain fast-forwards its own outgoing cursors past
+    # the copy — otherwise its next drain translates them straight back,
+    # duplicating call ids and text.
+    echo_pre: dict[str, tuple[int | None, dict[str, int]]] = {}
+    for side in session.targets_for(target):
+        size = _file_size(source_transcript(session, side))
+        offsets = {
+            t: store.get_cursor(session.tandem_id, side, t).byte_offset
+            for t in session.targets_for(side)
+        }
+        echo_pre[side] = (size, offsets)
 
     drain_source(store, session, target, flush_dangling=True)
 
-    # Only when the echo side was fully synced before the drain is everything
+    # Only when a recipient was fully synced before the drain is everything
     # now in its file known to be ours. If it had an unsynced tail (a
-    # concurrent writer), fast-forwarding would swallow a live turn: leave the
-    # cursor alone and let the normal drain pick both up.
-    if echo_pre_size is not None and echo_pre_offset == echo_pre_size:
-        fast_forward(store, session, echo_side)
+    # concurrent writer), fast-forwarding would swallow a live turn: leave
+    # its cursors alone and let the normal drain pick both up.
+    for side, (pre_size, offsets) in echo_pre.items():
+        if pre_size is None:
+            continue
+        if all(off == pre_size for off in offsets.values()):
+            fast_forward_all(store, session, side)
     return code
 
 

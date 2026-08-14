@@ -148,7 +148,7 @@ class DoctorReport:
 
 def run_doctor(store, session, live: bool = False) -> DoctorReport:
     from . import compat, ops, paths
-    from .harness import get_adapter, other
+    from .harness import get_adapter
 
     report = DoctorReport()
 
@@ -201,7 +201,9 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
             report.ok(f"{hid}: transcript resumable by structure ({path.name})")
 
     for source in ("claude", "codex"):
-        cursor = store.get_cursor(session.tandem_id, source, other(source))
+        # any direction shows the same source-side lag — good enough here
+        target = session.targets_for(source)[0]
+        cursor = store.get_cursor(session.tandem_id, source, target)
         if cursor.pending.get("intent"):
             report.warn(
                 f"sync from {source}: unresolved write intent (crash during "
@@ -212,7 +214,7 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
                 f"sync from {source}: {cursor.failed_turns} turn(s) fell back "
                 f"to placeholders"
             )
-        behind = ops.unsynced_lines(session, store, source)
+        behind = ops.unsynced_lines(session, store, source, target)
         if behind and source == session.active:
             report.warn(
                 f"sync from {source}: {behind} line(s) awaiting translation "

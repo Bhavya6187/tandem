@@ -110,7 +110,7 @@ class TestTailLoop:
                                            ["claude", "codex"],
                                            {"claude": "s1", "codex": "x1"})
             sink = CollectSink()
-            loop = TailLoop(store, session, "claude", transcript, sink)
+            loop = TailLoop(store, session, "claude", "codex", transcript, sink)
             assert loop.drain() == 0
 
             write_line(transcript, claude_user("hello there"))
@@ -124,7 +124,7 @@ class TestTailLoop:
             session = store.latest_session_for_cwd(str(tmp_path))
             write_line(transcript, claude_user("second prompt"))
             sink2 = CollectSink()
-            loop2 = TailLoop(store, session, "claude", transcript, sink2)
+            loop2 = TailLoop(store, session, "claude", "codex", transcript, sink2)
             assert loop2.drain() == 1
             assert sink2.events[0].kind == "user_message"
             assert sink2.events[0].text == "second prompt"
@@ -141,7 +141,7 @@ class TestTailLoop:
                                            ["claude", "codex"],
                                            {"claude": "s1", "codex": "x1"})
             sink = CollectSink()
-            loop = TailLoop(store, session, "claude", transcript, sink)
+            loop = TailLoop(store, session, "claude", "codex", transcript, sink)
             with open(transcript, "a") as f:
                 f.write(json.dumps(claude_user("full")) + "\n")
                 f.write('{"type": "user", "mess')  # torn write

@@ -13,7 +13,7 @@ import click
 from . import __version__, compat, paths
 from .constants import SEED_NOTE
 from .events import SessionContext
-from .harness import get_adapter, other
+from .harness import get_adapter
 from .state import PairedSession, StateStore
 
 
@@ -81,7 +81,7 @@ def main(ctx: click.Context, active: str) -> None:
 def _pair_session(store: StateStore, cwd: str, active: str) -> PairedSession:
     """Create a fresh paired session: state row, seeded shadow transcript,
     write-ahead cursor, memory sync. Echoes what it did."""
-    shadow = other(active)
+    shadow = "codex" if active == "claude" else "claude"
     claude_sid = get_adapter("claude").mint_session_id()
     codex_sid = None if active == "codex" else get_adapter("codex").mint_session_id()
     session = store.create_session(cwd, active, ["claude", "codex"],
@@ -146,8 +146,11 @@ def status() -> None:
         from . import ops
 
         for source in ("claude", "codex"):
-            cursor = store.get_cursor(session.tandem_id, source, other(source))
-            behind = ops.unsynced_lines(session, store, source)
+            # any direction shows the same source-side lag unless one target
+            # crashed mid-append — good enough for status
+            target = session.targets_for(source)[0]
+            cursor = store.get_cursor(session.tandem_id, source, target)
+            behind = ops.unsynced_lines(session, store, source, target)
             if cursor.updated_at or cursor.failed_turns or behind:
                 line = (
                     f"  sync from {source}: line {cursor.line_index}, "

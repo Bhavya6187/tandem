@@ -27,7 +27,7 @@ from .events import (
     ToolResult,
     UserMessage,
 )
-from .harness import get_adapter, other
+from .harness import get_adapter
 from .summarize import summarize_orphan_result
 
 @dataclass
@@ -93,7 +93,7 @@ class ReferenceConverter:
                     # channel, not a ToolCall field (which forbids extras)
                     stored.pop("_structured", None)
                     call = ToolCall.model_validate(stored)
-                    out.extend(toolmap.map_pair(call, ev, other(source_id)))
+                    out.extend(toolmap.map_pair(call, ev, ctx.target_id))
                 else:
                     # no stashed call to pair with, so a native tool_result
                     # would dangle and break resume: prose instead

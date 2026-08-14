@@ -134,16 +134,97 @@ class Env:
         self.session = self.store.get_session(self.session.tandem_id)
         return self.session
 
-    def loop(self, source="claude", transcript=None):
+    def loop(self, source="claude", transcript=None, target=None):
         from tandem.runner import TailLoop
         from tandem.sync import SyncEngine
 
-        engine = SyncEngine(self.store, self.session, source)
+        target = target or self.session.targets_for(source)[0]
+        engine = SyncEngine(self.store, self.session, source, target)
         return (
-            TailLoop(self.store, self.session, source,
+            TailLoop(self.store, self.session, source, target,
                      transcript or self.source_file, engine),
             engine,
         )
+
+
+class FakeOpencodeAdapter:
+    """Minimal file-backed stand-in registered as 'opencode' for core tests.
+    Replaced by the real adapter's tests in Phase 2; core tests keep using
+    the fake so they stay hermetic."""
+    id = "opencode"
+    display_name = "opencode"
+    binary = "opencode"
+
+    def __init__(self, root: Path):
+        self.root = root
+
+    def transcript_path(self, cwd, session_id):
+        p = self.root / f"{session_id}.jsonl"
+        return p if p.exists() else None
+
+    def mint_session_id(self):
+        return "ses_fake000000000000000000000"
+
+    def create_shadow_transcript(self, cwd, session_id, ctx, note):
+        p = self.root / f"{session_id}.jsonl"
+        write_line(p, {"type": "note", "text": note})
+        return p
+
+    def parse_entry(self, raw, ctx):
+        from tandem.events import SystemEvent
+        return [SystemEvent(source="opencode", subtype="fake")]
+
+    def render_events(self, events, ctx):
+        return [{"type": e.kind, "text": getattr(e, "text", "")} for e in events]
+
+    def render_placeholder(self, text, ctx):
+        return [{"type": "note", "text": text}]
+
+    def detect_version(self):
+        return "1.18.15"
+
+    def version_supported(self, v):
+        return True
+
+    def interactive_argv(self, session_id, fresh):
+        return ["opencode", "-s", session_id]
+
+    def oneoff_argv(self, session_id, prompt):
+        return ["opencode", "run", "-s", session_id, prompt]
+
+    def hook_argv_extra(self, sentinel):
+        return []
+
+    def quit_keystrokes(self):
+        return []
+
+
+class Env3(Env):
+    """Env plus a third 'opencode' participant backed by FakeOpencodeAdapter."""
+
+    def __init__(self, tmp_path, monkeypatch, active="claude"):
+        from tandem import harness
+
+        fake = FakeOpencodeAdapter(tmp_path / "oc")
+        (tmp_path / "oc").mkdir()
+        monkeypatch.setitem(harness.ADAPTERS, "opencode", fake)
+        super().__init__(tmp_path, monkeypatch, active=active)
+        # rebuild the session as a 3-way (Env made a 2-way)
+        oc_sid = fake.mint_session_id()
+        self.session = self.store.create_session(
+            self.cwd, active, ["claude", "codex", "opencode"],
+            {"claude": self.session.native_id("claude"),
+             "codex": self.session.native_id("codex"),
+             "opencode": oc_sid},
+        )
+        ctx = SessionContext(tandem_id=self.session.tandem_id, cwd=self.cwd,
+                             direction=f"{active}->opencode",
+                             target_session_id=oc_sid)
+        self.oc_shadow = fake.create_shadow_transcript(self.cwd, oc_sid, ctx,
+                                                       "[tandem] seed")
+
+    def opencode_texts(self):
+        return [e.get("text", "") for e in read_jsonl(self.oc_shadow)]
 
 
 @pytest.fixture(autouse=True)

@@ -21,7 +21,7 @@ from typing import Callable, Protocol
 from . import paths
 from .config import load_frame_config
 from .events import SessionContext
-from .harness import get_adapter, other
+from .harness import get_adapter
 from .ptyrun import FrameIO, PtyControl, _winsize, run_in_pty
 from .state import PairedSession, StateStore, SyncCursor
 from .tailer import JsonlTailer, TailedLine, TranscriptTruncated, TranscriptWatcher
@@ -393,14 +393,16 @@ class TailLoop:
         store: StateStore,
         session: PairedSession,
         source: str,
+        target: str,
         transcript: Path,
         sink: EventSink,
     ):
         self.store = store
         self.session = session
         self.source = source
+        self.target = target
         self.sink = sink
-        self.cursor = store.get_cursor(session.tandem_id, source, other(source))
+        self.cursor = store.get_cursor(session.tandem_id, source, target)
         self.ctx = ctx_from_cursor(session, self.cursor)
         self.tailer = JsonlTailer(
             transcript, start_offset=self.cursor.byte_offset,
@@ -589,7 +591,7 @@ class InteractiveRunner:
         def ensure_warm() -> None:
             if not (frame_cfg.warm and _stdin_tty()):
                 return
-            shadow = session.shadow
+            shadow = session.next_active(session.active)
             size = _shadow_size(session, shadow)
             if size is None:
                 return   # no shadow file yet: switch_session's late-create
@@ -668,7 +670,7 @@ class InteractiveRunner:
             armed=monitor.armed,
             bar=frame_cfg.bar,
             active=active,
-            other=session.shadow,
+            other=session.next_active(session.active),
             key_label=_key_label(frame_cfg.flip_byte),
         )
         self.flip_requested = False
@@ -720,7 +722,10 @@ class InteractiveRunner:
                 watcher.watch(path)
                 watcher.watch(sentinel)
                 watcher.start()
-                loop = TailLoop(store, current, active, path, sink)
+                # transitional single-direction loop; Task 6 fans out one
+                # TailLoop per (active, target) direction
+                loop = TailLoop(store, current, active,
+                                current.targets_for(active)[0], path, sink)
                 # `tandem sub --context full` drains this same cursor row from
                 # a separate process, holding `ops._sub_lock()` across its
                 # drain-then-fork. Two concurrent drains of one cursor
