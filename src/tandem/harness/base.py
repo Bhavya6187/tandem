@@ -38,6 +38,7 @@ class HarnessAdapter(ABC):
     id: str          # 'claude' | 'codex'
     display_name: str
     binary: str      # executable name on PATH
+    install_hint: str  # one-line install command, shown when the CLI is absent
 
     # -- environment ---------------------------------------------------------
 

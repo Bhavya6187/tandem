@@ -62,9 +62,31 @@ def test_active_codex_flips_roles(homes, ok_versions, entered):
     assert "codex active, claude shadow" in r.output
 
 
+def test_bare_tandem_defaults_to_first_usable(homes, entered, monkeypatch):
+    """No --active given: drop into the first usable harness in configured
+    order rather than assuming claude is installed."""
+    monkeypatch.setattr(
+        cli, "_resolve_participants",
+        lambda warn_only=False: (["codex", "claude"],
+                                 {"claude": "2.1.220", "codex": "0.145.0"}),
+    )
+    r = click.testing.CliRunner().invoke(cli.main, [])
+    assert r.exit_code == 0
+    assert entered[0].active == "codex"
+    assert "codex active, claude shadow" in r.output
+
+
+def test_explicit_active_not_usable_still_errors(homes, ok_versions, entered):
+    r = click.testing.CliRunner().invoke(cli.main, ["--active", "opencode"])
+    assert r.exit_code == 1
+    assert "not usable" in r.stderr
+    assert entered == []
+
+
 class _NoBin:
     display_name = "Claude Code"
     binary = "claude"
+    install_hint = "npm install -g @anthropic-ai/claude-code"
 
     def detect_version(self):
         return None

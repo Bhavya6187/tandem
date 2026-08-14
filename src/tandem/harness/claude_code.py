@@ -78,6 +78,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
     id = "claude"
     display_name = "Claude Code"
     binary = "claude"
+    install_hint = "npm install -g @anthropic-ai/claude-code"
 
     # -- environment ---------------------------------------------------------
 

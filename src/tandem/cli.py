@@ -97,6 +97,14 @@ def _resolve_participants(warn_only: bool = False) -> tuple[list[str], dict[str,
             click.secho(f"warning: {msg}", fg="yellow", err=True)
         else:
             click.secho(f"error: {msg}", fg="red", err=True)
+            # Absent CLIs get an install line; installed-but-unusable ones
+            # already explained themselves in the warnings above.
+            for hid in missing:
+                if hid in ADAPTERS and versions.get(hid) is None:
+                    adapter = get_adapter(hid)
+                    click.echo(
+                        f"  install {adapter.display_name}: "
+                        f"{adapter.install_hint}", err=True)
             sys.exit(1)
     return usable, versions
 
@@ -129,9 +137,9 @@ def _narrow_participants(store: StateStore, session: PairedSession) -> PairedSes
 @click.option(
     "--active",
     type=click.Choice(["claude", "codex", "opencode"]),
-    default="claude",
-    show_default=True,
-    help="Initially active harness for the fresh session.",
+    default=None,
+    help="Initially active harness for the fresh session "
+         "[default: first usable harness]",
 )
 @click.pass_context
 def main(ctx: click.Context, active: str) -> None:
@@ -668,10 +676,14 @@ def plugin_install_cmd() -> None:
     sys.exit(0 if install_plugin() else 1)
 
 
-def _interactive(active: str) -> None:
+def _interactive(active: str | None) -> None:
     cwd = _cwd()
     usable, _ = _resolve_participants()
-    if active not in usable:
+    if active is None:
+        # No preference stated: first usable in configured order, so claude
+        # users see no change and a claude-less machine still just works.
+        active = usable[0]
+    elif active not in usable:
         click.secho(f"error: --active {active} is not usable here "
                     f"(usable: {', '.join(usable)}).", fg="red", err=True)
         sys.exit(1)
