@@ -205,11 +205,21 @@ class OpencodeAdapter(HarnessAdapter):
             with connect(db) as conn:
                 names = {r[0] for r in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'")}
+                missing = {"session", "message", "part"} - names
+                if missing:
+                    return False, f"expected table(s) missing: {sorted(missing)}"
+                mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+                if str(mode).lower() != "wal":
+                    return False, f"journal_mode is {mode!r}, expected wal"
+                # sync writes rows directly; a read-only DB must fail closed
+                # here, not one append at a time later
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("ROLLBACK")
+                except sqlite3.OperationalError as exc:
+                    return False, f"database not writable: {exc}"
         except sqlite3.Error as exc:
             return False, f"database unreadable: {exc}"
-        missing = {"session", "message", "part"} - names
-        if missing:
-            return False, f"expected table(s) missing: {sorted(missing)}"
         return True, ""
 
     def mint_session_id(self) -> str:
@@ -379,6 +389,36 @@ class OpencodeAdapter(HarnessAdapter):
             return None
         return db if row is not None else None
 
+    def prepare_shadow(self, ref, ctx) -> None:
+        """Re-anchor the renderer's turn state to the rows actually in the
+        DB. Crash-skip replay re-renders a unit for its ctx side effects,
+        minting fresh ids the skipped append never inserted; without this
+        the next unit would chain onto a phantom parent (an FK failure
+        under foreign_keys=ON)."""
+        sid = ctx.target_session_id
+        if not sid:
+            return
+        try:
+            with connect(ref) as conn:
+                row = conn.execute(
+                    "SELECT id, data FROM message WHERE session_id = ?"
+                    " ORDER BY time_created DESC, id DESC LIMIT 1",
+                    (sid,)).fetchone()
+        except sqlite3.Error:
+            return   # unreadable store: leave state; the append fails loudly
+        st = ctx.state_for("opencode")
+        if row is None:
+            st["turn_user_id"] = None
+            st["assistant_id"] = None
+            return
+        data = json.loads(row["data"])
+        if data.get("role") == "assistant":
+            st["assistant_id"] = row["id"]
+            st["turn_user_id"] = data.get("parentID")
+        else:
+            st["turn_user_id"] = row["id"]
+            st["assistant_id"] = None
+
     # -- rendering (shadow append) -------------------------------------------
 
     def _message_entry(self, sid: str, msg_id: str, data: dict, ms: int) -> dict:
@@ -412,6 +452,13 @@ class OpencodeAdapter(HarnessAdapter):
                         if e["data"].get("modelID") == SENTINEL_MODEL:
                             e["data"]["modelID"] = model
                         break
+                else:
+                    # the row landed in an earlier synced unit: upgrade it in
+                    # place (strictly sentinel -> real, tandem rows only, so
+                    # replay is idempotent and native rows are untouchable)
+                    out.append({"table": "message_model",
+                                "id": st["assistant_id"], "session_id": sid,
+                                "time": ms, "data": {"modelID": model}})
             return st["assistant_id"]
         if not st.get("turn_user_id"):
             # assistant content with no turn open (first sync after seed):
@@ -522,7 +569,11 @@ class OpencodeAdapter(HarnessAdapter):
             try:
                 conn.execute("BEGIN IMMEDIATE")
             except sqlite3.OperationalError as exc:
-                raise ShadowBusy(str(exc)) from exc
+                # only contention is retryable; a readonly/corrupt store must
+                # surface, not spin as ShadowBusy forever
+                if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                    raise ShadowBusy(str(exc)) from exc
+                raise
             for e in entries:
                 if e["table"] == "message":
                     conn.execute(
@@ -531,6 +582,14 @@ class OpencodeAdapter(HarnessAdapter):
                         " VALUES (?, ?, ?, ?, ?)",
                         (e["id"], e["session_id"], e["time"], e["time"],
                          json.dumps(e["data"])))
+                elif e["table"] == "message_model":
+                    conn.execute(
+                        "UPDATE message SET data = json_set(data,"
+                        " '$.modelID', ?) WHERE id = ?"
+                        " AND json_extract(data, '$.providerID') = ?"
+                        " AND json_extract(data, '$.modelID') = ?",
+                        (e["data"]["modelID"], e["id"],
+                         SENTINEL_PROVIDER, SENTINEL_MODEL))
                 else:
                     conn.execute(
                         "INSERT OR IGNORE INTO part"
@@ -548,12 +607,14 @@ class OpencodeAdapter(HarnessAdapter):
         return {"ids": [(e["table"], e["id"]) for e in entries]}
 
     def intent_landed(self, ref: Path, intent: dict) -> bool:
+        # anchor on the first INSERT op: update ops (message_model) target
+        # rows that pre-exist the append, so their presence proves nothing
         ids = intent.get("ids") or []
-        if not ids:
+        first_insert = next(
+            ((t, i) for t, i in ids if t in ("message", "part")), None)
+        if first_insert is None:
             return False
-        table, first = ids[0]
-        if table not in ("message", "part"):
-            return False
+        table, first = first_insert
         try:
             with connect(ref) as conn:
                 row = conn.execute(

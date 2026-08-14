@@ -431,3 +431,99 @@ def test_validate_transcript_missing_session(mini_db):
     problems = opencode.OpencodeAdapter().validate_transcript(
         mini_db, "ses_nope")
     assert any("not in the opencode database" in p for p in problems)
+
+
+def test_prepare_shadow_reanchors_after_crash_skip(mini_db):
+    """Crash-skip replay re-renders the unit, minting fresh ids that were
+    never inserted; prepare_shadow must re-anchor the renderer state to the
+    rows actually in the DB or the next unit dangles off a phantom parent."""
+    sid = _insert_session(mini_db)
+    adapter = opencode.OpencodeAdapter()
+    ctx = _render_ctx(sid)
+    adapter.shadow_append(mini_db, adapter.render_events(_events_turn(), ctx))
+    landed_user = ctx.state_for("opencode")["turn_user_id"]
+    landed_asst = ctx.state_for("opencode")["assistant_id"]
+
+    # replay after the crash: a fresh ctx re-renders the same unit (skip path
+    # discards the entries), leaving phantom ids in the renderer state
+    ctx2 = _render_ctx(sid)
+    adapter.render_events(_events_turn(), ctx2)
+    assert ctx2.state_for("opencode")["turn_user_id"] != landed_user
+
+    adapter.prepare_shadow(mini_db, ctx2)
+    st = ctx2.state_for("opencode")
+    assert st["turn_user_id"] == landed_user
+    assert st["assistant_id"] == landed_asst
+
+
+def test_model_attribution_survives_split_units(mini_db):
+    """A tool pair opens (and commits) the turn's assistant before the text
+    unit carries the real model; the later unit must still upgrade the
+    stored row's sentinel modelID."""
+    from tandem.events import AssistantMessage, ToolCall, ToolResult, UserMessage
+
+    sid = _insert_session(mini_db)
+    adapter = opencode.OpencodeAdapter()
+    ctx = _render_ctx(sid)
+    adapter.shadow_append(mini_db, adapter.render_events([
+        UserMessage(source="user", turn_index=1, text="hi"),
+        ToolCall(source="claude", turn_index=1, call_id="c1", tool="Bash",
+                 arguments={"command": "ls"}),
+        ToolResult(source="claude", turn_index=1, call_id="c1", output="ok"),
+    ], ctx))
+    adapter.shadow_append(mini_db, adapter.render_events([
+        AssistantMessage(source="claude", turn_index=1, text="done",
+                         model="claude-fable-5"),
+    ], ctx))
+    with sqlite3.connect(mini_db) as conn:
+        rows = [json.loads(r[0]) for r in conn.execute(
+            "SELECT data FROM message WHERE session_id = ?", (sid,))]
+    asst = [d for d in rows if d.get("role") == "assistant"]
+    assert len(asst) == 1
+    assert asst[0]["modelID"] == "claude-fable-5"
+
+
+def test_runtime_ready_rejects_non_wal(tmp_path, monkeypatch):
+    db = tmp_path / "rollback.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(MINI_SCHEMA)   # journal_mode stays delete
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("OPENCODE_DB", str(db))
+    opencode._reset_db_cache()
+    ok, reason = opencode.OpencodeAdapter().runtime_ready()
+    assert not ok and "journal_mode" in reason
+
+
+def test_runtime_ready_rejects_unwritable(mini_db):
+    """A readonly main file alone is still writable in WAL mode (sqlite
+    creates writable -wal/-shm sidecars); the unusable state is the whole
+    directory being unwritable."""
+    import os
+    os.chmod(mini_db, 0o444)
+    os.chmod(mini_db.parent, 0o555)
+    try:
+        ok, reason = opencode.OpencodeAdapter().runtime_ready()
+    finally:
+        os.chmod(mini_db.parent, 0o755)
+        os.chmod(mini_db, 0o644)
+    assert not ok
+
+
+def test_shadow_append_readonly_raises_not_busy(mini_db):
+    """A permanently unwritable DB must surface, not loop as ShadowBusy."""
+    import os
+
+    from tandem.harness.base import ShadowBusy
+
+    sid = _insert_session(mini_db)
+    adapter = opencode.OpencodeAdapter()
+    entries = adapter.render_events(_events_turn(), _render_ctx(sid))
+    os.chmod(mini_db, 0o444)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            adapter.shadow_append(mini_db, entries)
+    except ShadowBusy:
+        pytest.fail("readonly error was mislabelled ShadowBusy")
+    finally:
+        os.chmod(mini_db, 0o644)
