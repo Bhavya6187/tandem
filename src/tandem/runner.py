@@ -59,20 +59,23 @@ class EventLogger:
         self._fh.close()
 
 
-def ctx_from_cursor(session: PairedSession, source: str, cursor: SyncCursor) -> SessionContext:
-    direction = "claude->codex" if source == "claude" else "codex->claude"
+def ctx_from_cursor(session: PairedSession, cursor: SyncCursor) -> SessionContext:
     pending = dict(cursor.pending)
+    state = pending.pop("harness_state", {})
+    # legacy key from the pre-namespace cursor layout; fold it in
     leaf = pending.pop("claude_leaf_uuid", None)
+    if leaf is not None:
+        state.setdefault("claude", {})["leaf_uuid"] = leaf
     calls = pending.pop("pending_calls", {})
     return SessionContext(
         tandem_id=session.tandem_id,
         cwd=session.cwd,
-        direction=direction,
+        direction=f"{cursor.source}->{cursor.target}",
         turn_index=cursor.turn_index,
         pending_calls=calls,
-        claude_leaf_uuid=leaf,
-        claude_session_id=session.claude_session_id,
-        codex_session_id=session.codex_session_id,
+        harness_state=state,
+        source_session_id=session.native_id(cursor.source),
+        target_session_id=session.native_id(cursor.target),
     )
 
 
@@ -83,7 +86,7 @@ def ctx_to_cursor(ctx: SessionContext, cursor: SyncCursor) -> None:
     cursor.pending.update(
         {
             "pending_calls": ctx.pending_calls,
-            "claude_leaf_uuid": ctx.claude_leaf_uuid,
+            "harness_state": ctx.harness_state,
         }
     )
 
@@ -390,15 +393,17 @@ class TailLoop:
         store: StateStore,
         session: PairedSession,
         source: str,
+        target: str,
         transcript: Path,
         sink: EventSink,
     ):
         self.store = store
         self.session = session
         self.source = source
+        self.target = target
         self.sink = sink
-        self.cursor = store.get_cursor(session.tandem_id, source)
-        self.ctx = ctx_from_cursor(session, source, self.cursor)
+        self.cursor = store.get_cursor(session.tandem_id, source, target)
+        self.ctx = ctx_from_cursor(session, self.cursor)
         self.tailer = JsonlTailer(
             transcript, start_offset=self.cursor.byte_offset,
             start_line=self.cursor.line_index,
@@ -459,7 +464,7 @@ def await_codex_rollout(cwd: str, after: float, timeout: float | None = None) ->
         time.sleep(0.3)
 
 
-SinkFactory = Callable[[StateStore, PairedSession, str], EventSink]
+SinkFactory = Callable[[StateStore, PairedSession, str, str], EventSink]
 
 
 class InteractiveRunner:
@@ -525,7 +530,7 @@ class InteractiveRunner:
         session = self.session
         active = session.active
         adapter = get_adapter(active)
-        active_sid = getattr(session, f"{active}_session_id")
+        active_sid = session.native_id(active)
         # One recipe, bound once: hook_argv_extra re-reads config per call
         # (codex checks the user's config.toml for a notify handler), so the
         # argv actually launched and marker_wired must come from the same
@@ -545,7 +550,7 @@ class InteractiveRunner:
         control = PtyControl()
         probe_last: dict = {"status": "<unpolled>"}
 
-        def claude_probe() -> str | None:
+        def status_probe_fn() -> str | None:
             # A raising probe would kill the tandem-flip thread and leave
             # the bar advertising an armed flip that can never fire (os.kill
             # raises OverflowError — not OSError — on a pid outside C-long
@@ -564,10 +569,10 @@ class InteractiveRunner:
         monitor = FlipMonitor(
             control, adapter.quit_keystrokes(), transcript, sentinel,
             marker_wired=bool(hook_extra),
-            # claude only: codex has no session registry, and a probe that
-            # answers None would flip eagerly mid-turn — absence, not None
-            # answers, is how codex opts out.
-            status_probe=claude_probe if active == "claude" else None,
+            # capability check: adapters without a live status registry/probe
+            # opt out by absence — a probe answering None would flip eagerly
+            # mid-turn.
+            status_probe=status_probe_fn if hasattr(adapter, "session_status") else None,
         )
         # Keeps one shadow harness resident. It starts at runner entry and is
         # refreshed after a tail drain changes the shadow transcript; the flip
@@ -586,7 +591,12 @@ class InteractiveRunner:
         def ensure_warm() -> None:
             if not (frame_cfg.warm and _stdin_tty()):
                 return
-            shadow = session.shadow
+            shadow = session.next_active(session.active)
+            if shadow == "opencode":
+                # v1 carve-out (spec: Frame and flip): an opencode TUI booted
+                # before the final drain would cache the session pre-drain and
+                # never show the last turn. Opencode-bound flips run cold.
+                return
             size = _shadow_size(session, shadow)
             if size is None:
                 return   # no shadow file yet: switch_session's late-create
@@ -665,7 +675,7 @@ class InteractiveRunner:
             armed=monitor.armed,
             bar=frame_cfg.bar,
             active=active,
-            other=session.shadow,
+            others=session.targets_for(active),
             key_label=_key_label(frame_cfg.flip_byte),
         )
         self.flip_requested = False
@@ -708,19 +718,25 @@ class InteractiveRunner:
                             break
                     if path is None:
                         return
+                loops: list[TailLoop] = []
+                sinks: list[EventSink] = []
                 try:
-                    sink = self.sink_factory(store, current, active)
+                    for tgt in current.targets_for(active):
+                        sink = self.sink_factory(store, current, active, tgt)
+                        sinks.append(sink)
+                        loops.append(TailLoop(store, current, active, tgt, path, sink))
                 except Exception as exc:
                     errors.append(f"sync disabled: {exc}")
+                    for s in sinks:
+                        s.close()
                     return
                 watcher = TranscriptWatcher()
                 watcher.watch(path)
                 watcher.watch(sentinel)
                 watcher.start()
-                loop = TailLoop(store, current, active, path, sink)
-                # `tandem sub --context full` drains this same cursor row from
-                # a separate process, holding `ops._sub_lock()` across its
-                # drain-then-fork. Two concurrent drains of one cursor
+                # `tandem sub --context full` drains these same cursor rows
+                # from a separate process, holding `ops._sub_lock()` across
+                # its drain-then-fork. Two concurrent drains of one cursor
                 # translate the same lines twice — duplicate turns and call ids
                 # in the shadow and in the fork — so the tail thread takes the
                 # same flock. Kept tight around the drain itself: the wait
@@ -729,18 +745,23 @@ class InteractiveRunner:
                 from . import ops
                 try:
                     while not stop.is_set():
+                        drained = 0
                         with ops._sub_lock():
-                            drained = loop.drain()
+                            for loop in loops:
+                                drained += loop.drain()
                         if drained:
                             ensure_warm()
                         watcher.wait()
                     # final drain after the CLI exits
                     with ops._sub_lock():
-                        loop.drain()
-                    errors.extend(loop.errors)
+                        for loop in loops:
+                            loop.drain()
+                    for loop in loops:
+                        errors.extend(loop.errors)
                 finally:
                     watcher.stop()
-                    sink.close()
+                    for s in sinks:
+                        s.close()
 
         thread = threading.Thread(target=tail_thread, name="tandem-tail", daemon=True)
         thread.start()

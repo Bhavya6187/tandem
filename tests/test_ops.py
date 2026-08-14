@@ -64,7 +64,7 @@ class TestSwitch:
     def test_switch_drains_then_flips(self, env_factory):
         env = env_factory(active="claude")
         # steady state: everything currently in claude's file is known
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
 
         # claude (active) writes a turn that was not yet synced (e.g. tandem
         # crashed mid-session)
@@ -83,13 +83,13 @@ class TestSwitch:
         assert "[via claude-code] ok!" in texts
 
         # ...and codex's cursor now sits at EOF so nothing echoes back
-        cursor = env.store.get_cursor(env.session.tandem_id, "codex")
+        cursor = env.store.get_cursor(env.session.tandem_id, "codex", "claude")
         assert cursor.byte_offset == env.codex_shadow.stat().st_size
-        assert ops.unsynced_lines(session, env.store, "codex") == 0
+        assert ops.unsynced_lines(session, env.store, "codex", "claude") == 0
 
     def test_turns_flow_after_switch_without_echo(self, env_factory):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         write_line(env.claude_shadow, claude_user("before switch"))
         ops.switch_session(env.store, env.session)
         session = env.refresh()
@@ -134,7 +134,7 @@ class TestSwitch:
         # existed; its file going missing mid-session is data loss, not the
         # never-ran case, and must keep the hard error.
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         ops.switch_session(env.store, env.session)
         session = env.refresh()
 
@@ -144,7 +144,7 @@ class TestSwitch:
 
     def test_double_switch_round_trip(self, env_factory):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         ops.switch_session(env.store, env.session)
         session = env.refresh()
         assert session.active == "codex"
@@ -157,7 +157,7 @@ class TestSwitch:
 class TestOneOff:
     def test_oneoff_on_shadow_syncs_into_active(self, env_factory, monkeypatch):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
 
         # fake `codex exec resume`: appends a native turn to the rollout
         calls = {}
@@ -190,7 +190,7 @@ class TestOneOff:
 
     def test_oneoff_turn_present_in_both_files(self, env_factory, monkeypatch):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
 
         def fake_run(argv, cwd=None, **kw):
             for obj in codex_turn("q", "a"):
@@ -225,7 +225,7 @@ class TestOneOff:
         those appends, or the next drain bounces them back — duplicate
         call_ids, which both replay APIs reject."""
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
 
         def fake_run(argv, cwd=None, **kw):
             for obj in codex_tool_turn("patch it", "Patched."):
@@ -250,7 +250,7 @@ class TestOneOff:
     def test_oneoff_on_claude_does_not_echo_back(self, env_factory, monkeypatch):
         """Mirror direction: codex active, one-off routed to claude."""
         env = env_factory(active="codex")
-        ops.fast_forward(env.store, env.session, "codex")
+        ops.fast_forward_all(env.store, env.session, "codex")
 
         def fake_run(argv, cwd=None, **kw):
             write_line(env.claude_shadow, claude_user("patch it"))
@@ -298,9 +298,9 @@ class TestValidate:
 
         env = env_factory()
         assert validate_transcript("codex", env.codex_shadow,
-                                   env.session.codex_session_id) == []
+                                   env.session.native_id("codex")) == []
         assert validate_transcript("claude", env.claude_shadow,
-                                   env.session.claude_session_id) == []
+                                   env.session.native_id("claude")) == []
 
     def test_claude_metadata_entry_types_validate(self, env_factory):
         """claude 2.1.220 interleaves uuid-less metadata entries with the
@@ -308,7 +308,7 @@ class TestValidate:
         from tandem.doctor import validate_transcript
 
         env = env_factory()
-        sid = env.session.claude_session_id
+        sid = env.session.native_id("claude")
         for meta in [
             {"type": "permission-mode", "permissionMode": "bypassPermissions",
              "sessionId": sid},
@@ -323,3 +323,46 @@ class TestValidate:
         ]:
             write_line(env.claude_shadow, obj=meta)
         assert validate_transcript("claude", env.claude_shadow, sid) == []
+
+
+class TestFanOut:
+    """N=3 sync fan-out through the conftest FakeOpencodeAdapter."""
+
+    def test_drain_fans_out_to_all_targets(self, tmp_path, monkeypatch):
+        """A 3-participant session drains one claude line into BOTH shadows."""
+        from conftest import Env3
+
+        env = Env3(tmp_path, monkeypatch)
+        write_line(env.claude_shadow, claude_user("hello from claude"))
+        n = ops.drain_source(env.store, env.session, "claude")
+        assert n >= 1
+        assert any("hello from claude" in t for t in shadow_texts(env.codex_shadow))
+        assert any("hello from claude" in t for t in env.opencode_texts())
+
+    def test_fast_forward_all_outgoing(self, tmp_path, monkeypatch):
+        from conftest import Env3
+
+        env = Env3(tmp_path, monkeypatch)
+        write_line(env.claude_shadow, claude_user("pre-existing"))
+        ops.fast_forward_all(env.store, env.session, "claude")
+        for target in ("codex", "opencode"):
+            cur = env.store.get_cursor(env.session.tandem_id, "claude", target)
+            assert cur.byte_offset == env.claude_shadow.stat().st_size
+        # nothing flows after the fast-forward
+        assert ops.drain_source(env.store, env.session, "claude") == 0
+
+    def test_switch_session_explicit_target(self, tmp_path, monkeypatch):
+        from conftest import Env3
+
+        env = Env3(tmp_path, monkeypatch)
+        new_active, problems, mem = ops.switch_session(
+            env.store, env.session, to="opencode")
+        assert new_active == "opencode"
+        assert env.store.get_session(env.session.tandem_id).active == "opencode"
+
+    def test_switch_session_default_is_next_in_cycle(self, tmp_path, monkeypatch):
+        from conftest import Env3
+
+        env = Env3(tmp_path, monkeypatch)          # active=claude
+        new_active, _, _ = ops.switch_session(env.store, env.session)
+        assert new_active == "codex"

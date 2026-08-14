@@ -357,14 +357,14 @@ def test_guard_empty_feed_is_inert():
 
 
 def test_bar_line_shows_active_and_other():
-    bar = StatusBar(rows=40, cols=60, active="claude", other="codex")
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     line = bar.line(armed=False)
     assert "claude ●" in line and "codex ○" in line and "^] flips" in line
     assert len(line) == 60
 
 
 def test_bar_line_armed_state():
-    bar = StatusBar(rows=40, cols=60, active="claude", other="codex")
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     line = bar.line(armed=True)
     assert "flipping at turn end" in line and "^] cancels" in line
 
@@ -373,7 +373,7 @@ def test_bar_line_names_the_rebound_key():
     # [frame] flip_key = "ctrl-t": the bar is the only place the keybind is
     # advertised, so a hardcoded ^] would send the user pressing a key that
     # goes straight through to the harness.
-    bar = StatusBar(rows=40, cols=60, active="claude", other="codex",
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"],
                     key_label="^T")
     assert "^T flips" in bar.line(armed=False)
     assert "^T cancels" in bar.line(armed=True)
@@ -382,17 +382,17 @@ def test_bar_line_names_the_rebound_key():
 
 
 def test_bar_line_defaults_to_ctrl_bracket():
-    bar = StatusBar(rows=40, cols=60, active="claude", other="codex")
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     assert "^] flips" in bar.line(armed=False)
 
 
 def test_bar_line_truncates_to_width():
-    bar = StatusBar(rows=40, cols=12, active="claude", other="codex")
+    bar = StatusBar(rows=40, cols=12, active="claude", others=["codex"])
     assert len(bar.line(armed=False)) == 12
 
 
 def test_bar_paint_targets_real_bottom_row_and_restores_cursor():
-    bar = StatusBar(rows=40, cols=60, active="claude", other="codex")
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     b = bar.paint(armed=False)
     assert b.startswith(b"\x1b7")        # DECSC save cursor
     assert b"\x1b[40;1H" in b            # jump to the real bottom row
@@ -401,20 +401,20 @@ def test_bar_paint_targets_real_bottom_row_and_restores_cursor():
 
 
 def test_bar_region_reserves_all_but_last_row():
-    bar = StatusBar(rows=40, cols=60, active="claude", other="codex")
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     b = bar.region()
     assert b == b"\x1b7\x1b[1;39r\x1b8"  # DECSTBM homes the cursor: save/restore
 
 
 def test_bar_clear_restores_full_region_and_wipes_row():
-    bar = StatusBar(rows=40, cols=60, active="claude", other="codex")
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     b = bar.clear()
     assert b"\x1b[r" in b                # full-screen scroll region back
     assert b"\x1b[40;1H" in b and b"\x1b[2K" in b
 
 
 def test_bar_resize_recomputes():
-    bar = StatusBar(rows=40, cols=60, active="claude", other="codex")
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     bar.resize(rows=30, cols=50)
     assert b"\x1b[30;1H" in bar.paint(armed=False)
     assert len(bar.line(armed=False)) == 50
@@ -432,7 +432,7 @@ def test_bar_armed_line_also_truncates_to_width():
     # the armed text is the longer of the two, so a narrow terminal truncates
     # it where the idle one still fits: the width invariant has to hold in
     # both states or an armed repaint overruns the row
-    bar = StatusBar(rows=40, cols=12, active="claude", other="codex")
+    bar = StatusBar(rows=40, cols=12, active="claude", others=["codex"])
     assert len(bar.line(armed=True)) == 12
     assert len(_body(bar.paint(armed=True))) == 12
 
@@ -440,7 +440,7 @@ def test_bar_armed_line_also_truncates_to_width():
 def test_bar_paint_body_is_exactly_cols_wide_in_both_states():
     # what task 6 writes is paint(), not line(): the width invariant is only
     # worth anything if it survives composition
-    bar = StatusBar(rows=40, cols=60, active="claude", other="codex")
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     assert len(_body(bar.paint(armed=False))) == 60
     assert len(_body(bar.paint(armed=True))) == 60
 
@@ -451,7 +451,7 @@ def test_bar_line_has_no_double_width_glyphs():
     # wraps off the last row. Ambiguous-width glyphs (● │ ○ ◐, EAW 'A') are
     # one cell outside CJK-wide terminal configs; unconditionally wide ones
     # (EAW 'W'/'F' — e.g. ⏳ U+23F3) are never safe here.
-    bar = StatusBar(rows=40, cols=60, active="claude", other="codex")
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     for armed in (False, True):
         wide = [c for c in bar.line(armed) if east_asian_width(c) in "WF"]
         assert wide == [], f"armed={armed}: double-width glyphs {wide}"
@@ -461,14 +461,14 @@ def test_bar_region_floors_at_one_row():
     # ioctl reports 0×0 when the terminal size is unknown, and a 1-row pane is
     # legal: rows-1 must not emit `\x1b[1;0r` (bottom <= top, silently ignored,
     # leaving whatever region was set) or the malformed `\x1b[1;-1r`
-    assert StatusBar(rows=2, cols=60, active="a", other="b").region() == b"\x1b7\x1b[1;1r\x1b8"
-    assert StatusBar(rows=1, cols=60, active="a", other="b").region() == b"\x1b7\x1b[1;1r\x1b8"
-    assert StatusBar(rows=0, cols=0, active="a", other="b").region() == b"\x1b7\x1b[1;1r\x1b8"
+    assert StatusBar(rows=2, cols=60, active="a", others=["b"]).region() == b"\x1b7\x1b[1;1r\x1b8"
+    assert StatusBar(rows=1, cols=60, active="a", others=["b"]).region() == b"\x1b7\x1b[1;1r\x1b8"
+    assert StatusBar(rows=0, cols=0, active="a", others=["b"]).region() == b"\x1b7\x1b[1;1r\x1b8"
 
 
 def test_bar_degenerate_width_composes_empty_row():
     # cols=0 (size unknown) must compose an empty bar, not raise
-    bar = StatusBar(rows=0, cols=0, active="claude", other="codex")
+    bar = StatusBar(rows=0, cols=0, active="claude", others=["codex"])
     assert bar.line(armed=False) == ""
     assert bar.paint(armed=False) == b"\x1b7\x1b[0;1H\x1b[7m\x1b[0m\x1b8"
 
@@ -477,12 +477,12 @@ def test_bar_clear_exact_shape():
     # pinned whole: the region reset has to precede the row wipe (wiping first
     # then resetting leaves the cursor parked on the bar row), and the pair is
     # wrapped in DECSC/DECRC like every other emission
-    bar = StatusBar(rows=40, cols=60, active="claude", other="codex")
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     assert bar.clear() == b"\x1b7\x1b[r\x1b[40;1H\x1b[2K\x1b8"
 
 
 def test_bar_region_and_clear_track_resize():
-    bar = StatusBar(rows=40, cols=60, active="claude", other="codex")
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     bar.resize(rows=30, cols=50)
     assert bar.region() == b"\x1b7\x1b[1;29r\x1b8"
     assert bar.clear() == b"\x1b7\x1b[r\x1b[30;1H\x1b[2K\x1b8"
@@ -538,3 +538,22 @@ def test_codex_quit_recipe():
     # Ctrl-C clears/interrupts, second Ctrl-C quits ("press again"),
     # Ctrl-D backstops older builds
     assert get_adapter("codex").quit_keystrokes() == [b"\x03", b"\x03", b"\x04"]
+
+
+def test_bar_three_slots():
+    bar = StatusBar(rows=40, cols=80, active="claude",
+                    others=["codex", "opencode"])
+    line = bar.line(armed=False)
+    assert " claude \u25cf \u2502 codex \u25cb \u2502 opencode \u25cb " in line + " "
+    assert "^] flips" in line
+
+
+def test_bar_two_slots_unchanged():
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
+    assert bar.line(armed=False).startswith(" claude \u25cf \u2502 codex \u25cb ")
+
+
+def test_bar_three_slots_truncates_to_cols():
+    bar = StatusBar(rows=40, cols=24, active="claude",
+                    others=["codex", "opencode"])
+    assert len(bar.line(armed=False)) == 24

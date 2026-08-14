@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-Agent = Literal["claude", "codex", "tandem", "user"]
+Agent = str  # harness id, "tandem", or "user"
 
 
 class _EventBase(BaseModel):
@@ -89,19 +89,34 @@ class SessionContext(BaseModel):
 
     tandem_id: str
     cwd: str
-    direction: Literal["claude->codex", "codex->claude"]
+    direction: str  # "<source>-><target>" over registered adapter ids
     turn_index: int = 0
     # call_id -> serialized ToolCall event awaiting its result
     pending_calls: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    # uuid of the last entry in the Claude shadow file (parentUuid chain)
-    claude_leaf_uuid: str | None = None
-    # message.id shared by the current contiguous run of rendered assistant
-    # entries; any rendered user-side entry resets it (a real transcript has
-    # one id per API response, and regrouping by id must not strand a
-    # tool_use away from its tool_result)
-    claude_run_msg_id: str | None = None
-    claude_session_id: str | None = None
-    codex_session_id: str | None = None
-    # model claude itself last used; rendered assistant entries carry it so
-    # `claude --resume` can restore the session model (it rejects "<synced>")
-    claude_model: str | None = None
+    # per-adapter renderer scratch keyed by harness id (claude: leaf_uuid /
+    # run_msg_id / model — see ClaudeCodeAdapter); persisted with the cursor
+    harness_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    source_session_id: str | None = None
+    target_session_id: str | None = None
+
+    @field_validator("direction")
+    @classmethod
+    def _check_direction(cls, v: str) -> str:
+        from .harness import ADAPTERS
+
+        parts = v.split("->")
+        if (len(parts) != 2 or parts[0] == parts[1]
+                or any(p not in ADAPTERS for p in parts)):
+            raise ValueError(f"not a harness direction: {v!r}")
+        return v
+
+    @property
+    def source_id(self) -> str:
+        return self.direction.split("->")[0]
+
+    @property
+    def target_id(self) -> str:
+        return self.direction.split("->")[1]
+
+    def state_for(self, harness_id: str) -> dict[str, Any]:
+        return self.harness_state.setdefault(harness_id, {})

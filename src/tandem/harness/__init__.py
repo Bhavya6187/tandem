@@ -10,7 +10,3 @@ ADAPTERS: dict[str, HarnessAdapter] = {
 
 def get_adapter(harness_id: str) -> HarnessAdapter:
     return ADAPTERS[harness_id]
-
-
-def other(harness_id: str) -> str:
-    return "codex" if harness_id == "claude" else "claude"

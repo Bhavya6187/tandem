@@ -36,12 +36,18 @@ def result(output, source="claude", call_id="c1", structured=None, is_error=Fals
                       structured=structured, is_error=is_error)
 
 
+_SIDS = {
+    "claude": "11111111-1111-4111-8111-111111111111",
+    "codex": "019faca1-0000-7000-8000-000000000001",
+}
+
+
 def _ctx(direction="claude->codex"):
     return SessionContext(
         tandem_id="t1", cwd="/p", direction=direction,
-        claude_session_id="11111111-1111-4111-8111-111111111111",
-        codex_session_id="019faca1-0000-7000-8000-000000000001",
-        claude_leaf_uuid="seed",
+        source_session_id=_SIDS[direction.split("->")[0]],
+        target_session_id=_SIDS[direction.split("->")[1]],
+        harness_state={"claude": {"leaf_uuid": "seed"}},
     )
 
 
@@ -445,13 +451,13 @@ class TestClaudeToolRendering:
         # uuid/parentUuid chain is intact across the mixed entries
         for prev, cur in zip(entries, entries[1:]):
             assert cur["parentUuid"] == prev["uuid"]
-        assert ctx.claude_leaf_uuid == entries[-1]["uuid"]
+        assert ctx.state_for("claude")["leaf_uuid"] == entries[-1]["uuid"]
 
     def test_render_uses_last_real_claude_model(self):
         # claude --resume rejects "<synced>" as a session model; rendered
         # entries carry the model claude last used when one is known
         ctx = _ctx("codex->claude")
-        ctx.claude_model = "claude-fable-5"
+        ctx.state_for("claude")["model"] = "claude-fable-5"
         entries = get_adapter("claude").render_events([
             AssistantMessage(source="codex", text="hi"),
             call("Bash", {"command": "ls"}, source="codex", call_id="c9"),
@@ -558,7 +564,7 @@ class TestDangleFlush:
         )
         ops.drain_source(env.store, env.session, "claude")  # default: no flush
 
-        cur = env.store.get_cursor(env.session.tandem_id, "claude")
+        cur = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         assert "dangling-1" in cur.pending["pending_calls"]
         rollout = read_jsonl(env.codex_shadow)
         payloads = [e["payload"] for e in rollout if e.get("type") == "response_item"]
@@ -572,7 +578,7 @@ class TestDangleFlush:
         loop, engine = env.loop()
         self._pendings(env)
         loop.drain()
-        cur = env.store.get_cursor(env.session.tandem_id, "claude")
+        cur = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         assert cur.pending["pending_calls"]
         cur.pending["intent"] = {"line": -1, "pre_size": 0}  # file grew => landed
         env.store.save_cursor(cur)
@@ -582,7 +588,7 @@ class TestDangleFlush:
         assert loop2.ctx.pending_calls  # restored from the cursor
         assert engine2.flush_dangling(loop2.ctx, loop2.cursor) == 0
         assert env.codex_shadow.read_text() == before
-        reread = env.store.get_cursor(env.session.tandem_id, "claude")
+        reread = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         assert reread.pending["pending_calls"] == {}
         assert "intent" not in reread.pending
 
@@ -593,13 +599,13 @@ class TestDangleFlush:
         self._pendings(env)
         loop.drain()
         size = env.codex_shadow.stat().st_size
-        cur = env.store.get_cursor(env.session.tandem_id, "claude")
+        cur = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         cur.pending["intent"] = {"line": -1, "pre_size": size}  # did not grow
         env.store.save_cursor(cur)
 
         loop2, engine2 = env.loop()
         assert engine2.flush_dangling(loop2.ctx, loop2.cursor) == 2
         assert env.codex_shadow.stat().st_size > size
-        reread = env.store.get_cursor(env.session.tandem_id, "claude")
+        reread = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         assert reread.pending["pending_calls"] == {}
         assert "intent" not in reread.pending

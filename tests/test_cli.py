@@ -24,8 +24,9 @@ def homes(tmp_path, monkeypatch):
 @pytest.fixture
 def ok_versions(monkeypatch):
     monkeypatch.setattr(
-        cli, "_check_versions",
-        lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+        cli, "_resolve_participants",
+        lambda warn_only=False: (["claude", "codex"],
+                                 {"claude": "2.1.220", "codex": "0.145.0"}),
     )
 
 
@@ -92,7 +93,8 @@ def test_one_shot_without_session_hints_tandem(homes, ok_versions):
 
 def _mk_session(cwd, active="claude", n=0):
     with StateStore() as store:
-        return store.create_session(str(cwd), active, f"c-{n}", f"x-{n}")
+        return store.create_session(str(cwd), active, ["claude", "codex"],
+                                    {"claude": f"c-{n}", "codex": f"x-{n}"})
 
 
 def test_enter_session_runs_the_flip_loop(homes, monkeypatch):
@@ -158,13 +160,15 @@ def test_resume_with_no_sessions_hints_tandem(homes, ok_versions, entered):
     assert "Run `tandem` to start one" in r.stderr
 
 
-def test_resume_warns_but_proceeds_without_binaries(homes, entered, monkeypatch):
-    s = _mk_session(homes)
+def test_resume_without_two_usable_harnesses_is_fatal(homes, entered, monkeypatch):
+    """Resume recomputes availability (spec: Participants/Resume); fewer
+    than two usable survivors is fatal — nothing could run anyway."""
+    _mk_session(homes)
     monkeypatch.setattr(cli, "get_adapter", lambda hid: _NoBin())
     r = click.testing.CliRunner().invoke(cli.main, ["resume"])
-    assert r.exit_code == 0  # warn-only: resume is not blocked like pairing
-    assert "warning:" in r.stderr
-    assert entered[0].tandem_id == s.tandem_id
+    assert r.exit_code == 1
+    assert "warning:" in r.stderr        # availability reported before the exit
+    assert entered == []
 
 
 def test_doctor_no_session_hints_tandem(homes, monkeypatch):
@@ -204,3 +208,15 @@ def test_bare_tandem_offers_plugin_after_pairing(
     # offered exactly once, after pairing but before entering the session
     assert calls == [0]
     assert len(entered) == 1
+
+
+def test_run_on_nonparticipant_is_a_clean_error(homes, ok_versions, monkeypatch):
+    """`run --on` accepts every supported name at the Click layer, but a
+    target outside this session's participants (e.g. opencode in a PR-1
+    build, or any dropped member) must be a normal error — never a
+    get_adapter KeyError traceback."""
+    _mk_session(homes)
+    r = click.testing.CliRunner().invoke(cli.main, ["run", "--on", "opencode", "hi"])
+    assert r.exit_code == 1
+    assert "not a participant" in r.stderr
+    assert r.exception is None or isinstance(r.exception, SystemExit)

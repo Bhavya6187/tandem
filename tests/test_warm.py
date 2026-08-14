@@ -17,7 +17,7 @@ def test_build_launch_claude_resume(env_factory):
     env = env_factory(active="claude")
     r = build_launch(env.session, "claude")
     assert r.side == "claude"
-    assert r.argv[:3] == ["claude", "--resume", env.session.claude_session_id]
+    assert r.argv[:3] == ["claude", "--resume", env.session.native_id("claude")]
     assert r.fresh is False
     assert r.transcript is not None and r.transcript.exists()
     assert r.cwd == env.session.cwd
@@ -33,18 +33,18 @@ def test_build_launch_claude_fresh_uses_session_id_and_expected_path(env_factory
     env = env_factory(active="claude")
     env.claude_shadow.unlink()   # no file yet -> fresh launch
     r = build_launch(env.session, "claude")
-    assert r.argv[:3] == ["claude", "--session-id", env.session.claude_session_id]
+    assert r.argv[:3] == ["claude", "--session-id", env.session.native_id("claude")]
     assert r.fresh is True
     # monitor still needs somewhere to look for the transcript
     assert r.transcript == paths.claude_transcript_path(
-        env.session.cwd, env.session.claude_session_id
+        env.session.cwd, env.session.native_id("claude")
     )
 
 
 def test_build_launch_codex_resume(env_factory):
     env = env_factory(active="claude")
     r = build_launch(env.session, "codex")
-    assert r.argv[:3] == ["codex", "resume", env.session.codex_session_id]
+    assert r.argv[:3] == ["codex", "resume", env.session.native_id("codex")]
     assert r.side == "codex"
     assert r.fresh is False
 
@@ -100,7 +100,10 @@ def test_shadow_size_reads_bytes(env_factory):
 
 def test_shadow_size_none_without_session_id(env_factory):
     env = env_factory(active="claude")
-    unpaired = dataclasses.replace(env.session, codex_session_id=None)
+    unpaired = dataclasses.replace(
+        env.session,
+        native_session_ids={**env.session.native_session_ids, "codex": None},
+    )
     assert _shadow_size(unpaired, "codex") is None
 
 

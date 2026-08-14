@@ -64,6 +64,16 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+_CLAUDE_ENTRY_TYPES = {
+    "user", "assistant", "attachment", "system", "summary",
+    "queue-operation", "last-prompt", "progress", "file-history-snapshot",
+    "mode",  # {"type":"mode","mode":"normal",...} observed on --resume runs
+    # uuid-less metadata entries claude 2.1.220 interleaves with conversation
+    "permission-mode", "ai-title", "file-history-delta", "pr-link",
+    "relocated", "worktree-state",
+}
+
+
 class ClaudeCodeAdapter(HarnessAdapter):
     id = "claude"
     display_name = "Claude Code"
@@ -86,6 +96,36 @@ class ClaudeCodeAdapter(HarnessAdapter):
     def expected_transcript_path(self, cwd: str, session_id: str) -> Path:
         return paths.claude_transcript_path(cwd, session_id)
 
+    def _validate_entries(self, entries, session_id) -> list[str]:
+        problems = []
+        seen_uuids: set[str] = set()
+        convo = 0
+        for i, e in entries:
+            etype = e.get("type")
+            if etype not in _CLAUDE_ENTRY_TYPES:
+                problems.append(f"line {i}: unknown entry type {etype!r}")
+                continue
+            if etype in ("user", "assistant"):
+                convo += 1
+                if session_id and e.get("sessionId") not in (None, session_id):
+                    problems.append(
+                        f"line {i}: sessionId {e.get('sessionId')!r} != {session_id!r}"
+                    )
+                if not e.get("uuid"):
+                    problems.append(f"line {i}: conversation entry missing uuid")
+                parent = e.get("parentUuid")
+                if parent and parent not in seen_uuids:
+                    # claude tolerates forward/dangling parents poorly; flag it
+                    problems.append(f"line {i}: parentUuid {parent!r} not seen earlier")
+                msg = e.get("message")
+                if not isinstance(msg, dict) or "content" not in msg:
+                    problems.append(f"line {i}: malformed message")
+            if e.get("uuid"):
+                seen_uuids.add(e["uuid"])
+        if convo == 0:
+            problems.append("no conversation entries (user/assistant)")
+        return problems
+
     def mint_session_id(self) -> str:
         return str(uuidlib.uuid4())
 
@@ -97,11 +137,11 @@ class ClaudeCodeAdapter(HarnessAdapter):
             if parsed:
                 version = ".".join(str(x) for x in parsed)
         return {
-            "parentUuid": ctx.claude_leaf_uuid,
+            "parentUuid": ctx.state_for("claude").get("leaf_uuid"),
             "isSidechain": False,
             "userType": "external",
             "cwd": ctx.cwd,
-            "sessionId": ctx.claude_session_id,
+            "sessionId": ctx.target_session_id,
             "version": version,
             "gitBranch": git_branch(ctx.cwd),
             "type": entry_type,
@@ -116,7 +156,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
         entry = self._base_entry(ctx, "user")
         entry["message"] = {"role": "user", "content": note}
         append_jsonl_fsync(path, [entry])
-        ctx.claude_leaf_uuid = entry["uuid"]
+        ctx.state_for("claude")["leaf_uuid"] = entry["uuid"]
         return path
 
     # -- launching -----------------------------------------------------------
@@ -287,9 +327,10 @@ class ClaudeCodeAdapter(HarnessAdapter):
         current leaf. Messages and tool activity both render natively;
         consecutive assistant entries share one message.id."""
         out: list[dict[str, Any]] = []
+        st = ctx.state_for("claude")
         for ev in events:
             if ev.kind in ("user_message", "tool_result"):
-                ctx.claude_run_msg_id = None
+                st["run_msg_id"] = None
             if ev.kind == "user_message":
                 entry = self._base_entry(ctx, "user")
                 entry["message"] = {"role": "user", "content": ev.text}
@@ -319,7 +360,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 continue
             if ev.timestamp:
                 entry["timestamp"] = ev.timestamp
-            ctx.claude_leaf_uuid = entry["uuid"]
+            st["leaf_uuid"] = entry["uuid"]
             out.append(entry)
         return out
 
@@ -327,12 +368,13 @@ class ClaudeCodeAdapter(HarnessAdapter):
         self, ctx: SessionContext, entry: dict[str, Any],
         content: list[dict[str, Any]], stop_reason: str,
     ) -> dict[str, Any]:
-        if ctx.claude_run_msg_id is None:
-            ctx.claude_run_msg_id = f"msg_tandem_{entry['uuid'][:8]}"
+        st = ctx.state_for("claude")
+        if st.get("run_msg_id") is None:
+            st["run_msg_id"] = f"msg_tandem_{entry['uuid'][:8]}"
         return {
             "role": "assistant",
-            "model": ctx.claude_model or "<synced>",
-            "id": ctx.claude_run_msg_id,
+            "model": st.get("model") or "<synced>",
+            "id": st["run_msg_id"],
             "type": "message",
             "content": content,
             "stop_reason": stop_reason,
@@ -342,10 +384,11 @@ class ClaudeCodeAdapter(HarnessAdapter):
     def render_placeholder(self, text: str, ctx: SessionContext) -> list[dict[str, Any]]:
         # a rendered user-side entry, so it ends the assistant run like any
         # other: no message.id may straddle it
-        ctx.claude_run_msg_id = None
+        st = ctx.state_for("claude")
+        st["run_msg_id"] = None
         entry = self._base_entry(ctx, "user")
         entry["message"] = {"role": "user", "content": text}
-        ctx.claude_leaf_uuid = entry["uuid"]
+        st["leaf_uuid"] = entry["uuid"]
         return [entry]
 
     def _tail_objects(self, transcript: Path) -> list[dict[str, Any]]:

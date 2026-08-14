@@ -19,7 +19,7 @@ class _Sink:
     def close(self): ...
 
 
-def _null_sink(store, session, source):
+def _null_sink(store, session, source, target):
     return _Sink()
 
 
@@ -42,7 +42,7 @@ def test_claude_resume_gets_args_before_hook_extras(env_factory, monkeypatch):
     )
     argv = _run_capturing_argv(env, monkeypatch)
     i = argv.index("--resume")
-    assert argv[i + 1] == env.session.claude_session_id
+    assert argv[i + 1] == env.session.native_id("claude")
     assert argv[i + 2] == "--dangerously-skip-permissions"
     assert argv[i + 3] == "--settings"  # hook extras immediately after
 
@@ -66,7 +66,7 @@ def test_codex_gets_its_own_args(env_factory, monkeypatch):
     )
     argv = _run_capturing_argv(env, monkeypatch)
     i = argv.index("resume")
-    assert argv[i + 1] == env.session.codex_session_id
+    assert argv[i + 1] == env.session.native_id("codex")
     assert argv[i + 2] == "--dangerously-bypass-approvals-and-sandbox"
     assert "--should-not-appear" not in argv
 
@@ -76,7 +76,8 @@ def test_codex_fresh_mint_gets_args_after_bare_binary(env_factory, monkeypatch):
     # configured args are the first tokens after the binary.
     env = env_factory(active="codex")
     session = env.store.create_session(
-        env.cwd, "codex", env.session.claude_session_id, None
+        env.cwd, "codex", ["claude", "codex"],
+        {"claude": env.session.native_id("claude"), "codex": None},
     )
     (paths.tandem_home() / "config.toml").write_text(
         '[codex]\nargs = ["--dangerously-bypass-approvals-and-sandbox"]\n'
@@ -114,7 +115,7 @@ def test_oneoff_argv_never_gains_args(tmp_path, monkeypatch):
 def test_no_config_leaves_argv_unchanged(env_factory, monkeypatch):
     env = env_factory(active="claude")
     argv = _run_capturing_argv(env, monkeypatch)
-    assert argv[:3] == ["claude", "--resume", env.session.claude_session_id]
+    assert argv[:3] == ["claude", "--resume", env.session.native_id("claude")]
     assert argv[3] == "--settings"
 
 
@@ -355,7 +356,8 @@ def test_runner_publishes_the_discovered_codex_rollout_to_the_monitor(
     # hands it to the monitor, so an armed flip stops being judged blind.
     env = env_factory(active="codex")
     session = env.store.create_session(
-        env.cwd, "codex", env.session.claude_session_id, None
+        env.cwd, "codex", ["claude", "codex"],
+        {"claude": env.session.native_id("claude"), "codex": None},
     )
     rollout = env.codex_shadow
     monkeypatch.setattr(
@@ -378,7 +380,7 @@ def test_runner_publishes_the_discovered_codex_rollout_to_the_monitor(
         return 0
 
     monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
-    runner.InteractiveRunner(session, lambda st, se, so: _Sink()).run()
+    runner.InteractiveRunner(session, lambda st, se, so, tg: _Sink()).run()
     assert made["monitor"].transcript == rollout
 
 
@@ -565,7 +567,7 @@ def test_runner_passes_frame_and_control(env_factory, monkeypatch):
         return 0
 
     monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
-    r = runner.InteractiveRunner(env.session, lambda st, se, so: _Sink())
+    r = runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink())
     code = r.run()
     assert code == 0
     assert seen["control"] is not None
@@ -573,7 +575,7 @@ def test_runner_passes_frame_and_control(env_factory, monkeypatch):
     assert frame is not None
     assert frame.flip_byte == 0x1D
     assert frame.key_label == "^]"
-    assert frame.active == "claude" and frame.other == "codex"
+    assert frame.active == "claude" and frame.others == ["codex"]
     assert r.flip_requested is False
 
 
@@ -590,7 +592,7 @@ def test_runner_labels_a_rebound_flip_key_for_the_bar(env_factory, monkeypatch):
         lambda argv, cwd=None, frame=None, control=None, child=None:
             seen.update(frame=frame) or 0,
     )
-    runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
+    runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink()).run()
     assert seen["frame"].flip_byte == 0x14
     assert seen["frame"].key_label == "^T"
 
@@ -621,7 +623,7 @@ def test_runner_reports_flip_requested(env_factory, monkeypatch):
         return 0
 
     monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
-    r = runner.InteractiveRunner(env.session, lambda st, se, so: _Sink())
+    r = runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink())
     r.run()
     assert r.flip_requested is True
 
@@ -634,7 +636,7 @@ def test_runner_writes_bar_drop_marker(env_factory, monkeypatch, capsys):
         return 0
 
     monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
-    r = runner.InteractiveRunner(env.session, lambda st, se, so: _Sink())
+    r = runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink())
     r.run()
     marker = paths.tandem_home() / "tmp" / f"{env.session.tandem_id}-bar-dropped"
     assert marker.exists()
@@ -671,7 +673,7 @@ def test_runner_holds_its_reports_back_for_a_flip(env_factory, monkeypatch, caps
         return 0
 
     monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
-    r = runner.InteractiveRunner(env.session, lambda st, se, so: _Sink())
+    r = runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink())
     r.run()
     assert r.flip_requested is True
     assert any("status bar disabled" in line for line in r.reports)
@@ -691,7 +693,7 @@ def _run_capturing_monitor(env, monkeypatch):
         runner, "run_in_pty",
         lambda argv, cwd=None, frame=None, control=None, child=None: 0,
     )
-    runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
+    runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink()).run()
     return made["monitor"]
 
 
@@ -939,7 +941,7 @@ def test_runner_wires_status_probe_for_claude(env_factory, monkeypatch):
         runner, "run_in_pty",
         lambda argv, cwd=None, frame=None, control=None, child=None: 0,
     )
-    runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
+    runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink()).run()
     probe = made["kw"]["status_probe"]
     assert probe is not None
     # the probe closes over the claude sid: feed the registry and ask it
@@ -947,7 +949,7 @@ def test_runner_wires_status_probe_for_claude(env_factory, monkeypatch):
     d = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "sessions"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{me}.json").write_text(json.dumps(
-        {"pid": me, "sessionId": env.session.claude_session_id,
+        {"pid": me, "sessionId": env.session.native_id("claude"),
          "status": "busy"}))
     assert probe() == "busy"
 
@@ -966,7 +968,7 @@ def test_runner_wires_no_probe_for_codex(env_factory, monkeypatch):
         runner, "run_in_pty",
         lambda argv, cwd=None, frame=None, control=None, child=None: 0,
     )
-    runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
+    runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink()).run()
     assert made["kw"]["status_probe"] is None
 
 
@@ -999,7 +1001,7 @@ def test_runner_probe_swallows_raising_session_status(env_factory, monkeypatch):
         runner, "run_in_pty",
         lambda argv, cwd=None, frame=None, control=None, child=None: 0,
     )
-    runner.InteractiveRunner(env.session, lambda st, se, so: _Sink()).run()
+    runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink()).run()
     from tandem.harness.claude_code import ClaudeCodeAdapter
     monkeypatch.setattr(
         ClaudeCodeAdapter, "session_status",
@@ -1069,7 +1071,8 @@ def _flip_driver(env):
     return fake_run_in_pty
 
 
-def _drive_flip(monkeypatch, env, *, warm_cfg=True, tty=True, spawns=None):
+def _drive_flip(monkeypatch, env, *, warm_cfg=True, tty=True, spawns=None,
+                expect_spawn=True):
     """Run a real InteractiveRunner through a driven flip (the file's
     established _DeadChild/on_flip/sentinel recipe), recording fire-time
     spawns. Returns the runner after run() completes."""
@@ -1107,7 +1110,7 @@ def _drive_flip(monkeypatch, env, *, warm_cfg=True, tty=True, spawns=None):
 
     def fake_run_in_pty(*args, **kwargs):
         code = drive_flip(*args, **kwargs)
-        if warm_cfg and tty and env.codex_shadow.exists():
+        if expect_spawn and warm_cfg and tty and env.codex_shadow.exists():
             assert spawn_done.wait(3)
         return code
 
@@ -1672,3 +1675,30 @@ def test_a_fired_child_is_not_leaked_when_run_in_pty_raises(env_factory,
     assert r.flip_requested
     assert r.warm_child is spawned[0]   # the carry's only reference to it
     assert not spawned[0].killed
+
+
+def test_tail_thread_drains_all_directions(tmp_path, monkeypatch):
+    """One source line lands in BOTH shadows via the runner's TailLoop set."""
+    from conftest import Env3, claude_user, write_line
+    from tandem.runner import TailLoop
+    from tandem.sync import SyncEngine
+
+    env = Env3(tmp_path, monkeypatch)
+    write_line(env.claude_shadow, claude_user("fan out"))
+    for target in env.session.targets_for("claude"):
+        engine = SyncEngine(env.store, env.session, "claude", target)
+        loop = TailLoop(env.store, env.session, "claude", target,
+                        env.claude_shadow, engine)
+        assert loop.drain() >= 1
+
+
+def test_warm_skips_opencode_target(tmp_path, monkeypatch):
+    """ensure_warm never spawns when next-in-cycle is opencode (v1 carve-out):
+    an opencode TUI booted pre-drain would cache the session pre-drain and
+    never show the last turn, so opencode-bound flips run cold."""
+    from conftest import Env3
+
+    env = Env3(tmp_path, monkeypatch, active="codex")
+    assert env.session.next_active("codex") == "opencode"
+    r, spawns = _drive_flip(monkeypatch, env, expect_spawn=False)
+    assert spawns == [] and r.warm_child is None

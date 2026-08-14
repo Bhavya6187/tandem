@@ -133,7 +133,7 @@ class TestDoctor:
 
     def test_stale_intent_warns(self, env_factory):
         env = env_factory()
-        cursor = env.store.get_cursor(env.session.tandem_id, "claude")
+        cursor = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         cursor.pending["intent"] = {"line": 3, "pre_size": 10}
         env.store.save_cursor(cursor)
         report = run_doctor(env.store, env.session)
@@ -159,3 +159,22 @@ class TestDoctor:
         env = env_factory()
         report = run_doctor(env.store, env.session)
         assert not any("status bar" in c.message for c in report.checks)
+
+
+def test_doctor_iterates_participants(tmp_path, monkeypatch):
+    from conftest import Env3
+
+    env = Env3(tmp_path, monkeypatch)
+    report = run_doctor(env.store, env.session, live=False)
+    text = " ".join(c.message for c in report.checks)
+    assert "opencode" in text
+
+
+def test_adapter_validate_transcript_dispatch(tmp_path, monkeypatch):
+    from conftest import Env
+    from tandem.harness import get_adapter
+
+    env = Env(tmp_path, monkeypatch)
+    problems = get_adapter("claude").validate_transcript(
+        env.claude_shadow, env.session.native_id("claude"))
+    assert problems == []

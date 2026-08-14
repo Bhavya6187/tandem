@@ -16,14 +16,53 @@ def load(name):
     return [json.loads(l) for l in (GOLDEN / name).read_text().splitlines() if l.strip()]
 
 
+_SIDS = {
+    "claude": "8efda0e4-15e7-4a20-a8e8-8be898a85ee1",
+    "codex": "019faca1-ad54-7092-bed0-f0b2cc71e164",
+}
+
+
 def make_ctx(direction):
+    src, tgt = direction.split("->")
     return SessionContext(
         tandem_id="t1",
         cwd="/probe",
         direction=direction,
-        claude_session_id="8efda0e4-15e7-4a20-a8e8-8be898a85ee1",
-        codex_session_id="019faca1-ad54-7092-bed0-f0b2cc71e164",
+        source_session_id=_SIDS.get(src),
+        target_session_id=_SIDS.get(tgt),
     )
+
+
+def _ctx(direction="claude->codex"):
+    return SessionContext(
+        tandem_id="t1", cwd="/proj", direction=direction,
+        source_session_id="src-id", target_session_id="tgt-id",
+    )
+
+
+def test_direction_split_properties(monkeypatch):
+    from tandem.harness import ADAPTERS
+
+    monkeypatch.setitem(ADAPTERS, "opencode", object())
+    ctx = _ctx("codex->opencode")
+    assert ctx.source_id == "codex"
+    assert ctx.target_id == "opencode"
+
+
+def test_direction_validated():
+    with pytest.raises(ValueError):
+        _ctx("claude->claude")
+    with pytest.raises(ValueError):
+        _ctx("claude->gemini")
+    with pytest.raises(ValueError):
+        _ctx("nonsense")
+
+
+def test_harness_state_namespace_roundtrip():
+    ctx = _ctx()
+    ctx.state_for("claude")["leaf_uuid"] = "u-1"
+    assert ctx.harness_state == {"claude": {"leaf_uuid": "u-1"}}
+    assert ctx.state_for("claude")["leaf_uuid"] == "u-1"
 
 
 def parse_all(adapter, raws, ctx):

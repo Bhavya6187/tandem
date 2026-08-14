@@ -18,12 +18,12 @@ from conftest import claude_user, write_line
 class TestForkShadow:
     def test_fork_copies_shadow_with_new_identity(self, env_factory):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         write_line(env.claude_shadow, claude_user("context before fork"))
 
         fork_id, fork_path = ops.fork_shadow(env.store, env.session)
 
-        assert fork_id != env.session.codex_session_id
+        assert fork_id != env.session.native_id("codex")
         assert fork_path.name.endswith(f"-{fork_id}.jsonl")
         entries = read_jsonl(fork_path)
         meta = entries[0]
@@ -40,20 +40,20 @@ class TestForkShadow:
         from tandem.doctor import validate_transcript
 
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         fork_id, fork_path = ops.fork_shadow(env.store, env.session)
         assert validate_transcript("codex", fork_path, fork_id) == []
 
     def test_fork_leaves_shadow_and_cursors_alone(self, env_factory):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         before_bytes = env.codex_shadow.read_bytes()
-        before_cursor = env.store.get_cursor(env.session.tandem_id, "codex")
+        before_cursor = env.store.get_cursor(env.session.tandem_id, "codex", "claude")
 
         ops.fork_shadow(env.store, env.session)
 
         assert env.codex_shadow.read_bytes() == before_bytes
-        after = env.store.get_cursor(env.session.tandem_id, "codex")
+        after = env.store.get_cursor(env.session.tandem_id, "codex", "claude")
         assert after.byte_offset == before_cursor.byte_offset
         assert after.line_index == before_cursor.line_index
 
@@ -62,7 +62,7 @@ class TestForkShadow:
         fresh mtime. If rollout discovery returned it, a concurrent fresh-codex
         launch would bind the pair's codex id to the subagent's throwaway."""
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         started = time.time()
         _, fork_path = ops.fork_shadow(env.store, env.session)
 
@@ -101,13 +101,13 @@ class TestSeedSubRollout:
         env = env_factory(active="claude")
         write_line(env.claude_shadow, claude_user("pair-only context"))
         before_bytes = env.codex_shadow.read_bytes()
-        before = env.store.get_cursor(env.session.tandem_id, "claude")
+        before = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
 
         _, seed_path = ops.seed_sub_rollout(env.session)
 
         assert "pair-only context" not in seed_path.read_text()
         assert env.codex_shadow.read_bytes() == before_bytes
-        after = env.store.get_cursor(env.session.tandem_id, "claude")
+        after = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         assert after.byte_offset == before.byte_offset
         assert after.line_index == before.line_index
 
@@ -150,7 +150,7 @@ class TestRunSub:
                             "-m", "gpt-x-mini"]
         assert argv[5] == "resume"
         seed_id = argv[6]
-        assert seed_id != env.session.codex_session_id
+        assert seed_id != env.session.native_id("codex")
         # the brief travels on stdin; argv ends at codex's `-` stdin marker
         assert argv[7:] == ["-"]
         assert calls["kw"]["input"] == b"audit the README"
@@ -183,7 +183,7 @@ class TestRunSub:
     def test_full_context_brief_also_goes_over_stdin(self, env_factory,
                                                      monkeypatch):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         calls = {}
         monkeypatch.setattr(
             ops, "_run",
@@ -216,7 +216,7 @@ class TestRunSub:
     def test_full_context_forks_resumes_and_deletes(self, env_factory,
                                                     monkeypatch):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         calls = {}
         monkeypatch.setattr(
             ops, "_run",
@@ -226,7 +226,7 @@ class TestRunSub:
         argv = calls["argv"]
         assert "resume" in argv
         fork_id = argv[argv.index("resume") + 1]
-        assert fork_id != env.session.codex_session_id
+        assert fork_id != env.session.native_id("codex")
         # the fork was cleaned up (keep_forks=False)
         assert paths.find_codex_rollout(fork_id) is None
         kept = list((paths.tandem_home() / "subagents").rglob("*.jsonl"))
@@ -234,7 +234,7 @@ class TestRunSub:
 
     def test_full_context_keep_forks_retains(self, env_factory, monkeypatch):
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         monkeypatch.setattr(ops, "_run", lambda *a, **kw: _R(0))
         ops.run_sub(env.store, env.session, "deep task", context="full",
                     keep_forks=True)
@@ -428,7 +428,7 @@ class TestSubLockCoverage:
             def close(self): ...
 
         code = runner.InteractiveRunner(
-            env.session, lambda store, session, source: _Sink()).run()
+            env.session, lambda store, session, source, target: _Sink()).run()
 
         assert code == 0
         assert seen, "the tail thread never drained"
@@ -441,8 +441,9 @@ class TestSubCli:
         from tandem import cli
         monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
         monkeypatch.setattr(
-            cli, "_check_versions",
-            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+            cli, "_resolve_participants",
+            lambda warn_only=False: (["claude", "codex"],
+                                     {"claude": "2.1.220", "codex": "0.145.0"}),
         )
         return cli
 
@@ -505,8 +506,9 @@ class TestSubModelHeader:
         from tandem import cli
         monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
         monkeypatch.setattr(
-            cli, "_check_versions",
-            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+            cli, "_resolve_participants",
+            lambda warn_only=False: (["claude", "codex"],
+                                     {"claude": "2.1.220", "codex": "0.145.0"}),
         )
         return cli
 
@@ -895,8 +897,9 @@ class TestDoctorAndStatus:
         env = env_factory(active="claude")
         monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
         monkeypatch.setattr(
-            cli, "_check_versions",
-            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+            cli, "_resolve_participants",
+            lambda warn_only=False: (["claude", "codex"],
+                                     {"claude": "2.1.220", "codex": "0.145.0"}),
         )
         sub_root = paths.tandem_home() / "subagents" / env.session.tandem_id
         (sub_root / "running").mkdir(parents=True)
@@ -919,8 +922,9 @@ class TestDoctorAndStatus:
         env = env_factory(active="claude")
         monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
         monkeypatch.setattr(
-            cli, "_check_versions",
-            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+            cli, "_resolve_participants",
+            lambda warn_only=False: (["claude", "codex"],
+                                     {"claude": "2.1.220", "codex": "0.145.0"}),
         )
         run_dir = (paths.tandem_home() / "subagents" / env.session.tandem_id
                    / "running")
@@ -954,8 +958,9 @@ class TestDoctorAndStatus:
         env = env_factory(active="claude")
         monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
         monkeypatch.setattr(
-            cli, "_check_versions",
-            lambda warn_only=False: {"claude": "2.1.220", "codex": "0.145.0"},
+            cli, "_resolve_participants",
+            lambda warn_only=False: (["claude", "codex"],
+                                     {"claude": "2.1.220", "codex": "0.145.0"}),
         )
         run_dir = (paths.tandem_home() / "subagents" / env.session.tandem_id
                    / "running")
@@ -1175,7 +1180,7 @@ class TestBlockedWriteFooter:
         are not this worker's doing, and reporting them sends the
         orchestrator retrying a write this run never attempted."""
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         write_line(env.codex_shadow, {
             "timestamp": "t", "type": "event_msg",
             "payload": {"type": "patch_apply_end", "stdout": "",
@@ -1252,7 +1257,7 @@ class TestBlockedWriteFooter:
         """Same real shape, but inherited by a --context full fork from an
         earlier interactive turn: not this worker's rejection."""
         env = env_factory(active="claude")
-        ops.fast_forward(env.store, env.session, "claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
         for e in self._rejection_pair():
             write_line(env.codex_shadow, e)
 

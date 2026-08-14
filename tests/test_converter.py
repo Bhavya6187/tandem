@@ -13,14 +13,20 @@ def load(name):
     return [json.loads(l) for l in (GOLDEN / name).read_text().splitlines() if l.strip()]
 
 
+_SIDS = {
+    "claude": "8efda0e4-15e7-4a20-a8e8-8be898a85ee1",
+    "codex": "019faca1-ad54-7092-bed0-f0b2cc71e164",
+}
+
+
 def make_ctx(direction):
     return SessionContext(
         tandem_id="t1",
         cwd="/probe",
         direction=direction,
-        claude_session_id="8efda0e4-15e7-4a20-a8e8-8be898a85ee1",
-        codex_session_id="019faca1-ad54-7092-bed0-f0b2cc71e164",
-        claude_leaf_uuid="seed-leaf",
+        source_session_id=_SIDS[direction.split("->")[0]],
+        target_session_id=_SIDS[direction.split("->")[1]],
+        harness_state={"claude": {"leaf_uuid": "seed-leaf"}},
     )
 
 
@@ -131,8 +137,8 @@ class TestCodexToClaude:
         assert entries[0]["parentUuid"] == "seed-leaf"
         for prev, cur in zip(entries, entries[1:]):
             assert cur["parentUuid"] == prev["uuid"]
-        assert ctx.claude_leaf_uuid == entries[-1]["uuid"]
-        assert all(e["sessionId"] == ctx.claude_session_id for e in entries)
+        assert ctx.state_for("claude")["leaf_uuid"] == entries[-1]["uuid"]
+        assert all(e["sessionId"] == ctx.target_session_id for e in entries)
 
         prompts = [e for e in entries if e["type"] == "user"
                    and isinstance(e["message"]["content"], str)]

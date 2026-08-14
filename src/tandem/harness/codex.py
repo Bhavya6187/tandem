@@ -36,6 +36,12 @@ from ..util import append_jsonl_fsync, iso_now_ms, uuid7
 from .base import HarnessAdapter
 
 
+_CODEX_LINE_TYPES = {
+    "session_meta", "response_item", "event_msg", "turn_context",
+    "world_state", "compacted",
+}
+
+
 class CodexAdapter(HarnessAdapter):
     id = "codex"
     display_name = "Codex CLI"
@@ -56,6 +62,31 @@ class CodexAdapter(HarnessAdapter):
 
     def mint_session_id(self) -> str:
         return uuid7()
+
+    def _validate_entries(self, entries, session_id) -> list[str]:
+        problems = []
+        first = entries[0][1]
+        if first.get("type") != "session_meta":
+            problems.append("first line is not session_meta")
+        else:
+            payload = first.get("payload") or {}
+            meta_id = payload.get("id") or payload.get("session_id")
+            if session_id and meta_id != session_id:
+                problems.append(f"session_meta id {meta_id!r} != {session_id!r}")
+        for i, e in entries:
+            etype = e.get("type")
+            if etype not in _CODEX_LINE_TYPES:
+                problems.append(f"line {i}: unknown line type {etype!r}")
+                continue
+            if "payload" not in e:
+                problems.append(f"line {i}: missing payload")
+            if etype == "response_item":
+                p = e.get("payload") or {}
+                if p.get("type") == "message" and not isinstance(p.get("content"), list):
+                    problems.append(f"line {i}: message content is not a list")
+        if not any(e.get("type") == "response_item" for _, e in entries):
+            problems.append("no response_item entries (model context would be empty)")
+        return problems
 
     def session_meta(
         self, cwd: str, session_id: str, originator: str = "tandem"
