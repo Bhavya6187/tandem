@@ -670,7 +670,7 @@ class InteractiveRunner:
             armed=monitor.armed,
             bar=frame_cfg.bar,
             active=active,
-            other=session.next_active(session.active),
+            others=session.targets_for(active),
             key_label=_key_label(frame_cfg.flip_byte),
         )
         self.flip_requested = False

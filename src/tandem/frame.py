@@ -225,12 +225,12 @@ class StatusBar:
     (identity row mapping for everything it can address); DECSTBM keeps
     normal-buffer scrolling above the bar."""
 
-    def __init__(self, rows: int, cols: int, active: str, other: str,
+    def __init__(self, rows: int, cols: int, active: str, others: list[str],
                  key_label: str = "^]"):
         self.rows = rows
         self.cols = cols
         self.active = active
-        self.other = other
+        self.others = list(others)
         # The bar is the only place the keybind is advertised, so it has to
         # name the key actually bound — `[frame] flip_key` rebinds it, and a
         # bar still saying ^] would send the user pressing a key that goes
@@ -250,7 +250,8 @@ class StatusBar:
         if armed:
             text = f" {self.active} ◐ flipping at turn end…  {self.key_label} cancels"
         else:
-            text = f" {self.active} ● │ {self.other} ○   {self.key_label} flips"
+            slots = " │ ".join([f"{self.active} ●"] + [f"{o} ○" for o in self.others])
+            text = f" {slots}   {self.key_label} flips"
         return text[: self.cols].ljust(self.cols)
 
     def paint(self, armed: bool) -> bytes:

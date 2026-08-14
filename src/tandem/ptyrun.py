@@ -21,7 +21,7 @@ import termios
 import threading
 import time
 import tty
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from ptyprocess import PtyProcess
@@ -146,7 +146,7 @@ class FrameIO:
     armed: Callable[[], bool]
     bar: bool = True
     active: str = ""
-    other: str = ""
+    others: list[str] = field(default_factory=list)
     # how `flip_byte` is spelled on the bar; the runner derives it from the
     # configured byte so a rebound key advertises itself correctly
     key_label: str = "^]"
@@ -206,7 +206,7 @@ def run_in_pty(
     )
     guard = OutputGuard(rows) if bar_on else None
     bar = (
-        StatusBar(rows, cols, frame.active, frame.other, frame.key_label)
+        StatusBar(rows, cols, frame.active, frame.others, frame.key_label)
         if bar_on
         else None
     )

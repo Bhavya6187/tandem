@@ -146,7 +146,7 @@ def test_bar_policy_leaves_the_child_at_least_one_row_at_every_size():
 def test_frame_io_defaults():
     frame = FrameIO(flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False)
     assert frame.bar is True
-    assert (frame.active, frame.other) == ("", "")
+    assert (frame.active, frame.others) == ("", [])
     assert frame.key_label == "^]"
     assert frame.bar_dropped is False
 

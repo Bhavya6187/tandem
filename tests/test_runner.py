@@ -575,7 +575,7 @@ def test_runner_passes_frame_and_control(env_factory, monkeypatch):
     assert frame is not None
     assert frame.flip_byte == 0x1D
     assert frame.key_label == "^]"
-    assert frame.active == "claude" and frame.other == "codex"
+    assert frame.active == "claude" and frame.others == ["codex"]
     assert r.flip_requested is False
 
 
