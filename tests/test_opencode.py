@@ -1,5 +1,6 @@
 """Opencode adapter units against a hermetic mini-DB (no binary needed)."""
 
+import json
 import sqlite3
 
 import pytest
@@ -94,3 +95,136 @@ def test_runtime_ready_fails_closed_without_tables(tmp_path, monkeypatch):
 def test_registered_in_adapters():
     from tandem.harness import get_adapter
     assert get_adapter("opencode").id == "opencode"
+
+
+def _insert_session(db, sid="ses_00test0000000000000000000", cwd="/proj"):
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO project VALUES ('p1', ?)", (cwd,))
+        conn.execute(
+            "INSERT INTO session (id, project_id, slug, directory, path, title,"
+            " version, time_created, time_updated) VALUES (?, 'p1', 's', ?, '',"
+            " 't', '1.18.15', 1, 1)", (sid, cwd))
+    return sid
+
+
+def _insert_message(db, sid, msg_id, data, t):
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+                     (msg_id, sid, t, t, json.dumps(data)))
+
+
+def _insert_part(db, sid, msg_id, part_id, data, t=1):
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+                     (part_id, msg_id, sid, t, t, json.dumps(data)))
+
+
+def _seed_turn(db, sid, complete=True, provider="openai"):
+    """user('is the readme updated?') + assistant(reasoning, text, tool,
+    step parts) — shapes lifted from the operator's real 1.18.15 session."""
+    _insert_message(db, sid, "msg_aa0000000001x", {
+        "role": "user", "time": {"created": 1000}, "agent": "build",
+        "model": {"providerID": provider, "modelID": "gpt-5.6-sol"}}, 1000)
+    _insert_part(db, sid, "msg_aa0000000001x", "prt_aa0000000001x",
+                 {"type": "text", "text": "is the readme updated?"})
+    adata = {
+        "parentID": "msg_aa0000000001x", "role": "assistant", "mode": "build",
+        "agent": "build", "path": {"cwd": "/proj", "root": "/proj"}, "cost": 0,
+        "tokens": {"total": 1, "input": 1, "output": 1, "reasoning": 0,
+                   "cache": {"write": 0, "read": 0}},
+        "modelID": "gpt-5.6-sol", "providerID": provider,
+        "time": {"created": 2000},
+    }
+    if complete:
+        adata["time"]["completed"] = 2500
+        adata["finish"] = "stop"
+    _insert_message(db, sid, "msg_ab0000000001x", adata, 2000)
+    for pid, pdata in [
+        ("prt_ab0000000001x", {"type": "step-start", "snapshot": "abc"}),
+        ("prt_ab0000000002x", {"type": "reasoning",
+                               "text": "**Inspecting git state**"}),
+        ("prt_ab0000000003x", {"type": "tool", "tool": "bash",
+                               "callID": "call_1",
+                               "state": {"status": "completed",
+                                         "input": {"command": "git status"},
+                                         "output": "(no output)",
+                                         "metadata": {}, "title": "git status",
+                                         "time": {"start": 1, "end": 2}}}),
+        ("prt_ab0000000004x", {"type": "text", "text": "Yes, it is current."}),
+        ("prt_ab0000000005x", {"type": "step-finish", "reason": "stop",
+                               "tokens": {}, "cost": 0}),
+    ]:
+        _insert_part(db, sid, "msg_ab0000000001x", pid, pdata)
+
+
+def _cursor():
+    from tandem.state import SyncCursor
+    return SyncCursor(tandem_id="t", source="opencode", target="claude")
+
+
+def test_reader_yields_completed_turn(mini_db):
+    sid = _insert_session(mini_db)
+    _seed_turn(mini_db, sid, complete=True)
+    cur = _cursor()
+    reader = opencode.OpencodeTurnReader(sid, mini_db, cur)
+    lines = reader.poll()
+    assert len(lines) == 1
+    turn = lines[0].raw
+    assert turn["user"]["parts"][0]["text"] == "is the readme updated?"
+    assert len(turn["assistants"]) == 1
+    assert lines[0].pos == {"time": 2000, "id": "msg_ab0000000001x"}
+    # committing the pos means a second poll yields nothing
+    lines[0].advance(cur)
+    assert opencode.OpencodeTurnReader(sid, mini_db, cur).poll() == []
+
+
+def test_reader_holds_incomplete_turn(mini_db):
+    sid = _insert_session(mini_db)
+    _seed_turn(mini_db, sid, complete=False)
+    reader = opencode.OpencodeTurnReader(sid, mini_db, _cursor())
+    assert reader.poll() == []
+
+
+def test_parse_entry_maps_part_types(mini_db):
+    sid = _insert_session(mini_db)
+    _seed_turn(mini_db, sid, complete=True)
+    reader = opencode.OpencodeTurnReader(sid, mini_db, _cursor())
+    turn = reader.poll()[0].raw
+    from tandem.events import SessionContext
+    ctx = SessionContext(tandem_id="t", cwd="/proj",
+                         direction="opencode->claude")
+    events = opencode.OpencodeAdapter().parse_entry(turn, ctx)
+    kinds = [e.kind for e in events]
+    assert kinds == ["user_message", "system", "thinking", "tool_call",
+                     "tool_result", "assistant_message", "system"]
+    call = events[3]
+    result = events[4]
+    assert call.tool == "bash" and call.call_id == "call_1"
+    assert result.output == "(no output)" and result.call_id == "call_1"
+    assert events[0].turn_index == 1        # user message bumps the turn
+
+
+def test_parse_entry_skips_tandem_echo(mini_db):
+    sid = _insert_session(mini_db)
+    _seed_turn(mini_db, sid, complete=True, provider="tandem")
+    reader = opencode.OpencodeTurnReader(sid, mini_db, _cursor())
+    turn = reader.poll()[0].raw
+    from tandem.events import SessionContext
+    ctx = SessionContext(tandem_id="t", cwd="/proj",
+                         direction="opencode->claude")
+    events = opencode.OpencodeAdapter().parse_entry(turn, ctx)
+    assert [e.kind for e in events] == ["system"]
+    assert events[0].subtype == "tandem_echo"
+
+
+def test_session_status_probe(mini_db):
+    sid = _insert_session(mini_db)
+    adapter = opencode.OpencodeAdapter()
+    _seed_turn(mini_db, sid, complete=False)
+    assert adapter.session_status(sid) == "busy"
+    with sqlite3.connect(mini_db) as conn:
+        conn.execute(
+            "UPDATE message SET data = json_set(data,"
+            " '$.time.completed', 2500, '$.finish', 'stop')"
+            " WHERE id = 'msg_ab0000000001x'")
+    assert adapter.session_status(sid) == "waiting"
