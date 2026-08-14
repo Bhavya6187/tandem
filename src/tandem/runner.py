@@ -464,7 +464,7 @@ def await_codex_rollout(cwd: str, after: float, timeout: float | None = None) ->
         time.sleep(0.3)
 
 
-SinkFactory = Callable[[StateStore, PairedSession, str], EventSink]
+SinkFactory = Callable[[StateStore, PairedSession, str, str], EventSink]
 
 
 class InteractiveRunner:
@@ -550,7 +550,7 @@ class InteractiveRunner:
         control = PtyControl()
         probe_last: dict = {"status": "<unpolled>"}
 
-        def claude_probe() -> str | None:
+        def status_probe_fn() -> str | None:
             # A raising probe would kill the tandem-flip thread and leave
             # the bar advertising an armed flip that can never fire (os.kill
             # raises OverflowError — not OSError — on a pid outside C-long
@@ -569,10 +569,10 @@ class InteractiveRunner:
         monitor = FlipMonitor(
             control, adapter.quit_keystrokes(), transcript, sentinel,
             marker_wired=bool(hook_extra),
-            # claude only: codex has no session registry, and a probe that
-            # answers None would flip eagerly mid-turn — absence, not None
-            # answers, is how codex opts out.
-            status_probe=claude_probe if active == "claude" else None,
+            # capability check: adapters without a live status registry/probe
+            # opt out by absence — a probe answering None would flip eagerly
+            # mid-turn.
+            status_probe=status_probe_fn if hasattr(adapter, "session_status") else None,
         )
         # Keeps one shadow harness resident. It starts at runner entry and is
         # refreshed after a tail drain changes the shadow transcript; the flip
@@ -592,6 +592,11 @@ class InteractiveRunner:
             if not (frame_cfg.warm and _stdin_tty()):
                 return
             shadow = session.next_active(session.active)
+            if shadow == "opencode":
+                # v1 carve-out (spec: Frame and flip): an opencode TUI booted
+                # before the final drain would cache the session pre-drain and
+                # never show the last turn. Opencode-bound flips run cold.
+                return
             size = _shadow_size(session, shadow)
             if size is None:
                 return   # no shadow file yet: switch_session's late-create
@@ -713,22 +718,25 @@ class InteractiveRunner:
                             break
                     if path is None:
                         return
+                loops: list[TailLoop] = []
+                sinks: list[EventSink] = []
                 try:
-                    sink = self.sink_factory(store, current, active)
+                    for tgt in current.targets_for(active):
+                        sink = self.sink_factory(store, current, active, tgt)
+                        sinks.append(sink)
+                        loops.append(TailLoop(store, current, active, tgt, path, sink))
                 except Exception as exc:
                     errors.append(f"sync disabled: {exc}")
+                    for s in sinks:
+                        s.close()
                     return
                 watcher = TranscriptWatcher()
                 watcher.watch(path)
                 watcher.watch(sentinel)
                 watcher.start()
-                # transitional single-direction loop; Task 6 fans out one
-                # TailLoop per (active, target) direction
-                loop = TailLoop(store, current, active,
-                                current.targets_for(active)[0], path, sink)
-                # `tandem sub --context full` drains this same cursor row from
-                # a separate process, holding `ops._sub_lock()` across its
-                # drain-then-fork. Two concurrent drains of one cursor
+                # `tandem sub --context full` drains these same cursor rows
+                # from a separate process, holding `ops._sub_lock()` across
+                # its drain-then-fork. Two concurrent drains of one cursor
                 # translate the same lines twice — duplicate turns and call ids
                 # in the shadow and in the fork — so the tail thread takes the
                 # same flock. Kept tight around the drain itself: the wait
@@ -737,18 +745,23 @@ class InteractiveRunner:
                 from . import ops
                 try:
                     while not stop.is_set():
+                        drained = 0
                         with ops._sub_lock():
-                            drained = loop.drain()
+                            for loop in loops:
+                                drained += loop.drain()
                         if drained:
                             ensure_warm()
                         watcher.wait()
                     # final drain after the CLI exits
                     with ops._sub_lock():
-                        loop.drain()
-                    errors.extend(loop.errors)
+                        for loop in loops:
+                            loop.drain()
+                    for loop in loops:
+                        errors.extend(loop.errors)
                 finally:
                     watcher.stop()
-                    sink.close()
+                    for s in sinks:
+                        s.close()
 
         thread = threading.Thread(target=tail_thread, name="tandem-tail", daemon=True)
         thread.start()

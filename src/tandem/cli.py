@@ -219,7 +219,7 @@ def resume(tandem_id: str | None) -> None:
     sys.exit(_enter_session(session))
 
 
-def _default_sink_factory(store, session, source):
+def _default_sink_factory(store, session, source, target):
     """Sync engine by default; TANDEM_LOG_EVENTS=1 switches to the debug
     event logger (no shadow writes)."""
     import os
@@ -229,7 +229,7 @@ def _default_sink_factory(store, session, source):
 
     if os.environ.get("TANDEM_LOG_EVENTS"):
         return EventLogger(session.tandem_id, source)
-    return SyncEngine(store, session, source)
+    return SyncEngine(store, session, source, target)
 
 
 @main.command(name="run")

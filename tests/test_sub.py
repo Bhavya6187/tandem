@@ -428,7 +428,7 @@ class TestSubLockCoverage:
             def close(self): ...
 
         code = runner.InteractiveRunner(
-            env.session, lambda store, session, source: _Sink()).run()
+            env.session, lambda store, session, source, target: _Sink()).run()
 
         assert code == 0
         assert seen, "the tail thread never drained"
