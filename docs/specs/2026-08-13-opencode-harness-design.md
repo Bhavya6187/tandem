@@ -70,15 +70,26 @@ error naming what's missing (replacing the hard both-binaries check at
 `cli.py:585`).
 
 **Resume:** each resume recomputes availability (stored participants ∩
-currently installed-and-supported). A member that has become
-unavailable is **dropped from the session permanently** — the narrowed
-list is written back to the session row with a one-line notice — and
-the session continues at N−1. There is no dynamic rejoin: a harness
-missing even once would need multi-source backlog replay to catch up
-(and the flip sequence's anti-echo fast-forward is precisely what
-erases such backlogs), so a reinstalled CLI participates in fresh
-sessions, not old ones. The surviving list is this session's **runtime
-participants**; at least two are required to run.
+currently installed-and-supported), in this order:
+
+1. Compute the surviving list. Fewer than two → fail with an
+   actionable error **without modifying the stored session**.
+2. Otherwise atomically persist the narrowed list and a valid active:
+   if the stored active was itself removed, the first surviving
+   participant in stored cycle order takes over. One-line notice
+   either way.
+3. Build the fan-out engines, flip cycle, and status bar from the
+   persisted list.
+
+A dropped member is gone from that session **permanently**; the
+session continues at N−1. No dynamic rejoin — this is a deliberate
+scope decision, not a cursor impossibility: cursors toward an absent
+member are never touched (see the invariant below), so its backlog
+would technically survive absence, but letting it rejoin safely would
+require a reconciliation phase that drains every surviving source into
+the returner before it enters the cycle. v1 skips that machinery; a
+reinstalled CLI participates in fresh sessions, not old ones. The
+surviving list is this session's **runtime participants**.
 
 **Invariant: not-installed is a normal state, not a degraded one.** The
 only probe an uninstalled harness ever receives is the PATH lookup
@@ -110,9 +121,11 @@ dedup mechanism.
 
 1. Drain the old active into every other runtime participant (flushing
    dangling tool calls).
-2. Fast-forward **every outgoing cursor of the new active** — one per
-   `(new_active, target)` direction — to the new active's current
-   end-of-store position.
+2. Fast-forward the new active's outgoing cursors — one per
+   `(new_active, target)` direction, **for runtime-participant targets
+   only** — to the new active's current end-of-store position. Cursors
+   involving a non-participant are never created, advanced, or
+   inspected, anywhere.
 3. Set active; launch.
 
 One-off turns (`run_oneoff`) generalize the same way: after the
