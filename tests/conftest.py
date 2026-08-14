@@ -183,6 +183,9 @@ class FakeOpencodeAdapter:
     def detect_version(self):
         return "1.18.15"
 
+    def validate_transcript(self, path, session_id):
+        return []
+
     def version_supported(self, v):
         return True
 

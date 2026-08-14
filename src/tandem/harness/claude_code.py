@@ -64,6 +64,16 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+_CLAUDE_ENTRY_TYPES = {
+    "user", "assistant", "attachment", "system", "summary",
+    "queue-operation", "last-prompt", "progress", "file-history-snapshot",
+    "mode",  # {"type":"mode","mode":"normal",...} observed on --resume runs
+    # uuid-less metadata entries claude 2.1.220 interleaves with conversation
+    "permission-mode", "ai-title", "file-history-delta", "pr-link",
+    "relocated", "worktree-state",
+}
+
+
 class ClaudeCodeAdapter(HarnessAdapter):
     id = "claude"
     display_name = "Claude Code"
@@ -85,6 +95,36 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
     def expected_transcript_path(self, cwd: str, session_id: str) -> Path:
         return paths.claude_transcript_path(cwd, session_id)
+
+    def _validate_entries(self, entries, session_id) -> list[str]:
+        problems = []
+        seen_uuids: set[str] = set()
+        convo = 0
+        for i, e in entries:
+            etype = e.get("type")
+            if etype not in _CLAUDE_ENTRY_TYPES:
+                problems.append(f"line {i}: unknown entry type {etype!r}")
+                continue
+            if etype in ("user", "assistant"):
+                convo += 1
+                if session_id and e.get("sessionId") not in (None, session_id):
+                    problems.append(
+                        f"line {i}: sessionId {e.get('sessionId')!r} != {session_id!r}"
+                    )
+                if not e.get("uuid"):
+                    problems.append(f"line {i}: conversation entry missing uuid")
+                parent = e.get("parentUuid")
+                if parent and parent not in seen_uuids:
+                    # claude tolerates forward/dangling parents poorly; flag it
+                    problems.append(f"line {i}: parentUuid {parent!r} not seen earlier")
+                msg = e.get("message")
+                if not isinstance(msg, dict) or "content" not in msg:
+                    problems.append(f"line {i}: malformed message")
+            if e.get("uuid"):
+                seen_uuids.add(e["uuid"])
+        if convo == 0:
+            problems.append("no conversation entries (user/assistant)")
+        return problems
 
     def mint_session_id(self) -> str:
         return str(uuidlib.uuid4())

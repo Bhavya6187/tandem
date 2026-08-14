@@ -35,6 +35,18 @@ class HarnessAdapter(ABC):
         True — only adapters with external runtime state override."""
         return True, ""
 
+    def validate_transcript(self, path: Path, session_id: str | None) -> list[str]:
+        """Structural dry-resume check. Default: parse JSONL, then the
+        adapter-specific entry validation. Storage-backed adapters override
+        the whole method."""
+        problems, entries = _parse_jsonl_entries(path)
+        if entries is None:
+            return problems
+        return problems + self._validate_entries(entries, session_id)
+
+    def _validate_entries(self, entries, session_id) -> list[str]:
+        return []
+
     # -- session files -------------------------------------------------------
 
     @abstractmethod
@@ -98,3 +110,33 @@ class HarnessAdapter(ABC):
     @abstractmethod
     def render_placeholder(self, text: str, ctx: SessionContext) -> list[dict[str, Any]]:
         """Native entries for an untranslatable-turn placeholder."""
+
+
+def _parse_jsonl_entries(path: Path):
+    """(problems, entries|None) — the shared JSONL prelude of the structural
+    dry-resume check, split from the per-adapter entry validation."""
+    import json
+
+    problems: list[str] = []
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return [f"cannot read transcript: {exc}"], None
+    if not raw.strip():
+        return ["transcript is empty"], None
+    entries: list[tuple[int, dict]] = []
+    for i, line in enumerate(raw.splitlines()):
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            problems.append(f"line {i}: not valid JSON")
+            continue
+        if not isinstance(obj, dict):
+            problems.append(f"line {i}: not a JSON object")
+            continue
+        entries.append((i, obj))
+    if not entries:
+        return problems + ["no parseable entries"], None
+    return problems, entries
