@@ -97,7 +97,10 @@ class Env:
 
         claude_sid = "11111111-1111-4111-8111-111111111111"
         codex_sid = "019faca1-0000-7000-8000-000000000001"
-        self.session = self.store.create_session(self.cwd, active, claude_sid, codex_sid)
+        self.session = self.store.create_session(
+            self.cwd, active, ["claude", "codex"],
+            {"claude": claude_sid, "codex": codex_sid},
+        )
         ctx = SessionContext(
             tandem_id=self.session.tandem_id,
             cwd=self.cwd,
@@ -111,7 +114,7 @@ class Env:
         self.claude_shadow = get_adapter("claude").create_shadow_transcript(
             self.cwd, claude_sid, ctx, "[tandem] seed"
         )
-        cur = self.store.get_cursor(self.session.tandem_id, "codex")
+        cur = self.store.get_cursor(self.session.tandem_id, "codex", "claude")
         cur.pending["claude_leaf_uuid"] = ctx.claude_leaf_uuid
         self.store.save_cursor(cur)
         # a stand-in transcript some tests tail directly

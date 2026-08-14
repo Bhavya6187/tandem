@@ -148,7 +148,7 @@ class DoctorReport:
 
 def run_doctor(store, session, live: bool = False) -> DoctorReport:
     from . import compat, ops, paths
-    from .harness import get_adapter
+    from .harness import get_adapter, other
 
     report = DoctorReport()
 
@@ -178,7 +178,7 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
     transcripts: dict[str, Path | None] = {}
     for hid in ("claude", "codex"):
         adapter = get_adapter(hid)
-        sid = getattr(session, f"{hid}_session_id")
+        sid = session.native_id(hid)
         if not sid:
             report.warn(f"{hid}: session id pending (harness has not run yet)")
             transcripts[hid] = None
@@ -201,7 +201,7 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
             report.ok(f"{hid}: transcript resumable by structure ({path.name})")
 
     for source in ("claude", "codex"):
-        cursor = store.get_cursor(session.tandem_id, source)
+        cursor = store.get_cursor(session.tandem_id, source, other(source))
         if cursor.pending.get("intent"):
             report.warn(
                 f"sync from {source}: unresolved write intent (crash during "
@@ -303,13 +303,13 @@ def _live_resume_checks(report: DoctorReport, session, transcripts) -> None:
     from .harness import get_adapter
 
     prompt = "tandem doctor live check - reply with exactly: ok"
-    if session.claude_session_id and transcripts.get("claude"):
-        argv = get_adapter("claude").oneoff_argv(session.claude_session_id, prompt)
+    if session.native_id("claude") and transcripts.get("claude"):
+        argv = get_adapter("claude").oneoff_argv(session.native_id("claude"), prompt)
         _live_one(report, "claude", argv, session.cwd)
     else:
         report.warn("claude: skipping live resume (no transcript yet)")
-    if session.codex_session_id and transcripts.get("codex"):
-        argv = get_adapter("codex").oneoff_argv(session.codex_session_id, prompt)
+    if session.native_id("codex") and transcripts.get("codex"):
+        argv = get_adapter("codex").oneoff_argv(session.native_id("codex"), prompt)
         _live_one(report, "codex", argv, session.cwd)
     else:
         report.warn("codex: skipping live resume (no transcript yet)")

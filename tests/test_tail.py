@@ -106,7 +106,9 @@ class TestTailLoop:
         db = tmp_path / "state.db"
 
         with StateStore(db_path=db) as store:
-            session = store.create_session(str(tmp_path), "claude", "s1", "x1")
+            session = store.create_session(str(tmp_path), "claude",
+                                           ["claude", "codex"],
+                                           {"claude": "s1", "codex": "x1"})
             sink = CollectSink()
             loop = TailLoop(store, session, "claude", transcript, sink)
             assert loop.drain() == 0
@@ -135,14 +137,16 @@ class TestTailLoop:
         transcript.touch()
         db = tmp_path / "state.db"
         with StateStore(db_path=db) as store:
-            session = store.create_session(str(tmp_path), "claude", "s1", "x1")
+            session = store.create_session(str(tmp_path), "claude",
+                                           ["claude", "codex"],
+                                           {"claude": "s1", "codex": "x1"})
             sink = CollectSink()
             loop = TailLoop(store, session, "claude", transcript, sink)
             with open(transcript, "a") as f:
                 f.write(json.dumps(claude_user("full")) + "\n")
                 f.write('{"type": "user", "mess')  # torn write
             assert loop.drain() == 1
-            saved = store.get_cursor(session.tandem_id, "claude")
+            saved = store.get_cursor(session.tandem_id, "claude", "codex")
             assert saved.line_index == 1
             with open(transcript, "a") as f:
                 f.write('age": {"role": "user", "content": "later"}}\n')

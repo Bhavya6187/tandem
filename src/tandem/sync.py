@@ -59,18 +59,18 @@ class SyncEngine:
         self.target = get_adapter(self.target_id)
 
         if self.target_id == "claude":
-            if not session.claude_session_id:
+            if not session.native_id("claude"):
                 raise SyncSetupError("no claude session id recorded")
             self.shadow_path = paths.claude_transcript_path(
-                session.cwd, session.claude_session_id
+                session.cwd, session.native_id("claude")
             )
         else:
-            if not session.codex_session_id:
+            if not session.native_id("codex"):
                 raise SyncSetupError("no codex session id recorded yet")
-            found = paths.find_codex_rollout(session.codex_session_id)
+            found = paths.find_codex_rollout(session.native_id("codex"))
             if found is None:
                 raise SyncSetupError(
-                    f"codex rollout for {session.codex_session_id} not found"
+                    f"codex rollout for {session.native_id('codex')} not found"
                 )
             self.shadow_path = found
         if not self.shadow_path.exists():

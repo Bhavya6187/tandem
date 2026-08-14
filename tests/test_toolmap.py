@@ -558,7 +558,7 @@ class TestDangleFlush:
         )
         ops.drain_source(env.store, env.session, "claude")  # default: no flush
 
-        cur = env.store.get_cursor(env.session.tandem_id, "claude")
+        cur = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         assert "dangling-1" in cur.pending["pending_calls"]
         rollout = read_jsonl(env.codex_shadow)
         payloads = [e["payload"] for e in rollout if e.get("type") == "response_item"]
@@ -572,7 +572,7 @@ class TestDangleFlush:
         loop, engine = env.loop()
         self._pendings(env)
         loop.drain()
-        cur = env.store.get_cursor(env.session.tandem_id, "claude")
+        cur = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         assert cur.pending["pending_calls"]
         cur.pending["intent"] = {"line": -1, "pre_size": 0}  # file grew => landed
         env.store.save_cursor(cur)
@@ -582,7 +582,7 @@ class TestDangleFlush:
         assert loop2.ctx.pending_calls  # restored from the cursor
         assert engine2.flush_dangling(loop2.ctx, loop2.cursor) == 0
         assert env.codex_shadow.read_text() == before
-        reread = env.store.get_cursor(env.session.tandem_id, "claude")
+        reread = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         assert reread.pending["pending_calls"] == {}
         assert "intent" not in reread.pending
 
@@ -593,13 +593,13 @@ class TestDangleFlush:
         self._pendings(env)
         loop.drain()
         size = env.codex_shadow.stat().st_size
-        cur = env.store.get_cursor(env.session.tandem_id, "claude")
+        cur = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         cur.pending["intent"] = {"line": -1, "pre_size": size}  # did not grow
         env.store.save_cursor(cur)
 
         loop2, engine2 = env.loop()
         assert engine2.flush_dangling(loop2.ctx, loop2.cursor) == 2
         assert env.codex_shadow.stat().st_size > size
-        reread = env.store.get_cursor(env.session.tandem_id, "claude")
+        reread = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         assert reread.pending["pending_calls"] == {}
         assert "intent" not in reread.pending

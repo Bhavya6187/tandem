@@ -48,7 +48,7 @@ def build_launch(session: PairedSession, side: str) -> LaunchRecipe:
     build launches identically; argv order is interactive + user [args] +
     hook extras (tests pin the order)."""
     adapter = get_adapter(side)
-    sid = getattr(session, f"{side}_session_id")
+    sid = session.native_id(side)
     transcript: Path | None = None
     fresh = True
     if sid:
@@ -72,7 +72,7 @@ def _shadow_size(session: PairedSession, side: str) -> int | None:
     """Byte size of `side`'s transcript right now; None when the side has
     no id or no file yet. The freshness contract's one number: any growth
     means content synced in behind the warm child's back."""
-    sid = getattr(session, f"{side}_session_id")
+    sid = session.native_id(side)
     if not sid:
         return None
     path = get_adapter(side).transcript_path(session.cwd, sid)

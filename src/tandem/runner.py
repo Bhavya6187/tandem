@@ -21,7 +21,7 @@ from typing import Callable, Protocol
 from . import paths
 from .config import load_frame_config
 from .events import SessionContext
-from .harness import get_adapter
+from .harness import get_adapter, other
 from .ptyrun import FrameIO, PtyControl, _winsize, run_in_pty
 from .state import PairedSession, StateStore, SyncCursor
 from .tailer import JsonlTailer, TailedLine, TranscriptTruncated, TranscriptWatcher
@@ -71,8 +71,8 @@ def ctx_from_cursor(session: PairedSession, source: str, cursor: SyncCursor) -> 
         turn_index=cursor.turn_index,
         pending_calls=calls,
         claude_leaf_uuid=leaf,
-        claude_session_id=session.claude_session_id,
-        codex_session_id=session.codex_session_id,
+        claude_session_id=session.native_id("claude"),
+        codex_session_id=session.native_id("codex"),
     )
 
 
@@ -397,7 +397,7 @@ class TailLoop:
         self.session = session
         self.source = source
         self.sink = sink
-        self.cursor = store.get_cursor(session.tandem_id, source)
+        self.cursor = store.get_cursor(session.tandem_id, source, other(source))
         self.ctx = ctx_from_cursor(session, source, self.cursor)
         self.tailer = JsonlTailer(
             transcript, start_offset=self.cursor.byte_offset,
@@ -525,7 +525,7 @@ class InteractiveRunner:
         session = self.session
         active = session.active
         adapter = get_adapter(active)
-        active_sid = getattr(session, f"{active}_session_id")
+        active_sid = session.native_id(active)
         # One recipe, bound once: hook_argv_extra re-reads config per call
         # (codex checks the user's config.toml for a notify handler), so the
         # argv actually launched and marker_wired must come from the same

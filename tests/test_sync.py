@@ -69,7 +69,7 @@ class TestSyncClaudeToCodex:
         assert len(qfiles) == 2
         assert (qdir / qfiles[0]).read_text().startswith("{this is not json")
 
-        cursor = env.store.get_cursor(env.session.tandem_id, "claude")
+        cursor = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         assert cursor.failed_turns == 1
 
     def test_restart_resumes_without_duplicates(self, env_factory):
@@ -97,7 +97,7 @@ class TestSyncClaudeToCodex:
 
         # forge the crash window: rewind the cursor to before the line and
         # re-add the intent, as if we died right after append_jsonl_fsync
-        cursor = env.store.get_cursor(env.session.tandem_id, "claude")
+        cursor = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         shadow_size = env.codex_shadow.stat().st_size
         cursor.byte_offset = 0
         cursor.line_index = 0

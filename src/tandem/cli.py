@@ -84,7 +84,8 @@ def _pair_session(store: StateStore, cwd: str, active: str) -> PairedSession:
     shadow = other(active)
     claude_sid = get_adapter("claude").mint_session_id()
     codex_sid = None if active == "codex" else get_adapter("codex").mint_session_id()
-    session = store.create_session(cwd, active, claude_sid, codex_sid)
+    session = store.create_session(cwd, active, ["claude", "codex"],
+                                   {"claude": claude_sid, "codex": codex_sid})
 
     ctx = SessionContext(
         tandem_id=session.tandem_id,
@@ -108,7 +109,7 @@ def _pair_session(store: StateStore, cwd: str, active: str) -> PairedSession:
     else:
         shadow_adapter.create_shadow_transcript(cwd, codex_sid, ctx, note)
         cursor_updates = {}
-    cursor = store.get_cursor(session.tandem_id, active)
+    cursor = store.get_cursor(session.tandem_id, active, shadow)
     cursor.pending.update(cursor_updates)
     store.save_cursor(cursor)
 
@@ -138,7 +139,7 @@ def status() -> None:
         click.echo(f"  last sync: {session.last_sync_at or 'never'}")
         for hid in ("claude", "codex"):
             adapter = get_adapter(hid)
-            sid = getattr(session, f"{hid}_session_id")
+            sid = session.native_id(hid)
             role = "ACTIVE" if session.active == hid else "shadow"
             path = adapter.transcript_path(session.cwd, sid) if sid else None
             click.echo(f"  {adapter.display_name:<12} {role}")
@@ -148,7 +149,7 @@ def status() -> None:
         from . import ops
 
         for source in ("claude", "codex"):
-            cursor = store.get_cursor(session.tandem_id, source)
+            cursor = store.get_cursor(session.tandem_id, source, other(source))
             behind = ops.unsynced_lines(session, store, source)
             if cursor.updated_at or cursor.failed_turns or behind:
                 line = (

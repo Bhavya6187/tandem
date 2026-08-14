@@ -42,7 +42,7 @@ def test_claude_resume_gets_args_before_hook_extras(env_factory, monkeypatch):
     )
     argv = _run_capturing_argv(env, monkeypatch)
     i = argv.index("--resume")
-    assert argv[i + 1] == env.session.claude_session_id
+    assert argv[i + 1] == env.session.native_id("claude")
     assert argv[i + 2] == "--dangerously-skip-permissions"
     assert argv[i + 3] == "--settings"  # hook extras immediately after
 
@@ -66,7 +66,7 @@ def test_codex_gets_its_own_args(env_factory, monkeypatch):
     )
     argv = _run_capturing_argv(env, monkeypatch)
     i = argv.index("resume")
-    assert argv[i + 1] == env.session.codex_session_id
+    assert argv[i + 1] == env.session.native_id("codex")
     assert argv[i + 2] == "--dangerously-bypass-approvals-and-sandbox"
     assert "--should-not-appear" not in argv
 
@@ -76,7 +76,8 @@ def test_codex_fresh_mint_gets_args_after_bare_binary(env_factory, monkeypatch):
     # configured args are the first tokens after the binary.
     env = env_factory(active="codex")
     session = env.store.create_session(
-        env.cwd, "codex", env.session.claude_session_id, None
+        env.cwd, "codex", ["claude", "codex"],
+        {"claude": env.session.native_id("claude"), "codex": None},
     )
     (paths.tandem_home() / "config.toml").write_text(
         '[codex]\nargs = ["--dangerously-bypass-approvals-and-sandbox"]\n'
@@ -114,7 +115,7 @@ def test_oneoff_argv_never_gains_args(tmp_path, monkeypatch):
 def test_no_config_leaves_argv_unchanged(env_factory, monkeypatch):
     env = env_factory(active="claude")
     argv = _run_capturing_argv(env, monkeypatch)
-    assert argv[:3] == ["claude", "--resume", env.session.claude_session_id]
+    assert argv[:3] == ["claude", "--resume", env.session.native_id("claude")]
     assert argv[3] == "--settings"
 
 
@@ -355,7 +356,8 @@ def test_runner_publishes_the_discovered_codex_rollout_to_the_monitor(
     # hands it to the monitor, so an armed flip stops being judged blind.
     env = env_factory(active="codex")
     session = env.store.create_session(
-        env.cwd, "codex", env.session.claude_session_id, None
+        env.cwd, "codex", ["claude", "codex"],
+        {"claude": env.session.native_id("claude"), "codex": None},
     )
     rollout = env.codex_shadow
     monkeypatch.setattr(
@@ -947,7 +949,7 @@ def test_runner_wires_status_probe_for_claude(env_factory, monkeypatch):
     d = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "sessions"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{me}.json").write_text(json.dumps(
-        {"pid": me, "sessionId": env.session.claude_session_id,
+        {"pid": me, "sessionId": env.session.native_id("claude"),
          "status": "busy"}))
     assert probe() == "busy"
 

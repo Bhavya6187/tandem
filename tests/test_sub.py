@@ -23,7 +23,7 @@ class TestForkShadow:
 
         fork_id, fork_path = ops.fork_shadow(env.store, env.session)
 
-        assert fork_id != env.session.codex_session_id
+        assert fork_id != env.session.native_id("codex")
         assert fork_path.name.endswith(f"-{fork_id}.jsonl")
         entries = read_jsonl(fork_path)
         meta = entries[0]
@@ -48,12 +48,12 @@ class TestForkShadow:
         env = env_factory(active="claude")
         ops.fast_forward(env.store, env.session, "claude")
         before_bytes = env.codex_shadow.read_bytes()
-        before_cursor = env.store.get_cursor(env.session.tandem_id, "codex")
+        before_cursor = env.store.get_cursor(env.session.tandem_id, "codex", "claude")
 
         ops.fork_shadow(env.store, env.session)
 
         assert env.codex_shadow.read_bytes() == before_bytes
-        after = env.store.get_cursor(env.session.tandem_id, "codex")
+        after = env.store.get_cursor(env.session.tandem_id, "codex", "claude")
         assert after.byte_offset == before_cursor.byte_offset
         assert after.line_index == before_cursor.line_index
 
@@ -101,13 +101,13 @@ class TestSeedSubRollout:
         env = env_factory(active="claude")
         write_line(env.claude_shadow, claude_user("pair-only context"))
         before_bytes = env.codex_shadow.read_bytes()
-        before = env.store.get_cursor(env.session.tandem_id, "claude")
+        before = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
 
         _, seed_path = ops.seed_sub_rollout(env.session)
 
         assert "pair-only context" not in seed_path.read_text()
         assert env.codex_shadow.read_bytes() == before_bytes
-        after = env.store.get_cursor(env.session.tandem_id, "claude")
+        after = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         assert after.byte_offset == before.byte_offset
         assert after.line_index == before.line_index
 
@@ -150,7 +150,7 @@ class TestRunSub:
                             "-m", "gpt-x-mini"]
         assert argv[5] == "resume"
         seed_id = argv[6]
-        assert seed_id != env.session.codex_session_id
+        assert seed_id != env.session.native_id("codex")
         # the brief travels on stdin; argv ends at codex's `-` stdin marker
         assert argv[7:] == ["-"]
         assert calls["kw"]["input"] == b"audit the README"
@@ -226,7 +226,7 @@ class TestRunSub:
         argv = calls["argv"]
         assert "resume" in argv
         fork_id = argv[argv.index("resume") + 1]
-        assert fork_id != env.session.codex_session_id
+        assert fork_id != env.session.native_id("codex")
         # the fork was cleaned up (keep_forks=False)
         assert paths.find_codex_rollout(fork_id) is None
         kept = list((paths.tandem_home() / "subagents").rglob("*.jsonl"))

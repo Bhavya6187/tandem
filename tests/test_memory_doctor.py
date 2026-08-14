@@ -133,7 +133,7 @@ class TestDoctor:
 
     def test_stale_intent_warns(self, env_factory):
         env = env_factory()
-        cursor = env.store.get_cursor(env.session.tandem_id, "claude")
+        cursor = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         cursor.pending["intent"] = {"line": 3, "pre_size": 10}
         env.store.save_cursor(cursor)
         report = run_doctor(env.store, env.session)

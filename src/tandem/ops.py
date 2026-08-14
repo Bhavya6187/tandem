@@ -35,7 +35,7 @@ _run = subprocess.run
 
 
 def source_transcript(session: PairedSession, source: str) -> Path | None:
-    sid = getattr(session, f"{source}_session_id")
+    sid = session.native_id(source)
     if not sid:
         return None
     adapter = get_adapter(source)
@@ -72,7 +72,7 @@ def drain_source(
 def fast_forward(store: StateStore, session: PairedSession, source: str) -> None:
     """Mark everything currently in `source`'s file as already-synced."""
     transcript = source_transcript(session, source)
-    cursor = store.get_cursor(session.tandem_id, source)
+    cursor = store.get_cursor(session.tandem_id, source, other(source))
     if transcript is None:
         cursor.byte_offset = 0
         cursor.line_index = 0
@@ -88,7 +88,7 @@ def unsynced_lines(session: PairedSession, store: StateStore, source: str) -> in
     transcript = source_transcript(session, source)
     if transcript is None:
         return 0
-    cursor = store.get_cursor(session.tandem_id, source)
+    cursor = store.get_cursor(session.tandem_id, source, other(source))
     try:
         data = transcript.read_bytes()
     except OSError:
@@ -108,7 +108,7 @@ def switch_session(store: StateStore, session: PairedSession):
 
     # If codex never ran (id pending), its shadow file does not exist yet;
     # create it now so the flip has something to resume.
-    if new_active == "codex" and not session.codex_session_id:
+    if new_active == "codex" and not session.native_id("codex"):
         _create_codex_shadow_late(store, session)
         session = store.get_session(session.tandem_id) or session
 
@@ -118,11 +118,12 @@ def switch_session(store: StateStore, session: PairedSession):
     # the drain below no target to append to. Seed it now — but only when
     # tandem has never consumed a byte of it; a consumed-then-missing file
     # is data loss, and the drain's hard error is the right answer there.
-    if new_active == "claude" and session.claude_session_id:
+    if new_active == "claude" and session.native_id("claude"):
         expected = get_adapter("claude").expected_transcript_path(
-            session.cwd, session.claude_session_id
+            session.cwd, session.native_id("claude")
         )
-        never_ran = store.get_cursor(session.tandem_id, "claude").byte_offset == 0
+        never_ran = store.get_cursor(session.tandem_id, "claude",
+                                     other("claude")).byte_offset == 0
         if not expected.exists() and never_ran:
             _create_claude_shadow_late(store, session)
 
@@ -137,14 +138,14 @@ def switch_session(store: StateStore, session: PairedSession):
     problems: list[str] = []
     transcript = source_transcript(session, new_active)
     if transcript is None:
-        if new_active == "claude" and session.claude_session_id:
+        if new_active == "claude" and session.native_id("claude"):
             # claude never launched; it will be created fresh on next run
             problems = []
         else:
             problems = ["transcript for newly active harness does not exist yet"]
     else:
         problems = validate_transcript(new_active, transcript,
-                                       getattr(session, f"{new_active}_session_id"))
+                                       session.native_id(new_active))
     return new_active, problems, memory_report
 
 
@@ -153,7 +154,7 @@ def _create_claude_shadow_late(store: StateStore, session: PairedSession) -> Non
     from .runner import ctx_from_cursor
 
     adapter = get_adapter("claude")
-    cursor = store.get_cursor(session.tandem_id, session.active)
+    cursor = store.get_cursor(session.tandem_id, session.active, session.shadow)
     ctx = ctx_from_cursor(session, session.active, cursor)
     # Any leaf uuid the cursor still holds points into the missing file;
     # the seed is the new file's root, so it must not chain onto it.
@@ -161,7 +162,7 @@ def _create_claude_shadow_late(store: StateStore, session: PairedSession) -> Non
     note = SEED_NOTE.format(
         tandem_id=session.tandem_id, other=get_adapter(session.active).display_name
     )
-    adapter.create_shadow_transcript(session.cwd, session.claude_session_id, ctx, note)
+    adapter.create_shadow_transcript(session.cwd, session.native_id("claude"), ctx, note)
     cursor.pending["claude_leaf_uuid"] = ctx.claude_leaf_uuid
     store.save_cursor(cursor)
 
@@ -172,7 +173,7 @@ def _create_codex_shadow_late(store: StateStore, session: PairedSession) -> None
 
     adapter = get_adapter("codex")
     sid = adapter.mint_session_id()
-    cursor = store.get_cursor(session.tandem_id, session.active)
+    cursor = store.get_cursor(session.tandem_id, session.active, session.shadow)
     ctx = ctx_from_cursor(session, session.active, cursor)
     ctx.codex_session_id = sid
     note = SEED_NOTE.format(
@@ -189,7 +190,7 @@ def run_oneoff(
     then sync that turn into the other file. Exactly one model (target's) is
     invoked."""
     adapter = get_adapter(target)
-    sid = getattr(session, f"{target}_session_id")
+    sid = session.native_id(target)
 
     # Catch up the active side first, then mark the target's whole file as
     # known so only the new turn flows back afterwards. (When target IS the
@@ -213,7 +214,7 @@ def run_oneoff(
             if new_sid:
                 store.set_native_session_id(session.tandem_id, "codex", new_sid)
                 session = store.get_session(session.tandem_id) or session
-                fast_forward_to_zero = store.get_cursor(session.tandem_id, "codex")
+                fast_forward_to_zero = store.get_cursor(session.tandem_id, "codex", "claude")
                 fast_forward_to_zero.byte_offset = 0
                 fast_forward_to_zero.line_index = 0
                 store.save_cursor(fast_forward_to_zero)
@@ -225,7 +226,7 @@ def run_oneoff(
     # next drain translates them straight back, duplicating call ids and text.
     echo_side = other(target)
     echo_pre_size = _file_size(source_transcript(session, echo_side))
-    echo_pre_offset = store.get_cursor(session.tandem_id, echo_side).byte_offset
+    echo_pre_offset = store.get_cursor(session.tandem_id, echo_side, target).byte_offset
 
     drain_source(store, session, target, flush_dangling=True)
 
@@ -269,7 +270,7 @@ def fork_shadow(store: StateStore, session: PairedSession) -> tuple[str, Path]:
     hold `_sub_lock()` across this call: it drains the active source first,
     and concurrent drains against the same cursor row corrupt sync state.
     Returns (fork_session_id, fork_path)."""
-    if not session.codex_session_id:
+    if not session.native_id("codex"):
         _create_codex_shadow_late(store, session)
         session = store.get_session(session.tandem_id) or session
     drain_source(store, session, session.active, flush_dangling=True)

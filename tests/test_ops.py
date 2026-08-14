@@ -83,7 +83,7 @@ class TestSwitch:
         assert "[via claude-code] ok!" in texts
 
         # ...and codex's cursor now sits at EOF so nothing echoes back
-        cursor = env.store.get_cursor(env.session.tandem_id, "codex")
+        cursor = env.store.get_cursor(env.session.tandem_id, "codex", "claude")
         assert cursor.byte_offset == env.codex_shadow.stat().st_size
         assert ops.unsynced_lines(session, env.store, "codex") == 0
 
@@ -298,9 +298,9 @@ class TestValidate:
 
         env = env_factory()
         assert validate_transcript("codex", env.codex_shadow,
-                                   env.session.codex_session_id) == []
+                                   env.session.native_id("codex")) == []
         assert validate_transcript("claude", env.claude_shadow,
-                                   env.session.claude_session_id) == []
+                                   env.session.native_id("claude")) == []
 
     def test_claude_metadata_entry_types_validate(self, env_factory):
         """claude 2.1.220 interleaves uuid-less metadata entries with the
@@ -308,7 +308,7 @@ class TestValidate:
         from tandem.doctor import validate_transcript
 
         env = env_factory()
-        sid = env.session.claude_session_id
+        sid = env.session.native_id("claude")
         for meta in [
             {"type": "permission-mode", "permissionMode": "bypassPermissions",
              "sessionId": sid},

@@ -92,7 +92,8 @@ def test_one_shot_without_session_hints_tandem(homes, ok_versions):
 
 def _mk_session(cwd, active="claude", n=0):
     with StateStore() as store:
-        return store.create_session(str(cwd), active, f"c-{n}", f"x-{n}")
+        return store.create_session(str(cwd), active, ["claude", "codex"],
+                                    {"claude": f"c-{n}", "codex": f"x-{n}"})
 
 
 def test_enter_session_runs_the_flip_loop(homes, monkeypatch):

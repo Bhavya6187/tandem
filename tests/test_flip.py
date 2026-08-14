@@ -20,7 +20,9 @@ def sess(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     with StateStore() as store:
-        return store.create_session(str(tmp_path / "proj"), "claude", "c-id", "x-id")
+        return store.create_session(str(tmp_path / "proj"), "claude",
+                                    ["claude", "codex"],
+                                    {"claude": "c-id", "codex": "x-id"})
 
 
 def fake_runner(log, codes=None):
