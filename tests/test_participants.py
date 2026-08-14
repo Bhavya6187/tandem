@@ -82,3 +82,28 @@ def test_resume_narrow_moves_active_off_dropped_member(tmp_path, monkeypatch):
                                  "opencode": None})
     session = _narrow_participants(env.store, env.session)
     assert session.active == "claude"       # first survivor in stored order
+
+
+def test_resolution_drops_below_floor_version(tmp_path, monkeypatch, capsys):
+    """Below the compat floor the session format predates what tandem was
+    built on — fail closed: warn and exclude."""
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path))
+    _fake_versions(monkeypatch, {"claude": "2.1.220", "codex": "0.100.0",
+                                 "opencode": "1.18.15"})
+    usable, versions = _resolve_participants()
+    assert usable == ["claude", "opencode"]
+    err = capsys.readouterr().err
+    assert "excluded" in err
+
+
+def test_resolution_admits_above_ceiling_with_warning(tmp_path, monkeypatch, capsys):
+    """Above the ceiling is drift, not proven breakage: today's behavior is
+    warn-and-proceed (`tandem doctor` is the advertised next step), and the
+    resolution keeps it — otherwise the next codex release would hard-brick
+    tandem until a compat bump ships."""
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path))
+    _fake_versions(monkeypatch, {"claude": "2.1.220", "codex": "0.150.0",
+                                 "opencode": None})
+    usable, _ = _resolve_participants()
+    assert usable == ["claude", "codex"]
+    assert "outside the range" in capsys.readouterr().err

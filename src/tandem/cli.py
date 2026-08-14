@@ -37,9 +37,11 @@ def _resolve_participants(warn_only: bool = False) -> tuple[list[str], dict[str,
     """participants = configured ∩ installed-and-version-supported-and-ready.
 
     Not-installed is a normal state: silent skip, zero further probes.
-    Installed but unusable (version below floor, runtime not ready) warns
-    and skips — fail closed. Fewer than two usable is an error naming
-    what's missing (warn-only mode reports instead, for status/resume)."""
+    Installed but unusable (version below the compat floor, runtime not
+    ready) warns and skips — fail closed. Above-ceiling versions warn but
+    stay usable (drift, not proven breakage). Fewer than two usable is an
+    error naming what's missing (warn-only mode reports instead, for
+    status/resume)."""
     from .config import load_harnesses
     from .harness import ADAPTERS
 
@@ -58,6 +60,20 @@ def _resolve_participants(warn_only: bool = False) -> tuple[list[str], dict[str,
             continue                      # silent: the invariant
         if not adapter.version_supported(v):
             tested = compat.COMPAT[hid].tested
+            parsed = compat.parse_version(v)
+            if parsed is not None and parsed < compat.COMPAT[hid].min_version:
+                # Below the floor the session format predates what tandem was
+                # built on and genuinely cannot work: fail closed. Above the
+                # ceiling is unproven drift — warn and proceed (a hard drop
+                # would brick tandem on every new release until a compat
+                # bump), which is also the pre-N-harness behavior.
+                click.secho(
+                    f"warning: {adapter.display_name} version {v!r} is below "
+                    f"the oldest supported version (tested: {tested}) — "
+                    f"excluded from this session.",
+                    fg="yellow", err=True,
+                )
+                continue
             click.secho(
                 f"warning: {adapter.display_name} version {v!r} is outside the "
                 f"range tandem was built against (tested: {tested}). "
@@ -312,6 +328,15 @@ def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
     text = " ".join(prompt)
     with StateStore() as store:
         session = _require_session(store)
+        if target not in session.participants:
+            # Click admits every supported name; this session may hold fewer
+            # (dropped member, or a build with no adapter for the name).
+            click.secho(
+                f"error: {target} is not a participant in this session "
+                f"(participants: {', '.join(session.participants)}).",
+                fg="red", err=True,
+            )
+            sys.exit(1)
         if target == session.active:
             click.secho(
                 f"note: {target} is already the active harness; running the "

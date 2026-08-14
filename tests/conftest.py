@@ -189,6 +189,9 @@ class FakeOpencodeAdapter:
     def version_supported(self, v):
         return True
 
+    def runtime_ready(self):
+        return True, ""
+
     def interactive_argv(self, session_id, fresh):
         return ["opencode", "-s", session_id]
 
