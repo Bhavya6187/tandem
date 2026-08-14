@@ -90,9 +90,9 @@ def _pair_session(store: StateStore, cwd: str, active: str) -> PairedSession:
     ctx = SessionContext(
         tandem_id=session.tandem_id,
         cwd=cwd,
-        direction="claude->codex" if active == "claude" else "codex->claude",
-        claude_session_id=claude_sid,
-        codex_session_id=codex_sid,
+        direction=f"{active}->{shadow}",
+        source_session_id=session.native_id(active),
+        target_session_id=session.native_id(shadow),
     )
     note = SEED_NOTE.format(
         tandem_id=session.tandem_id,
@@ -103,14 +103,11 @@ def _pair_session(store: StateStore, cwd: str, active: str) -> PairedSession:
     # at first launch (claude is pinned via --session-id; codex mints its
     # own id which tandem captures on first run).
     shadow_adapter = get_adapter(shadow)
-    if shadow == "claude":
-        shadow_adapter.create_shadow_transcript(cwd, claude_sid, ctx, note)
-        cursor_updates = {"claude_leaf_uuid": ctx.claude_leaf_uuid}
-    else:
-        shadow_adapter.create_shadow_transcript(cwd, codex_sid, ctx, note)
-        cursor_updates = {}
+    shadow_adapter.create_shadow_transcript(
+        cwd, claude_sid if shadow == "claude" else codex_sid, ctx, note
+    )
     cursor = store.get_cursor(session.tandem_id, active, shadow)
-    cursor.pending.update(cursor_updates)
+    cursor.pending["harness_state"] = ctx.harness_state
     store.save_cursor(cursor)
 
     from .memory_sync import sync_memory_files

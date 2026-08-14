@@ -105,17 +105,26 @@ class Env:
             tandem_id=self.session.tandem_id,
             cwd=self.cwd,
             direction="claude->codex",
-            claude_session_id=claude_sid,
-            codex_session_id=codex_sid,
+            source_session_id=claude_sid,
+            target_session_id=codex_sid,
         )
         self.codex_shadow = get_adapter("codex").create_shadow_transcript(
             self.cwd, codex_sid, ctx, "[tandem] seed"
         )
+        # the claude shadow is a TARGET of the codex->claude direction: its
+        # renderer stamps ctx.target_session_id, so it needs its own ctx
+        ctx_claude = SessionContext(
+            tandem_id=self.session.tandem_id,
+            cwd=self.cwd,
+            direction="codex->claude",
+            source_session_id=codex_sid,
+            target_session_id=claude_sid,
+        )
         self.claude_shadow = get_adapter("claude").create_shadow_transcript(
-            self.cwd, claude_sid, ctx, "[tandem] seed"
+            self.cwd, claude_sid, ctx_claude, "[tandem] seed"
         )
         cur = self.store.get_cursor(self.session.tandem_id, "codex", "claude")
-        cur.pending["claude_leaf_uuid"] = ctx.claude_leaf_uuid
+        cur.pending["harness_state"] = ctx_claude.harness_state
         self.store.save_cursor(cur)
         # a stand-in transcript some tests tail directly
         self.source_file = tmp_path / "active.jsonl"

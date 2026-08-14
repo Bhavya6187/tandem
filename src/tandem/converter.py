@@ -15,7 +15,7 @@ native entries.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from . import toolmap
 from .constants import ATTRIBUTION
@@ -30,9 +30,6 @@ from .events import (
 from .harness import get_adapter, other
 from .summarize import summarize_orphan_result
 
-Direction = Literal["claude->codex", "codex->claude"]
-
-
 @dataclass
 class TranslationError:
     reason: str
@@ -42,7 +39,7 @@ class TranslationError:
 @runtime_checkable
 class TraceConverter(Protocol):
     def translate_entry(
-        self, entry: dict[str, Any], direction: Direction, ctx: SessionContext
+        self, entry: dict[str, Any], direction: str, ctx: SessionContext
     ) -> list[dict[str, Any]] | TranslationError: ...
 
 
@@ -59,7 +56,7 @@ class ReferenceConverter:
     both replay APIs reject."""
 
     def translate_entry(
-        self, entry: dict[str, Any], direction: Direction, ctx: SessionContext
+        self, entry: dict[str, Any], direction: str, ctx: SessionContext
     ) -> list[dict[str, Any]] | TranslationError:
         source_id, target_id = direction.split("->")
         source = get_adapter(source_id)

@@ -104,7 +104,7 @@ class TestSyncClaudeToCodex:
         cursor.turn_index = 0
         cursor.pending = {
             "pending_calls": {},
-            "claude_leaf_uuid": None,
+            "harness_state": {},
             "intent": {"line": 0, "pre_size": shadow_size - 1},
         }
         env.store.save_cursor(cursor)

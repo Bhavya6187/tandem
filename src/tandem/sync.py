@@ -109,10 +109,10 @@ class SyncEngine:
             adapter = get_adapter("claude")
             leaf = adapter.derive_leaf_uuid(self.shadow_path)
             if leaf:
-                ctx.claude_leaf_uuid = leaf
+                ctx.state_for("claude")["leaf_uuid"] = leaf
             model = adapter.derive_last_model(self.shadow_path)
             if model:
-                ctx.claude_model = model
+                ctx.state_for("claude")["model"] = model
 
     # -- sink interface ------------------------------------------------------
 
@@ -177,7 +177,7 @@ class SyncEngine:
                 # know; re-derive the chain tip from the file
                 leaf = get_adapter("claude").derive_leaf_uuid(self.shadow_path)
                 if leaf:
-                    ctx.claude_leaf_uuid = leaf
+                    ctx.state_for("claude")["leaf_uuid"] = leaf
         else:
             pre_size = self.shadow_path.stat().st_size
             cursor.pending["intent"] = {"line": line.line_index, "pre_size": pre_size}

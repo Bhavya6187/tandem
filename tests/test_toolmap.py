@@ -36,12 +36,18 @@ def result(output, source="claude", call_id="c1", structured=None, is_error=Fals
                       structured=structured, is_error=is_error)
 
 
+_SIDS = {
+    "claude": "11111111-1111-4111-8111-111111111111",
+    "codex": "019faca1-0000-7000-8000-000000000001",
+}
+
+
 def _ctx(direction="claude->codex"):
     return SessionContext(
         tandem_id="t1", cwd="/p", direction=direction,
-        claude_session_id="11111111-1111-4111-8111-111111111111",
-        codex_session_id="019faca1-0000-7000-8000-000000000001",
-        claude_leaf_uuid="seed",
+        source_session_id=_SIDS[direction.split("->")[0]],
+        target_session_id=_SIDS[direction.split("->")[1]],
+        harness_state={"claude": {"leaf_uuid": "seed"}},
     )
 
 
@@ -445,13 +451,13 @@ class TestClaudeToolRendering:
         # uuid/parentUuid chain is intact across the mixed entries
         for prev, cur in zip(entries, entries[1:]):
             assert cur["parentUuid"] == prev["uuid"]
-        assert ctx.claude_leaf_uuid == entries[-1]["uuid"]
+        assert ctx.state_for("claude")["leaf_uuid"] == entries[-1]["uuid"]
 
     def test_render_uses_last_real_claude_model(self):
         # claude --resume rejects "<synced>" as a session model; rendered
         # entries carry the model claude last used when one is known
         ctx = _ctx("codex->claude")
-        ctx.claude_model = "claude-fable-5"
+        ctx.state_for("claude")["model"] = "claude-fable-5"
         entries = get_adapter("claude").render_events([
             AssistantMessage(source="codex", text="hi"),
             call("Bash", {"command": "ls"}, source="codex", call_id="c9"),

@@ -155,15 +155,17 @@ def _create_claude_shadow_late(store: StateStore, session: PairedSession) -> Non
 
     adapter = get_adapter("claude")
     cursor = store.get_cursor(session.tandem_id, session.active, session.shadow)
-    ctx = ctx_from_cursor(session, session.active, cursor)
+    ctx = ctx_from_cursor(session, cursor)
     # Any leaf uuid the cursor still holds points into the missing file;
     # the seed is the new file's root, so it must not chain onto it.
-    ctx.claude_leaf_uuid = None
+    ctx.state_for("claude")["leaf_uuid"] = None
     note = SEED_NOTE.format(
         tandem_id=session.tandem_id, other=get_adapter(session.active).display_name
     )
     adapter.create_shadow_transcript(session.cwd, session.native_id("claude"), ctx, note)
-    cursor.pending["claude_leaf_uuid"] = ctx.claude_leaf_uuid
+    cursor.pending.setdefault("harness_state", {}).setdefault("claude", {})[
+        "leaf_uuid"
+    ] = ctx.state_for("claude").get("leaf_uuid")
     store.save_cursor(cursor)
 
 
@@ -174,8 +176,8 @@ def _create_codex_shadow_late(store: StateStore, session: PairedSession) -> None
     adapter = get_adapter("codex")
     sid = adapter.mint_session_id()
     cursor = store.get_cursor(session.tandem_id, session.active, session.shadow)
-    ctx = ctx_from_cursor(session, session.active, cursor)
-    ctx.codex_session_id = sid
+    ctx = ctx_from_cursor(session, cursor)
+    ctx.target_session_id = sid
     note = SEED_NOTE.format(
         tandem_id=session.tandem_id, other=get_adapter(session.active).display_name
     )

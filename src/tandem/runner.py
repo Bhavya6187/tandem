@@ -59,20 +59,23 @@ class EventLogger:
         self._fh.close()
 
 
-def ctx_from_cursor(session: PairedSession, source: str, cursor: SyncCursor) -> SessionContext:
-    direction = "claude->codex" if source == "claude" else "codex->claude"
+def ctx_from_cursor(session: PairedSession, cursor: SyncCursor) -> SessionContext:
     pending = dict(cursor.pending)
+    state = pending.pop("harness_state", {})
+    # legacy key from the pre-namespace cursor layout; fold it in
     leaf = pending.pop("claude_leaf_uuid", None)
+    if leaf is not None:
+        state.setdefault("claude", {})["leaf_uuid"] = leaf
     calls = pending.pop("pending_calls", {})
     return SessionContext(
         tandem_id=session.tandem_id,
         cwd=session.cwd,
-        direction=direction,
+        direction=f"{cursor.source}->{cursor.target}",
         turn_index=cursor.turn_index,
         pending_calls=calls,
-        claude_leaf_uuid=leaf,
-        claude_session_id=session.native_id("claude"),
-        codex_session_id=session.native_id("codex"),
+        harness_state=state,
+        source_session_id=session.native_id(cursor.source),
+        target_session_id=session.native_id(cursor.target),
     )
 
 
@@ -83,7 +86,7 @@ def ctx_to_cursor(ctx: SessionContext, cursor: SyncCursor) -> None:
     cursor.pending.update(
         {
             "pending_calls": ctx.pending_calls,
-            "claude_leaf_uuid": ctx.claude_leaf_uuid,
+            "harness_state": ctx.harness_state,
         }
     )
 
@@ -398,7 +401,7 @@ class TailLoop:
         self.source = source
         self.sink = sink
         self.cursor = store.get_cursor(session.tandem_id, source, other(source))
-        self.ctx = ctx_from_cursor(session, source, self.cursor)
+        self.ctx = ctx_from_cursor(session, self.cursor)
         self.tailer = JsonlTailer(
             transcript, start_offset=self.cursor.byte_offset,
             start_line=self.cursor.line_index,
