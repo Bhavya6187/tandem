@@ -41,8 +41,8 @@ append-only JSONL transcript.
 - Opencode subagent dispatch (`tandem:opencode` agent, model pinning).
 - MCP-config sync for opencode (`tandem sync-mcp` stays claude↔codex).
 - Opencode's experimental v2 storage (`session_message`/
-  `session_input`) — excluded by the compat ceiling; v1 targets the v1
-  `message`/`part` tables only.
+  `session_input`) — v1 targets the v1 `message`/`part` tables only;
+  a future cutover is future maintenance (see Compat gate).
 - A persistent opencode idle-hook plugin (fs-watch on the WAL file is
   the v1 wake-up signal).
 - Reasoning content in either direction. Tandem's `Thinking` event
@@ -84,7 +84,7 @@ no shadow session, no cursors, no bar slot, no doctor probes, and no
 warnings — `tandem` with opencode absent behaves byte-for-byte like
 today's claude↔codex tandem. Absence is mentioned in exactly one place:
 a one-line informational note in `tandem doctor`. Warnings are reserved
-for **installed but unusable** (version outside range, DB discovery
+for **installed but unusable** (version below floor, DB discovery
 failure, schema drift). The rule is symmetric: codex uninstalled yields
 a silent claude↔opencode tandem.
 
@@ -206,15 +206,16 @@ importer/exporter in tests.
 
 ### Compat gate
 
-`COMPAT["opencode"] = CompatRange(tested="1.18.15", min_version=(1, 18),
-max_exclusive=(1, 19))`. The ceiling is the v2-storage guard: opencode's
-repo carries an event-sourced `session_message` model behind
-experimental flags, and the legacy tables will still *exist* after any
-cutover — table presence proves nothing. A version bump ships that
-cutover; the ceiling catches it, and the existing out-of-range flow
-(warn + require `tandem doctor`) plus the oracle tests take it from
-there. A cheap startup sanity check that `message`/`part` exist guards
-outright breakage.
+Floor only, no ceiling (operator call: assume forward versions keep
+working). `COMPAT["opencode"]` pins `tested="1.18.15"`,
+`min_version=(1, 18)` — versions below the floor predate the SQLite
+storage era and genuinely cannot work — with an effectively unbounded
+upper range. If opencode's storage does move (the repo carries an
+experimental v2 `session_message` model), the tripwires are the cheap
+startup sanity check that `message`/`part` exist (failing closed:
+opencode dropped from the usable set with a warning) and the oracle
+tests; handling an actual cutover is future maintenance, not a v1
+gate.
 
 ### Storage facts
 
@@ -370,7 +371,7 @@ prevents echo.
 - `opencode db path` failure or schema drift at startup → opencode
   dropped from the usable set with a warning (fail closed; never guess).
 - Doctor opencode section (runs only when the binary exists): version
-  vs. range, DB discovered and writable, WAL mode on, paired-session
+  vs. floor, DB discovered and writable, WAL mode on, paired-session
   structure (last message a completed assistant). Non-installed
   harnesses: one informational line. `--live` resume checks iterate
   usable participants (`doctor.py:301-315`).
