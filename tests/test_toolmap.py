@@ -609,3 +609,14 @@ class TestDangleFlush:
         reread = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
         assert reread.pending["pending_calls"] == {}
         assert "intent" not in reread.pending
+
+
+def test_map_pair_unknown_target_passthrough():
+    from tandem.events import ToolCall, ToolResult
+    from tandem.toolmap import map_pair
+    call = ToolCall(source="claude", call_id="c", tool="Bash",
+                    arguments={"command": "ls"})
+    result = ToolResult(source="claude", call_id="c", output="ok")
+    mc, mr = map_pair(call, result, "opencode")
+    assert mc.tool == "Bash" and mc.arguments == {"command": "ls"}
+    assert mr.output == "ok"

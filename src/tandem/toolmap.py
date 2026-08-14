@@ -41,13 +41,16 @@ def parse_exec_output(raw: str) -> tuple[str | None, str]:
     return exit_code, raw[m.end():] if m else raw
 
 
+_MAPPERS: dict[str, dict] = {}   # filled after the mapper tables below
+
+
 def map_pair(
     call: ToolCall, result: ToolResult, target: str
 ) -> tuple[ToolCall, ToolResult]:
-    """One completed source-native pair -> one target-native pair."""
+    """One completed source-native pair -> one target-native pair. Targets
+    without a Tier-1 table (opencode, any future harness) pass through."""
     try:
-        mapper = _TO_CODEX if target == "codex" else _TO_CLAUDE
-        fn = mapper.get(call.tool)
+        fn = _MAPPERS.get(target, {}).get(call.tool)
         if fn is not None:
             mapped = fn(call, result)
             if mapped is not None:
@@ -305,3 +308,5 @@ _TO_CLAUDE = {
     "apply_patch": _patch_to_edit,
     "update_plan": _plan_to_todos,
 }
+
+_MAPPERS.update({"codex": _TO_CODEX, "claude": _TO_CLAUDE})

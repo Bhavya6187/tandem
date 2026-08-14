@@ -531,18 +531,100 @@ class OpencodeAdapter(HarnessAdapter):
             return False
         return row is not None
 
-    # -- temporary stubs (replaced by Task 13) -------------------------------
+    # -- launching -----------------------------------------------------------
+
+    def interactive_argv(self, session_id: str | None, fresh: bool) -> list[str]:
+        assert session_id, "opencode sessions are created at pair time"
+        return [self.binary, "-s", session_id]
+
+    def oneoff_argv(self, session_id: str, prompt: str) -> list[str]:
+        return [self.binary, "run", "-s", session_id, prompt]
+
+    def hook_argv_extra(self, sentinel: Path) -> list[str]:
+        # No per-invocation hook flag exists; the tailer's fs-watch on the
+        # -wal file is the wake-up signal (watch_paths).
+        return []
+
+    def quit_keystrokes(self) -> list[bytes]:
+        # LIVE-VERIFY before release (spec item 2): pinned per version like
+        # the claude [^C,^C,^C] recipe; the SIGTERM ladder backstops.
+        return [b"\x03", b"\x03"]
+
+    # -- shadow birth (delegated to `opencode import`) ------------------------
 
     def create_shadow_transcript(
         self, cwd: str, session_id: str, ctx: SessionContext, note: str
     ) -> Path:
-        raise NotImplementedError
+        """Tandem never hand-writes opencode session rows. Mint the ids,
+        write a minimal export-format file, and let `opencode import` run
+        its own schema decoders, project bootstrap, and directory re-homing.
+        One subprocess, once per session, off the sync path."""
+        import tempfile
 
-    def interactive_argv(self, session_id: str | None, fresh: bool) -> list[str]:
-        raise NotImplementedError
-
-    def oneoff_argv(self, session_id: str, prompt: str) -> list[str]:
-        raise NotImplementedError
-
-    def hook_argv_extra(self, sentinel: Path) -> list[str]:
-        raise NotImplementedError
+        now = _now_ms()
+        version = self.detect_version() or "0.0.0"
+        user_id = mint_id("msg")
+        asst_id = mint_id("msg")
+        sentinel_model = {"providerID": SENTINEL_PROVIDER,
+                          "modelID": SENTINEL_MODEL}
+        payload = {
+            "info": {
+                # projectID/directory/path are placeholders: import re-homes
+                # them from its own instance context. agent/model omitted
+                # (optional session-level; opencode's default applies).
+                "id": session_id,
+                "projectID": "tandem-import",
+                "directory": cwd,
+                "title": "tandem paired session",
+                "version": version,
+                "time": {"created": now, "updated": now},
+                "cost": 0,
+                "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                           "cache": {"read": 0, "write": 0}},
+            },
+            "messages": [
+                {"info": {"id": user_id, "sessionID": session_id,
+                          "role": "user", "time": {"created": now},
+                          "agent": "build", "model": sentinel_model},
+                 "parts": [{"id": mint_id("prt"), "sessionID": session_id,
+                            "messageID": user_id, "type": "text",
+                            "text": note}]},
+                {"info": {"id": asst_id, "sessionID": session_id,
+                          "role": "assistant", "parentID": user_id,
+                          "time": {"created": now, "completed": now},
+                          "modelID": SENTINEL_MODEL,
+                          "providerID": SENTINEL_PROVIDER,
+                          "mode": "build", "agent": "build",
+                          "path": {"cwd": cwd, "root": cwd},
+                          "cost": 0, "finish": "stop",
+                          "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                                     "cache": {"read": 0, "write": 0}}},
+                 "parts": [{"id": mint_id("prt"), "sessionID": session_id,
+                            "messageID": asst_id, "type": "text",
+                            "text": "[tandem] Session created; context syncs"
+                                    " in from the paired session."}]},
+            ],
+        }
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".json", prefix="tandem-oc-seed-", delete=False
+        ) as f:
+            json.dump(payload, f)
+            seed_file = Path(f.name)
+        try:
+            out = _run([self.binary, "import", str(seed_file)], cwd=cwd,
+                       capture_output=True, text=True, timeout=120)
+            if out.returncode != 0:
+                tail = (out.stderr or out.stdout or "").strip().splitlines()
+                raise RuntimeError(
+                    f"opencode import failed ({out.returncode})"
+                    + (f": {tail[-1][:200]}" if tail else ""))
+        finally:
+            seed_file.unlink(missing_ok=True)
+        db = self.transcript_path(cwd, session_id)
+        if db is None:
+            raise RuntimeError(
+                f"opencode import reported success but session {session_id}"
+                " is not in the database")
+        ctx.state_for("opencode")["turn_user_id"] = user_id
+        ctx.state_for("opencode")["assistant_id"] = None
+        return db

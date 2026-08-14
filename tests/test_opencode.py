@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -329,3 +330,83 @@ def test_transcript_path_requires_session_row(mini_db):
     assert adapter.transcript_path("/proj", "ses_missing") is None
     sid = _insert_session(mini_db)
     assert adapter.transcript_path("/proj", sid) == mini_db
+
+
+def test_create_shadow_via_import(mini_db, tmp_path, monkeypatch):
+    """The import subprocess is simulated: assert the payload shape, then
+    perform the inserts import would do."""
+    adapter = opencode.OpencodeAdapter()
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        assert argv[:3] == ["opencode", "import", argv[2]]
+        payload = json.loads(Path(argv[2]).read_text())
+        captured["payload"] = payload
+        info = payload["info"]
+        with sqlite3.connect(mini_db) as conn:
+            conn.execute("INSERT OR IGNORE INTO project VALUES ('p1', ?)",
+                         (kwargs.get("cwd"),))
+            conn.execute(
+                "INSERT INTO session (id, project_id, slug, directory, path,"
+                " title, version, time_created, time_updated)"
+                " VALUES (?, 'p1', 'slug', ?, '', ?, ?, ?, ?)",
+                (info["id"], kwargs.get("cwd"), info["title"],
+                 info["version"], info["time"]["created"],
+                 info["time"]["updated"]))
+            for m in payload["messages"]:
+                mi = m["info"]
+                conn.execute(
+                    "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+                    (mi["id"], info["id"], mi["time"]["created"],
+                     mi["time"]["created"],
+                     json.dumps({k: v for k, v in mi.items()
+                                 if k not in ("id", "sessionID")})))
+                for p in m["parts"]:
+                    conn.execute(
+                        "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+                        (p["id"], mi["id"], info["id"], 1, 1,
+                         json.dumps({k: v for k, v in p.items()
+                                     if k not in ("id", "sessionID",
+                                                  "messageID")})))
+        import subprocess
+        return subprocess.CompletedProcess(argv, 0, stdout="Imported", stderr="")
+
+    monkeypatch.setattr(opencode, "_run", fake_run)
+    sid = adapter.mint_session_id()
+    ctx = _render_ctx(sid)
+    path = adapter.create_shadow_transcript(str(tmp_path), sid, ctx,
+                                            "[tandem] seed note")
+    assert path == mini_db
+    payload = captured["payload"]
+    info = payload["info"]
+    assert info["id"] == sid
+    assert "agent" not in info and "model" not in info     # session-level omitted
+    user, assistant = (m["info"] for m in payload["messages"])
+    assert user["agent"] == "build"                        # message-level REQUIRED
+    assert user["model"] == {"providerID": "tandem", "modelID": "<synced>"}
+    assert assistant["providerID"] == "tandem"
+    assert assistant["time"]["completed"] and assistant["finish"] == "stop"
+    assert ctx.state_for("opencode")["turn_user_id"] == user["id"]
+    assert adapter.session_status(sid) == "waiting"        # lists as idle
+
+
+def test_create_shadow_raises_on_import_failure(mini_db, tmp_path, monkeypatch):
+    import subprocess
+    monkeypatch.setattr(
+        opencode, "_run",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 1, stdout="",
+                                                      stderr="boom"))
+    adapter = opencode.OpencodeAdapter()
+    with pytest.raises(RuntimeError, match="boom"):
+        adapter.create_shadow_transcript(str(tmp_path), adapter.mint_session_id(),
+                                         _render_ctx(), "[tandem] seed")
+
+
+def test_launch_surface():
+    adapter = opencode.OpencodeAdapter()
+    assert adapter.interactive_argv("ses_x", fresh=False) == \
+        ["opencode", "-s", "ses_x"]
+    assert adapter.oneoff_argv("ses_x", "hi") == \
+        ["opencode", "run", "-s", "ses_x", "hi"]
+    assert adapter.hook_argv_extra(Path("/tmp/s")) == []
+    assert adapter.quit_keystrokes() == [b"\x03", b"\x03"]
