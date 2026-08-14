@@ -166,3 +166,20 @@ def test_latest_is_immune_to_null_last_used(tmp_path):
         )
         store._conn.commit()
         assert store.latest_session_for_cwd("/proj").tandem_id == newer.tandem_id
+
+
+def test_old_schema_recreated_over_existing_backup(tmp_path):
+    """A leftover s.db.old from an earlier move-aside must not block the
+    recreate: the newest stale DB deliberately replaces it."""
+    import sqlite3
+    (tmp_path / "s.db.old").write_text("earlier backup")
+    db = tmp_path / "s.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE sessions (tandem_id TEXT PRIMARY KEY, cwd TEXT,"
+                 " active TEXT, claude_session_id TEXT, codex_session_id TEXT,"
+                 " created_at TEXT)")
+    conn.commit()
+    conn.close()
+    with StateStore(db_path=db) as store:
+        assert store.get_session("old") is None
+    assert (tmp_path / "s.db.old").read_bytes() != b"earlier backup"  # replaced

@@ -91,7 +91,10 @@ class StateStore:
         self._conn.row_factory = sqlite3.Row
         if self._schema_stale():
             self._conn.close()
-            self.db_path.rename(self.db_path.with_name(self.db_path.name + ".old"))
+            # replace(), not rename(): a leftover .old from an earlier
+            # move-aside is deliberately overwritten — the newest stale DB
+            # is the one worth keeping, and startup must never fail on it
+            self.db_path.replace(self.db_path.with_name(self.db_path.name + ".old"))
             self._conn = sqlite3.connect(self.db_path)
             self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
