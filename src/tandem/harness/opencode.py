@@ -332,10 +332,206 @@ class OpencodeAdapter(HarnessAdapter):
                     events.append(sysev(f"part:{ptype}"))
         return events
 
-    # -- temporary stubs (replaced by Tasks 11-13) ---------------------------
+    # -- session files -------------------------------------------------------
 
     def transcript_path(self, cwd: str, session_id: str) -> Path | None:
-        raise NotImplementedError
+        """Opencode has no per-session file; the "transcript" is the DB, and
+        it exists for a session exactly when the session row does."""
+        db = db_path()
+        if db is None or not session_id:
+            return None
+        try:
+            with connect(db) as conn:
+                row = conn.execute("SELECT 1 FROM session WHERE id = ?",
+                                   (session_id,)).fetchone()
+        except sqlite3.Error:
+            return None
+        return db if row is not None else None
+
+    # -- rendering (shadow append) -------------------------------------------
+
+    def _message_entry(self, sid: str, msg_id: str, data: dict, ms: int) -> dict:
+        return {"table": "message", "id": msg_id, "session_id": sid,
+                "time": ms, "data": data}
+
+    def _part_entry(self, sid: str, msg_id: str, data: dict, ms: int) -> dict:
+        return {"table": "part", "id": mint_id("prt"), "session_id": sid,
+                "message_id": msg_id, "time": ms, "data": data}
+
+    def _open_user(self, out: list, st: dict, sid: str, text: str, ms: int) -> None:
+        uid = mint_id("msg")
+        st["turn_user_id"] = uid
+        st["assistant_id"] = None
+        out.append(self._message_entry(sid, uid, {
+            "role": "user", "time": {"created": ms}, "agent": "build",
+            "model": {"providerID": SENTINEL_PROVIDER,
+                      "modelID": SENTINEL_MODEL},
+        }, ms))
+        out.append(self._part_entry(sid, uid, {"type": "text", "text": text}, ms))
+
+    def _ensure_assistant(self, out: list, st: dict, sid: str, ctx,
+                          ms: int, model: str | None) -> str:
+        if st.get("assistant_id"):
+            if model:
+                # the turn's assistant row was opened by a tool pair (no
+                # model); a later text event carries the real one — upgrade
+                # the still-in-flight row so display shows the source model
+                for e in reversed(out):
+                    if e["table"] == "message" and e["id"] == st["assistant_id"]:
+                        if e["data"].get("modelID") == SENTINEL_MODEL:
+                            e["data"]["modelID"] = model
+                        break
+            return st["assistant_id"]
+        if not st.get("turn_user_id"):
+            # assistant content with no turn open (first sync after seed):
+            # a context row keeps parentID valid
+            self._open_user(out, st, sid, "[tandem] (context sync)", ms)
+        aid = mint_id("msg")
+        st["assistant_id"] = aid
+        out.append(self._message_entry(sid, aid, {
+            "parentID": st["turn_user_id"], "role": "assistant",
+            "mode": "build", "agent": "build",
+            "path": {"cwd": ctx.cwd, "root": ctx.cwd},
+            "cost": 0,
+            "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                       "cache": {"read": 0, "write": 0}},
+            "modelID": model or SENTINEL_MODEL,
+            "providerID": SENTINEL_PROVIDER,
+            "time": {"created": ms, "completed": ms},
+            "finish": "stop",
+        }, ms))
+        return aid
+
+    def render_events(
+        self, events: list[NormalizedEvent], ctx: SessionContext
+    ) -> list[dict[str, Any]]:
+        """Normalized events -> row-op entries. One user row per turn; one
+        (closed) assistant row per turn carrying text and tool parts. The
+        converter emits ToolCall/ToolResult adjacent, so pairing is local;
+        a call that somehow arrives without its result closes as an error
+        part rather than dangling (opencode's replay rejects dangles)."""
+        sid = ctx.target_session_id
+        st = ctx.state_for("opencode")
+        out: list[dict[str, Any]] = []
+        pending_call: ToolCall | None = None
+
+        def flush_dangle(ms: int) -> None:
+            nonlocal pending_call
+            if pending_call is None:
+                return
+            aid = self._ensure_assistant(out, st, sid, ctx, ms, None)
+            out.append(self._part_entry(sid, aid, self._tool_part(
+                pending_call, output="(tool result not recorded)",
+                is_error=True), ms))
+            pending_call = None
+
+        for ev in events:
+            ms = _now_ms()
+            if ev.kind == "user_message":
+                flush_dangle(ms)
+                self._open_user(out, st, sid, ev.text, ms)
+            elif ev.kind == "assistant_message":
+                flush_dangle(ms)
+                aid = self._ensure_assistant(out, st, sid, ctx, ms, ev.model)
+                out.append(self._part_entry(
+                    sid, aid, {"type": "text", "text": ev.text}, ms))
+            elif ev.kind == "tool_call":
+                flush_dangle(ms)
+                pending_call = ev
+            elif ev.kind == "tool_result":
+                if pending_call is None:
+                    continue   # converter never emits an orphan result natively
+                aid = self._ensure_assistant(out, st, sid, ctx, ms, None)
+                out.append(self._part_entry(sid, aid, self._tool_part(
+                    pending_call, output=ev.output, is_error=ev.is_error), ms))
+                pending_call = None
+            # thinking/system: dropped (no reasoning parts by spec)
+        flush_dangle(_now_ms())
+        return out
+
+    def _tool_part(self, call: ToolCall, output: str, is_error: bool) -> dict:
+        ms = _now_ms()
+        return {
+            "type": "tool", "tool": call.tool, "callID": call.call_id,
+            "state": {
+                "status": "error" if is_error else "completed",
+                "input": call.arguments if isinstance(call.arguments, dict)
+                         else {"input": call.arguments},
+                **({"error": output} if is_error else {"output": output}),
+                "title": "", "metadata": {},
+                "time": {"start": ms, "end": ms},
+            },
+        }
+
+    def render_placeholder(self, text: str, ctx: SessionContext) -> list[dict[str, Any]]:
+        sid = ctx.target_session_id
+        st = ctx.state_for("opencode")
+        out: list[dict[str, Any]] = []
+        ms = _now_ms()
+        self._open_user(out, st, sid, text, ms)
+        self._ensure_assistant(out, st, sid, ctx, ms, None)
+        aid = st["assistant_id"]
+        out.append(self._part_entry(
+            sid, aid, {"type": "text", "text": "[tandem] (turn recorded as a"
+                       " placeholder; see the note above)"}, ms))
+        return out
+
+    # -- shadow append (transactional, idempotent) ----------------------------
+
+    def shadow_append(self, ref: Path, entries: list[dict]) -> None:
+        """One transaction per synced unit. A lock outlasting busy_timeout
+        raises ShadowBusy — the transaction rolled back, nothing landed, and
+        the tailer retries the whole unit next tick (spec: error handling)."""
+        from .base import ShadowBusy
+
+        if not entries:
+            return
+        conn = connect(ref)
+        try:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                raise ShadowBusy(str(exc)) from exc
+            for e in entries:
+                if e["table"] == "message":
+                    conn.execute(
+                        "INSERT OR IGNORE INTO message"
+                        " (id, session_id, time_created, time_updated, data)"
+                        " VALUES (?, ?, ?, ?, ?)",
+                        (e["id"], e["session_id"], e["time"], e["time"],
+                         json.dumps(e["data"])))
+                else:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO part"
+                        " (id, message_id, session_id, time_created,"
+                        " time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
+                        (e["id"], e["message_id"], e["session_id"], e["time"],
+                         e["time"], json.dumps(e["data"])))
+            conn.execute("UPDATE session SET time_updated = ? WHERE id = ?",
+                         (entries[-1]["time"], entries[0]["session_id"]))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def shadow_intent(self, ref: Path, entries: list[dict]) -> dict:
+        return {"ids": [(e["table"], e["id"]) for e in entries]}
+
+    def intent_landed(self, ref: Path, intent: dict) -> bool:
+        ids = intent.get("ids") or []
+        if not ids:
+            return False
+        table, first = ids[0]
+        if table not in ("message", "part"):
+            return False
+        try:
+            with connect(ref) as conn:
+                row = conn.execute(
+                    f"SELECT 1 FROM {table} WHERE id = ?", (first,)).fetchone()
+        except sqlite3.Error:
+            return False
+        return row is not None
+
+    # -- temporary stubs (replaced by Task 13) -------------------------------
 
     def create_shadow_transcript(
         self, cwd: str, session_id: str, ctx: SessionContext, note: str
@@ -349,12 +545,4 @@ class OpencodeAdapter(HarnessAdapter):
         raise NotImplementedError
 
     def hook_argv_extra(self, sentinel: Path) -> list[str]:
-        raise NotImplementedError
-
-    def render_events(
-        self, events: list[NormalizedEvent], ctx: SessionContext
-    ) -> list[dict[str, Any]]:
-        raise NotImplementedError
-
-    def render_placeholder(self, text: str, ctx: SessionContext) -> list[dict[str, Any]]:
         raise NotImplementedError

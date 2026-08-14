@@ -228,3 +228,104 @@ def test_session_status_probe(mini_db):
             " '$.time.completed', 2500, '$.finish', 'stop')"
             " WHERE id = 'msg_ab0000000001x'")
     assert adapter.session_status(sid) == "waiting"
+
+
+def _render_ctx(sid="ses_00test0000000000000000000"):
+    from tandem.events import SessionContext
+    return SessionContext(tandem_id="t", cwd="/proj",
+                          direction="claude->opencode",
+                          target_session_id=sid)
+
+
+def _events_turn():
+    from tandem.events import AssistantMessage, ToolCall, ToolResult, UserMessage
+    return [
+        UserMessage(source="user", turn_index=1, text="[via claude-code] hi"),
+        ToolCall(source="claude", turn_index=1, call_id="c1", tool="Bash",
+                 arguments={"command": "ls"}),
+        ToolResult(source="claude", turn_index=1, call_id="c1", output="file.txt"),
+        AssistantMessage(source="claude", turn_index=1,
+                         text="[via claude-code] done", model="claude-fable-5"),
+    ]
+
+
+def test_render_and_append_turn(mini_db):
+    sid = _insert_session(mini_db)
+    adapter = opencode.OpencodeAdapter()
+    ctx = _render_ctx(sid)
+    entries = adapter.render_events(_events_turn(), ctx)
+    adapter.shadow_append(mini_db, entries)
+    with sqlite3.connect(mini_db) as conn:
+        conn.row_factory = sqlite3.Row
+        msgs = conn.execute(
+            "SELECT id, data FROM message WHERE session_id = ?"
+            " ORDER BY time_created, id", (sid,)).fetchall()
+    datas = [json.loads(m["data"]) for m in msgs]
+    assert [d["role"] for d in datas] == ["user", "assistant"]
+    assert datas[0]["agent"] and datas[0]["model"]          # schema-required
+    assert datas[1]["providerID"] == "tandem"               # sentinel
+    assert datas[1]["modelID"] == "claude-fable-5"
+    assert datas[1]["time"]["completed"] and datas[1]["finish"] == "stop"
+    with sqlite3.connect(mini_db) as conn:
+        parts = conn.execute(
+            "SELECT data FROM part WHERE message_id = ? ORDER BY id",
+            (msgs[1]["id"],)).fetchall()
+    pdatas = [json.loads(p[0]) for p in parts]
+    assert [p["type"] for p in pdatas] == ["tool", "text"]
+    assert pdatas[0]["state"]["status"] == "completed"
+    assert pdatas[0]["callID"] == "c1"
+
+
+def test_append_is_idempotent_by_ids(mini_db):
+    sid = _insert_session(mini_db)
+    adapter = opencode.OpencodeAdapter()
+    entries = adapter.render_events(_events_turn(), _render_ctx(sid))
+    adapter.shadow_append(mini_db, entries)
+    adapter.shadow_append(mini_db, entries)      # crash replay
+    with sqlite3.connect(mini_db) as conn:
+        n = conn.execute("SELECT COUNT(*) FROM message WHERE session_id = ?",
+                         (sid,)).fetchone()[0]
+    assert n == 2                                # not 4
+
+
+def test_intent_landed_checks_ids(mini_db):
+    sid = _insert_session(mini_db)
+    adapter = opencode.OpencodeAdapter()
+    entries = adapter.render_events(_events_turn(), _render_ctx(sid))
+    intent = adapter.shadow_intent(mini_db, entries)
+    assert not adapter.intent_landed(mini_db, intent)
+    adapter.shadow_append(mini_db, entries)
+    assert adapter.intent_landed(mini_db, intent)
+
+
+def test_written_turn_reads_back_as_echo(mini_db):
+    """The sentinel closes the loop: what tandem writes, the reader skips."""
+    sid = _insert_session(mini_db)
+    adapter = opencode.OpencodeAdapter()
+    adapter.shadow_append(
+        mini_db, adapter.render_events(_events_turn(), _render_ctx(sid)))
+    reader = opencode.OpencodeTurnReader(sid, mini_db, _cursor())
+    lines = reader.poll()
+    assert len(lines) == 1
+    from tandem.events import SessionContext
+    ctx = SessionContext(tandem_id="t", cwd="/proj",
+                         direction="opencode->claude")
+    events = adapter.parse_entry(lines[0].raw, ctx)
+    assert [e.kind for e in events] == ["system"]
+    assert events[0].subtype == "tandem_echo"
+
+
+def test_placeholder_renders_closed(mini_db):
+    sid = _insert_session(mini_db)
+    adapter = opencode.OpencodeAdapter()
+    entries = adapter.render_placeholder("[tandem: turn 3 could not be"
+                                         " translated]", _render_ctx(sid))
+    adapter.shadow_append(mini_db, entries)
+    assert adapter.session_status(sid) == "waiting"   # never stuck "working"
+
+
+def test_transcript_path_requires_session_row(mini_db):
+    adapter = opencode.OpencodeAdapter()
+    assert adapter.transcript_path("/proj", "ses_missing") is None
+    sid = _insert_session(mini_db)
+    assert adapter.transcript_path("/proj", sid) == mini_db
