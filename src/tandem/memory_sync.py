@@ -34,6 +34,8 @@ _BLOCK_RE = re.compile(
     re.escape(BEGIN) + r"\n?(.*?)\n?" + re.escape(END), re.S
 )
 
+# opencode reads AGENTS.md natively, same as codex — it shares codex's side
+# of the merge, so this map deliberately stays two-file.
 FILES = {"claude": "CLAUDE.md", "codex": "AGENTS.md"}
 
 

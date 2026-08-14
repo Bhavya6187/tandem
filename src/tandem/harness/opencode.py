@@ -603,7 +603,11 @@ class OpencodeAdapter(HarnessAdapter):
                 # projectID/directory/path are placeholders: import re-homes
                 # them from its own instance context. agent/model omitted
                 # (optional session-level; opencode's default applies).
+                # slug is schema-required (live-verified: import rejects the
+                # payload `at ["slug"]` without it) but not unique — opencode
+                # mints adjective-noun pairs; tandem's marks provenance.
                 "id": session_id,
+                "slug": "tandem-pair",
                 "projectID": "tandem-import",
                 "directory": cwd,
                 "title": "tandem paired session",
