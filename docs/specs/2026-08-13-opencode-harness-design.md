@@ -69,13 +69,16 @@ and the status bar. Fewer than two usable harnesses is an actionable
 error naming what's missing (replacing the hard both-binaries check at
 `cli.py:585`).
 
-**Resume:** the stored participant list is immutable. Each run computes
-the *usable* subset (stored ∩ currently installed-and-supported). An
-unusable member keeps its place in the stored order but is skipped
-everywhere this run: no bar slot, no flip target, no fan-out engine.
-Its per-direction cursors are untouched, so when it returns, the normal
-drain replays the backlog from each source's cursor and it catches up.
-At least two usable members are required to run.
+**Resume:** each resume recomputes availability (stored participants ∩
+currently installed-and-supported). A member that has become
+unavailable is **dropped from the session permanently** — the narrowed
+list is written back to the session row with a one-line notice — and
+the session continues at N−1. There is no dynamic rejoin: a harness
+missing even once would need multi-source backlog replay to catch up
+(and the flip sequence's anti-echo fast-forward is precisely what
+erases such backlogs), so a reinstalled CLI participates in fresh
+sessions, not old ones. The surviving list is this session's **runtime
+participants**; at least two are required to run.
 
 **Invariant: not-installed is a normal state, not a degraded one.** The
 only probe an uninstalled harness ever receives is the PATH lookup
@@ -105,8 +108,8 @@ dedup mechanism.
 
 **The flip sequence** (`ops.switch_session`, generalized):
 
-1. Drain the old active into every usable target (flushing dangling
-   tool calls).
+1. Drain the old active into every other runtime participant (flushing
+   dangling tool calls).
 2. Fast-forward **every outgoing cursor of the new active** — one per
    `(new_active, target)` direction — to the new active's current
    end-of-store position.
@@ -124,8 +127,8 @@ today's JSONL behavior** — claude and codex inherit them unchanged, and
 the existing tailer/sync/cursor code keeps working byte-for-byte:
 
 - `make_source_reader(session, cursor)` — yields consumable units
-  since the cursor. JSONL default: `JsonlTailer` lines. Opencode:
-  completed turns (below).
+  since the cursor. JSONL default: `JsonlTailer` lines. Opencode: one
+  native object per completed turn (below).
 - `append_rendered(session, entries, intent)` — durable append of
   rendered entries. JSONL default: write-ahead `pre_size` intent +
   `append_jsonl_fsync`. Opencode: one SQLite transaction with
@@ -159,8 +162,8 @@ Two JSON columns on `sessions`, no child table (matching how cursor
 ### Code model
 
 - `other()` (`harness/__init__.py:15`) and `PairedSession.shadow`
-  (`state.py:60`) are replaced by `Session.participants` (usable
-  subset), `next_active(current)` (cycle order = list order), and
+  (`state.py:60`) are replaced by `Session.participants` (the runtime
+  participants), `next_active(current)` (cycle order = list order), and
   `targets_for(source)`. All six call sites move (`sync.py:56`,
   `converter.py:99`, `ops.py:226`, `ops.py:107`, `runner.py:550`,
   `runner.py:588`).
@@ -200,8 +203,8 @@ One module, `src/tandem/harness/opencode.py`; SQLite helpers live
 inside it. Schema facts verified against opencode 1.18.15 (installed) /
 1.18.17 (checkout at `~/git/opencode`) and the live DB from the
 operator's first session. This is an **internal-format integration**:
-opencode's tables are not a published contract, so tandem holds it to a
-narrow version range and validates against opencode's own
+opencode's tables are not a published contract, so tandem pins a
+minimum supported version and validates against opencode's own
 importer/exporter in tests.
 
 ### Compat gate
@@ -209,8 +212,9 @@ importer/exporter in tests.
 Floor only, no ceiling (operator call: assume forward versions keep
 working). `COMPAT["opencode"]` pins `tested="1.18.15"`,
 `min_version=(1, 18)` — versions below the floor predate the SQLite
-storage era and genuinely cannot work — with an effectively unbounded
-upper range. If opencode's storage does move (the repo carries an
+storage era and genuinely cannot work. `CompatRange.max_exclusive`
+becomes optional (`None` = unbounded) rather than inventing an
+artificial giant version tuple. If opencode's storage does move (the repo carries an
 experimental v2 `session_message` model), the tripwires are the cheap
 startup sanity check that `message`/`part` exist (failing closed:
 opencode dropped from the usable set with a warning) and the oracle
@@ -269,12 +273,16 @@ Tandem does not construct session rows. To create the opencode shadow:
 2. Write a minimal export-format JSON to the scratchpad:
    `{info: {id, title, time, cost, tokens, …}, messages: [seed turn]}`
    — structure templated from a captured `opencode export` of a real
-   session. `agent`/`model` omitted (optional; opencode applies its
-   default on resume). The seed turn is one user message carrying the
-   tandem seed note plus one closed assistant acknowledgment
-   (`finish: "stop"`, `time.completed` set), so the session lists as
-   idle and shows its provenance like the other harnesses' seeded
-   shadows.
+   session. **Session-level** `agent`/`model` are omitted (optional;
+   opencode applies its default on resume). **Message-level** fields
+   are not optional and must be present: the seed user message carries
+   `agent: "build"` and the sentinel
+   `model: {providerID: "tandem", modelID: "<synced>"}`, and the seed
+   assistant carries the matching sentinel `providerID`/`modelID`. The
+   seed turn is that user message with the tandem seed note plus one
+   closed assistant acknowledgment (`finish: "stop"`, `time.completed`
+   set), so the session lists as idle and shows its provenance like
+   the other harnesses' seeded shadows.
 3. Run `opencode import <file>` in the session cwd. Import runs
    opencode's own schema decoders, bootstraps/uses the project row via
    its app context, re-homes `projectID`/`directory`/`path`, and
@@ -290,22 +298,32 @@ Everything *incremental* stays direct SQLite.
 
 Opencode mutates tool-part rows **in place** as state transitions
 (pending → running → completed), so the reader never exposes raw rows.
-`make_source_reader` yields **completed turns**: it waits until the
-last assistant message of the session has `time.completed` and a
-terminal `finish`, then reads the turn's messages+parts in native order
-as one unit. The durable cursor is the turn's terminal assistant
-`(time_created, id)` plus its opening user message id; an incomplete
-turn is simply not yielded, so nothing is half-consumed and re-reads
-cannot duplicate the user message. Per-direction cursors advance
-independently as each target's append commits.
+The consumable unit is **one completed turn as one native object**:
 
-Mapping: `text` → AssistantMessage, `reasoning` → Thinking (no text —
-dropped downstream), `tool` → ToolCall + ToolResult (split from the one
-part), `step-start`/`step-finish`/`snapshot`/`patch` → SystemEvent,
-user message text part → UserMessage. Unknown part types degrade to
-SystemEvent, never raise. The turn-boundary probe doubles as the flip
-gate's `session_status`: last message user, or assistant without
-`time.completed` ⇒ "busy".
+```python
+{"user": {"message": …, "parts": […]},
+ "assistants": [{"message": …, "parts": […]}, …]}
+```
+
+`make_source_reader` waits until the turn's last assistant message has
+`time.completed` and a terminal `finish`, then assembles that object in
+native order and yields it. `parse_entry` receives the whole object and
+emits the turn's full normalized event list — the existing
+`parse_entry` pipeline, one entry in, events out; no second parser API,
+and mutable rows never cross the adapter boundary. The durable cursor
+is the turn's terminal assistant `(time_created, id)` plus its opening
+user message id; an incomplete turn is simply not yielded, so nothing
+is half-consumed and re-reads cannot duplicate the user message.
+Per-direction cursors advance independently as each target's append of
+the translated turn commits.
+
+Mapping within a turn: user text part → UserMessage, `text` →
+AssistantMessage, `reasoning` → Thinking (no text — dropped
+downstream), `tool` → ToolCall + ToolResult (split from the one part),
+`step-start`/`step-finish`/`snapshot`/`patch` → SystemEvent. Unknown
+part types degrade to SystemEvent, never raise. The turn-boundary probe
+doubles as the flip gate's `session_status`: last message user, or
+assistant without `time.completed` ⇒ "busy".
 
 ### Write path (opencode shadow)
 
@@ -346,8 +364,8 @@ prevents echo.
 
 ## Frame and flip
 
-- `StatusBar` (`frame.py:222-277`) renders the usable participant list
-  — ` claude ● │ codex ○ │ opencode ○   ^] flips` — same
+- `StatusBar` (`frame.py:222-277`) renders the runtime participant
+  list — ` claude ● │ codex ○ │ opencode ○   ^] flips` — same
   one-cell-glyph and truncation rules. `FrameIO` (`ptyrun.py:136-153`)
   carries `active` + `others: list[str]`. The bar renders the session's
   resolved participants, never config directly.
@@ -374,7 +392,7 @@ prevents echo.
   vs. floor, DB discovered and writable, WAL mode on, paired-session
   structure (last message a completed assistant). Non-installed
   harnesses: one informational line. `--live` resume checks iterate
-  usable participants (`doctor.py:301-315`).
+  runtime participants (`doctor.py:301-315`).
 
 ## Testing
 
@@ -393,7 +411,9 @@ prevents echo.
   of all outgoing directions (the anti-echo property: a turn synced
   into opencode never flows back out of it), N-slot bar
   width/truncation, participant resolution (each CLI missing in turn,
-  config subsets, <2 error, resume with a missing member).
+  config subsets, <2 error, resume with a missing member — asserting
+  the member is dropped, the narrowed list persists, and the session
+  continues at N−1).
 - **Regression net:** existing claude↔codex tests pass untouched — the
   JSONL storage path is deliberately not refactored, so they prove N=2
   behavior didn't move.
