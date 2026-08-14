@@ -1,6 +1,7 @@
 import uuid
 
 from tandem import compat, paths
+from tandem.constants import ATTRIBUTION
 from tandem.util import uuid7
 
 
@@ -47,3 +48,18 @@ def test_uuid7_is_valid_and_ordered():
     assert ua.version == 7
     assert a != b
     assert ua.bytes[:6] <= ub.bytes[:6]  # time-ordered prefix
+
+
+def test_opencode_compat_floor_only():
+    assert compat.version_supported("opencode", "1.18.15")
+    assert compat.version_supported("opencode", "9.9.9")      # no ceiling
+    assert not compat.version_supported("opencode", "1.17.0")  # below floor
+
+
+def test_existing_ranges_unchanged():
+    assert compat.version_supported("claude", "2.1.220")
+    assert not compat.version_supported("codex", "0.150.0")
+
+
+def test_opencode_attribution_tag():
+    assert ATTRIBUTION["opencode"] == "[via opencode]"

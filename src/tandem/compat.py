@@ -18,13 +18,16 @@ from dataclasses import dataclass
 class CompatRange:
     tested: str          # exact version this code was developed against
     min_version: tuple[int, ...]
-    max_exclusive: tuple[int, ...]
+    max_exclusive: tuple[int, ...] | None = None   # None = no ceiling
 
 
 # Format observations in docs/formats.md correspond to these versions.
 COMPAT: dict[str, CompatRange] = {
     "claude": CompatRange(tested="2.1.220", min_version=(2, 0), max_exclusive=(3,)),
     "codex": CompatRange(tested="0.145.0", min_version=(0, 140), max_exclusive=(0, 150)),
+    # Floor-only by operator decision (spec: Compat gate). Pre-1.18 opencode
+    # predates SQLite session storage and genuinely cannot work.
+    "opencode": CompatRange(tested="1.18.15", min_version=(1, 18)),
 }
 
 _VERSION_RE = re.compile(r"(\d+(?:\.\d+)+)")
@@ -59,4 +62,6 @@ def version_supported(harness: str, version_text: str) -> bool:
     v = parse_version(version_text)
     if v is None:
         return False
-    return rng.min_version <= v < rng.max_exclusive
+    if rng.max_exclusive is not None and v >= rng.max_exclusive:
+        return False
+    return rng.min_version <= v

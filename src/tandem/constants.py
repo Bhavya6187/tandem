@@ -3,6 +3,7 @@
 ATTRIBUTION = {
     "claude": "[via claude-code]",
     "codex": "[via codex]",
+    "opencode": "[via opencode]",
     "tandem": "[tandem]",
     "user": "",
 }
