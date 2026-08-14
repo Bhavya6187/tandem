@@ -152,3 +152,31 @@ class TestTailLoop:
                 f.write('age": {"role": "user", "content": "later"}}\n')
             assert loop.drain() == 1
             assert sink.events[-1].text == "later"
+
+
+def test_tailedline_advance_updates_cursor(tmp_path):
+    from tandem.state import SyncCursor
+    from tandem.tailer import TailedLine
+
+    cur = SyncCursor(tandem_id="t", source="claude", target="codex")
+    line = TailedLine(line_index=4, end_offset=100, raw={}, text="{}")
+    line.advance(cur)
+    assert (cur.byte_offset, cur.line_index) == (100, 5)
+    assert "source_pos" not in cur.pending
+
+    line2 = TailedLine(line_index=5, end_offset=0, raw={}, text="{}",
+                       pos={"time": 9, "id": "msg_x"})
+    line2.advance(cur)
+    assert cur.pending["source_pos"] == {"time": 9, "id": "msg_x"}
+
+
+def test_default_reader_matches_jsonl_tailer(tmp_path):
+    from tandem.harness import get_adapter
+    from tandem.state import SyncCursor
+
+    p = tmp_path / "t.jsonl"
+    p.write_text('{"a": 1}\n{"b": 2}\n')
+    cur = SyncCursor(tandem_id="t", source="claude", target="codex")
+    reader = get_adapter("claude").make_source_reader(None, cur, p)
+    lines = reader.poll()
+    assert [l.raw for l in lines] == [{"a": 1}, {"b": 2}]

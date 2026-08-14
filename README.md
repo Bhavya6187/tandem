@@ -4,12 +4,12 @@
 
 **One coding session. Two AI agents. Zero lost context.**
 
-Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and
-[OpenAI Codex CLI](https://github.com/openai/codex) as a single paired
-session — each model in its own native harness. Work in either one,
-flip to the other with **Ctrl-]**, and pick up exactly where you left
-off. Only one model runs per turn; the other stays in sync through pure
-local file translation.
+Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
+[OpenAI Codex CLI](https://github.com/openai/codex), and
+[opencode](https://opencode.ai) as a single paired session — each model
+in its own native harness. Work in any one, flip to the next with
+**Ctrl-]**, and pick up exactly where you left off. Only one model runs
+per turn; the others stay in sync through pure local translation.
 
 [![CI](https://github.com/Bhavya6187/tandem/actions/workflows/ci.yml/badge.svg)](https://github.com/Bhavya6187/tandem/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tandem-cli)](https://pypi.org/project/tandem-cli/)
@@ -28,7 +28,9 @@ uv tool install tandem-cli
 
 ## Quick start
 
-You'll need Python 3.11+ and the `claude` and `codex` CLIs on your PATH.
+You'll need Python 3.11+ and at least two of the `claude`, `codex`, and
+`opencode` CLIs on your PATH (any pair works; all three make a
+three-way session).
 
 ```bash
 uv tool install tandem-cli   # or: pip install tandem-cli
@@ -44,6 +46,13 @@ facing:
 
 ```
 claude ● │ codex ○   ^] flips
+```
+
+With opencode installed too, the session is three-way and **Ctrl-]**
+cycles through all of them in order:
+
+```
+claude ● │ codex ○ │ opencode ○   ^] flips
 ```
 
 Pressed mid-turn, the flip arms and fires the moment the model finishes
@@ -114,8 +123,8 @@ one problem, native harnesses, instant switching, privacy:
   between.
 - Everything stays local: the CLIs' own session files plus a small
   SQLite database in `~/.tandem`. No cloud sync, no telemetry.
-- Uninstall tandem tomorrow and both sessions still resume natively
-  with `claude --resume` and `codex resume`.
+- Uninstall tandem tomorrow and every side still resumes natively with
+  `claude --resume`, `codex resume`, and `opencode -s`.
 
 Full mechanics — sync engine, crash safety, compatibility ranges:
 [How tandem works](https://github.com/Bhavya6187/tandem/blob/main/docs/how-it-works.md).
@@ -150,7 +159,8 @@ sync-mcp` (share MCP server configs between the tools).
 - [Developing tandem](https://github.com/Bhavya6187/tandem/blob/main/docs/development.md) —
   dev setup and the converter adapter interface
 - [Observed session formats](https://github.com/Bhavya6187/tandem/blob/main/docs/formats.md) —
-  the claude/codex transcript details tandem is pinned against
+  the claude/codex/opencode session-storage details tandem is pinned
+  against
 
 ## License
 

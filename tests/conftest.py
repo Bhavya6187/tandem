@@ -83,6 +83,7 @@ class Env:
         from tandem.compat import COMPAT
         from tandem.harness.claude_code import ClaudeCodeAdapter
         from tandem.harness.codex import CodexAdapter
+        from tandem.harness.opencode import OpencodeAdapter
 
         monkeypatch.setattr(
             ClaudeCodeAdapter, "detect_version", lambda self: COMPAT["claude"].tested
@@ -90,6 +91,28 @@ class Env:
         monkeypatch.setattr(
             CodexAdapter, "detect_version", lambda self: COMPAT["codex"].tested
         )
+        monkeypatch.setattr(
+            OpencodeAdapter, "detect_version", lambda self: COMPAT["opencode"].tested
+        )
+        # hermetic opencode storage: with detect_version pinned, doctor's
+        # runtime_ready probe would otherwise shell out to the real
+        # `opencode db path` (and read the user's real DB where one exists)
+        import sqlite3
+
+        from tandem.harness import opencode as _oc
+
+        oc_db = tmp_path / ".opencode" / "opencode.db"
+        oc_db.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(oc_db)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(
+            "CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY);"
+            "CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY);"
+            "CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY);"
+        )
+        conn.close()
+        monkeypatch.setenv("OPENCODE_DB", str(oc_db))
+        _oc._reset_db_cache()
         self.cwd = str(tmp_path / "proj")
         Path(self.cwd).mkdir()
         self.store = StateStore(db_path=tmp_path / ".tandem" / "state.db")
@@ -147,10 +170,14 @@ class Env:
         )
 
 
-class FakeOpencodeAdapter:
+from tandem.harness.base import HarnessAdapter
+
+
+class FakeOpencodeAdapter(HarnessAdapter):
     """Minimal file-backed stand-in registered as 'opencode' for core tests.
     Replaced by the real adapter's tests in Phase 2; core tests keep using
-    the fake so they stay hermetic."""
+    the fake so they stay hermetic. Subclasses HarnessAdapter so it inherits
+    the file-backed storage-capability defaults."""
     id = "opencode"
     display_name = "opencode"
     binary = "opencode"

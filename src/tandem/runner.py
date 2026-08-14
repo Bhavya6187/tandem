@@ -24,7 +24,7 @@ from .events import SessionContext
 from .harness import get_adapter
 from .ptyrun import FrameIO, PtyControl, _winsize, run_in_pty
 from .state import PairedSession, StateStore, SyncCursor
-from .tailer import JsonlTailer, TailedLine, TranscriptTruncated, TranscriptWatcher
+from .tailer import TailedLine, TranscriptTruncated, TranscriptWatcher
 from .util import json_line
 from .warm import WarmChild, _shadow_size, build_launch, spawn_hidden
 
@@ -402,30 +402,43 @@ class TailLoop:
         self.source = source
         self.target = target
         self.sink = sink
+        self.transcript = transcript
         self.cursor = store.get_cursor(session.tandem_id, source, target)
         self.ctx = ctx_from_cursor(session, self.cursor)
-        self.tailer = JsonlTailer(
-            transcript, start_offset=self.cursor.byte_offset,
-            start_line=self.cursor.line_index,
+        self.reader = get_adapter(source).make_source_reader(
+            session, self.cursor, transcript
         )
         self.errors: list[str] = []
 
     def drain(self) -> int:
-        """Process everything new; returns number of lines consumed."""
+        """Process everything new; returns number of units consumed."""
+        from .harness.base import ShadowBusy
+
         try:
-            lines = self.tailer.poll()
+            lines = self.reader.poll()
         except TranscriptTruncated as exc:
             self.errors.append(str(exc))
             return 0
+        consumed = 0
         for line in lines:
-            self.sink.handle(line, self.ctx, self.cursor)
-            self.cursor.byte_offset = line.end_offset
-            self.cursor.line_index = line.line_index + 1
+            try:
+                self.sink.handle(line, self.ctx, self.cursor)
+            except ShadowBusy:
+                # transactional append rolled back; rebuild context from the
+                # durable cursor and let the next wake-up retry the unit
+                self.cursor = self.store.get_cursor(
+                    self.session.tandem_id, self.source, self.target)
+                self.ctx = ctx_from_cursor(self.session, self.cursor)
+                self.reader = get_adapter(self.source).make_source_reader(
+                    self.session, self.cursor, self.transcript)
+                break
+            line.advance(self.cursor)
             ctx_to_cursor(self.ctx, self.cursor)
-        if lines:
+            consumed += 1
+        if consumed:
             self.store.save_cursor(self.cursor)
             self.store.touch_sync(self.session.tandem_id)
-        return len(lines)
+        return consumed
 
 
 # Rollouts tandem wrote itself: "tandem" heads a seeded shadow (codex
@@ -731,7 +744,8 @@ class InteractiveRunner:
                         s.close()
                     return
                 watcher = TranscriptWatcher()
-                watcher.watch(path)
+                for p in get_adapter(active).watch_paths(current, path):
+                    watcher.watch(p)
                 watcher.watch(sentinel)
                 watcher.start()
                 # `tandem sub --context full` drains these same cursor rows

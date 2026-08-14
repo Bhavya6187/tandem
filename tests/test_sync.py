@@ -187,3 +187,25 @@ class TestSyncCodexToClaude:
         entries = read_jsonl(env.claude_shadow)
         synced_user = next(e for e in entries if e.get("type") == "user" and "codex" in str(e.get("message")))
         assert synced_user["parentUuid"] == "claude-own-leaf"
+
+
+def test_shadow_busy_retries_without_advancing(env_factory, monkeypatch):
+    env = env_factory()
+    from tandem.harness import get_adapter
+    from tandem.harness.base import ShadowBusy
+
+    write_line(env.claude_shadow, claude_user("busy test"))
+    calls = {"n": 0}
+    real_append = type(get_adapter("codex")).shadow_append
+
+    def flaky_append(self, ref, entries):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ShadowBusy("locked")
+        return real_append(self, ref, entries)
+
+    monkeypatch.setattr(type(get_adapter("codex")), "shadow_append", flaky_append)
+    loop, _ = env.loop(source="claude", transcript=env.claude_shadow)
+    assert loop.drain() == 0                       # busy: nothing consumed
+    assert loop.drain() >= 1                       # retried clean
+    assert any("busy test" in t for t in shadow_texts(env.codex_shadow))

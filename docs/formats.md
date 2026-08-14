@@ -110,3 +110,38 @@ home), `TANDEM_HOME` (tandem state).
    raw entry quarantined at {path}]`
    with the raw source entry written to
    `~/.tandem/quarantine/<tandem-id>/<source>-line-<n>.json`.
+
+## opencode session storage (opencode 1.18.15)
+
+- Storage: one WAL-mode SQLite DB for everything — `opencode db path`
+  (channel-suffixed filename; `$OPENCODE_DB` overrides). No per-session
+  files. Tables: `session`, `message`, `part`; JSON payloads in `data`
+  minus the id/fk columns. FKs cascade part -> message -> session -> project.
+- Ordering: messages by `(time_created, id)`; parts by part id ONLY.
+- IDs: `<prefix>_` + 12 hex chars (48-bit `ms*4096+counter`) + 14 random
+  base62. `ses_` NOTs the value (descending); `msg_`/`prt_` ascending.
+  Live-verified: msg @ ms=1786577389138 ctr=1 -> `ff84f8652001`.
+- Threading is flat: assistant `parentID` = the turn's user message id.
+- Spelling trap: session-row `model` JSON uses `{id, providerID}`; message
+  payloads use `{modelID, providerID}`. Session-level `agent`/`model` are
+  optional; MESSAGE-level are required on user messages. Session-level
+  `slug` is REQUIRED by import's decoder (oracle-verified: the payload is
+  rejected `at ["slug"]` without it) but carries no uniqueness constraint —
+  opencode mints adjective-noun pairs; tandem seeds `tandem-pair`.
+- Tool parts mutate in place (pending -> running -> completed): tandem reads
+  whole completed turns only (last assistant has `time.completed` + terminal
+  `finish`).
+- External writes: the `opencode import` recipe (plain INSERT, conflict-
+  ignore). Tandem's shadow birth delegates to `opencode import`; incremental
+  sync writes rows directly with pre-minted ids (idempotent replay).
+- Tandem attribution: `providerID: "tandem"`, `modelID: "<synced>"` — marks
+  echoes for the parser and makes opencode degrade replay metadata instead
+  of re-sending forged provider signatures.
+- Hazards: a running TUI never sees external rows for an already-synced
+  session (writes land while opencode is closed; flips relaunch it); a
+  session whose last message is not a completed assistant renders as
+  perpetually "working"; the session list window is 30 days by
+  `time_updated`; always open the DB read-write (WAL).
+- Resume: `opencode -s <id>` (id must exist; no directory match);
+  one-off: `opencode run -s <id> "<prompt>"`. No per-invocation
+  turn-complete hook — tandem fs-watches the `-wal` file.

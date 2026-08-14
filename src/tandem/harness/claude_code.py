@@ -436,3 +436,15 @@ class ClaudeCodeAdapter(HarnessAdapter):
             if m and m != "<synced>":
                 model = m
         return model
+
+    def prepare_shadow(self, ref, ctx) -> None:
+        """The claude file may have grown since tandem last wrote (its own
+        CLI appends while claude is active): chain onto the real leaf and
+        pick up the model claude last used for rendered entries."""
+        st = ctx.state_for("claude")
+        leaf = self.derive_leaf_uuid(ref)
+        if leaf:
+            st["leaf_uuid"] = leaf
+        model = self.derive_last_model(ref)
+        if model:
+            st["model"] = model

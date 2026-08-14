@@ -75,6 +75,9 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
             )
         else:
             report.ok(f"{adapter.display_name}: {v}")
+            ok, reason = adapter.runtime_ready()
+            if not ok:
+                report.warn(f"{adapter.display_name}: installed but unusable — {reason}")
 
     if session is None:
         report.fail("no tandem session for this directory (run `tandem` to start one)")

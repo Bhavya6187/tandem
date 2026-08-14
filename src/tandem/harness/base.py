@@ -15,6 +15,25 @@ from typing import Any
 from ..events import NormalizedEvent, SessionContext
 
 
+class JsonlSourceReader:
+    """Default source reader: the existing byte-offset JSONL tailer."""
+
+    def __init__(self, path: Path, cursor):
+        from ..tailer import JsonlTailer
+
+        self.tailer = JsonlTailer(
+            path, start_offset=cursor.byte_offset, start_line=cursor.line_index
+        )
+
+    def poll(self):
+        return self.tailer.poll()
+
+
+class ShadowBusy(RuntimeError):
+    """Shadow store locked beyond busy_timeout. The append transaction
+    rolled back — nothing landed — so the tailer retries next tick."""
+
+
 class HarnessAdapter(ABC):
     id: str          # 'claude' | 'codex'
     display_name: str
@@ -110,6 +129,58 @@ class HarnessAdapter(ABC):
     @abstractmethod
     def render_placeholder(self, text: str, ctx: SessionContext) -> list[dict[str, Any]]:
         """Native entries for an untranslatable-turn placeholder."""
+
+    # -- storage capabilities (file-backed defaults; opencode overrides) -----
+
+    def make_source_reader(self, session, cursor, transcript: Path):
+        return JsonlSourceReader(transcript, cursor)
+
+    def watch_paths(self, session, transcript: Path) -> list[Path]:
+        return [transcript]
+
+    def shadow_append(self, ref: Path, entries: list[dict]) -> None:
+        from ..util import append_jsonl_fsync
+
+        append_jsonl_fsync(ref, entries)
+
+    def shadow_intent(self, ref: Path, entries: list[dict]) -> dict:
+        return {"pre_size": ref.stat().st_size}
+
+    def intent_landed(self, ref: Path, intent: dict) -> bool:
+        try:
+            return ref.stat().st_size > int(intent["pre_size"])
+        except (OSError, KeyError, ValueError):
+            return False
+
+    def fast_forward_cursor(self, session, cursor) -> None:
+        """Mark everything currently in this SOURCE's store as consumed."""
+        sid = session.native_id(self.id)
+        path = self.transcript_path(session.cwd, sid) if sid else None
+        if path is None:
+            cursor.byte_offset = 0
+            cursor.line_index = 0
+            return
+        data = path.read_bytes()
+        cursor.byte_offset = len(data)
+        cursor.line_index = data.count(b"\n")
+
+    def pending_units(self, session, cursor) -> int:
+        sid = session.native_id(self.id)
+        path = self.transcript_path(session.cwd, sid) if sid else None
+        if path is None:
+            return 0
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return 0
+        if len(data) <= cursor.byte_offset:
+            return 0
+        return data[cursor.byte_offset:].count(b"\n")
+
+    def prepare_shadow(self, ref, ctx) -> None:
+        """Re-anchor renderer state to what is actually in the shadow store.
+        Called before the first append of a sync run and after a crash-skip
+        re-append. Default: nothing."""
 
 
 def _parse_jsonl_entries(path: Path):

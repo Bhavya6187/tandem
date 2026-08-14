@@ -28,7 +28,7 @@ from .harness import get_adapter
 from .runner import ctx_to_cursor
 from .state import PairedSession, StateStore, SyncCursor
 from .tailer import TailedLine
-from .util import append_jsonl_fsync, write_file_atomic
+from .util import write_file_atomic
 
 
 class SyncSetupError(RuntimeError):
@@ -78,10 +78,7 @@ class SyncEngine:
         self._prepared = True
         intent = cursor.pending.get("intent")
         if intent:
-            try:
-                grew = self.shadow_path.stat().st_size > int(intent["pre_size"])
-            except OSError:
-                grew = False
+            grew = self.target.intent_landed(self.shadow_path, intent)
             if int(intent["line"]) == _FLUSH_LINE:
                 if grew:
                     # the flush landed before the crash; its calls are closed
@@ -93,17 +90,7 @@ class SyncEngine:
                 # The append for this line landed before the crash; skip the
                 # re-append but still re-run translation for ctx effects.
                 self._skip_append_line = int(intent["line"])
-        if self.target_id == "claude":
-            # The claude file may have grown since we last wrote (its own CLI
-            # appends while claude is active); chain onto the real leaf and
-            # pick up the model claude last used for rendered entries.
-            adapter = get_adapter("claude")
-            leaf = adapter.derive_leaf_uuid(self.shadow_path)
-            if leaf:
-                ctx.state_for("claude")["leaf_uuid"] = leaf
-            model = adapter.derive_last_model(self.shadow_path)
-            if model:
-                ctx.state_for("claude")["model"] = model
+        self.target.prepare_shadow(self.shadow_path, ctx)
 
     # -- sink interface ------------------------------------------------------
 
@@ -146,10 +133,10 @@ class SyncEngine:
             ctx_to_cursor(ctx, cursor)
             self.store.save_cursor(cursor)
             return 0
-        pre_size = self.shadow_path.stat().st_size
-        cursor.pending["intent"] = {"line": _FLUSH_LINE, "pre_size": pre_size}
+        intent = self.target.shadow_intent(self.shadow_path, entries)
+        cursor.pending["intent"] = {"line": _FLUSH_LINE, **intent}
         self.store.save_cursor(cursor)
-        append_jsonl_fsync(self.shadow_path, entries)
+        self.target.shadow_append(self.shadow_path, entries)
         cursor.pending.pop("intent", None)
         ctx_to_cursor(ctx, cursor)
         self.store.save_cursor(cursor)
@@ -163,21 +150,17 @@ class SyncEngine:
         skip_append = self._skip_append_line == line.line_index
         if skip_append:
             self._skip_append_line = None
-            if self.target_id == "claude":
-                # the crashed run appended entries with uuids we no longer
-                # know; re-derive the chain tip from the file
-                leaf = get_adapter("claude").derive_leaf_uuid(self.shadow_path)
-                if leaf:
-                    ctx.state_for("claude")["leaf_uuid"] = leaf
+            # the crashed run appended entries with renderer state we no
+            # longer know; re-anchor to what is actually in the shadow
+            self.target.prepare_shadow(self.shadow_path, ctx)
         else:
-            pre_size = self.shadow_path.stat().st_size
-            cursor.pending["intent"] = {"line": line.line_index, "pre_size": pre_size}
+            intent = self.target.shadow_intent(self.shadow_path, entries)
+            cursor.pending["intent"] = {"line": line.line_index, **intent}
             self.store.save_cursor(cursor)
-            append_jsonl_fsync(self.shadow_path, entries)
+            self.target.shadow_append(self.shadow_path, entries)
 
         cursor.pending.pop("intent", None)
-        cursor.byte_offset = line.end_offset
-        cursor.line_index = line.line_index + 1
+        line.advance(cursor)
         ctx_to_cursor(ctx, cursor)
         self.store.save_cursor(cursor)
 
@@ -191,8 +174,7 @@ class SyncEngine:
         # At most one placeholder per source turn; further failures in the
         # same turn only quarantine.
         if cursor.pending.get("last_placeholder_turn") == ctx.turn_index:
-            cursor.byte_offset = line.end_offset
-            cursor.line_index = line.line_index + 1
+            line.advance(cursor)
             ctx_to_cursor(ctx, cursor)
             self.store.save_cursor(cursor)
             return
