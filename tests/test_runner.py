@@ -1201,6 +1201,49 @@ def test_a_slow_fire_does_not_delay_the_termination_ladder(env_factory,
     assert order.index("ladder") < order.index("spawn-done")
 
 
+def test_a_slow_recipe_build_does_not_delay_the_termination_ladder(
+        env_factory, monkeypatch):
+    # The fire's filesystem setup — the shadow stat, build_launch's config
+    # reads, the sentinel mkdir — belongs to the launch worker: run on the
+    # monitor thread it would sit between the flip decision and the ladder,
+    # delaying the very teardown the fire exists to overlap.
+    import tandem.runner as runner_mod
+    env = env_factory(active="claude")
+    order = []
+    release_build = threading.Event()
+    build_done = threading.Event()
+    real_build = runner_mod.build_launch
+
+    def slow_build(session, side):
+        if side != "codex":
+            return real_build(session, side)   # the active side's own launch
+        order.append("build-start")
+        release_build.wait(timeout=1)
+        order.append("build-done")
+        build_done.set()
+        return real_build(session, side)
+
+    def terminate(self, soft, **kwargs):
+        order.append("ladder")
+        release_build.set()
+        return "soft"
+
+    monkeypatch.setattr(runner_mod, "build_launch", slow_build)
+    monkeypatch.setattr(runner_mod, "spawn_hidden",
+                        lambda *a, **kw: _DeadChild())
+    monkeypatch.setattr(runner_mod, "TranscriptWatcher", _QuietWatcher)
+    monkeypatch.setattr(runner_mod.PtyControl, "terminate", terminate)
+    monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: True)
+    monkeypatch.setattr(sys, "stdin", _StdinWithFileno())
+    monkeypatch.setattr(runner_mod, "run_in_pty", _flip_driver(env))
+    r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink)
+    r.run()
+
+    assert r.flip_requested
+    assert build_done.wait(3)
+    assert order.index("ladder") < order.index("build-done")
+
+
 def test_no_flip_leaves_no_fire_spawn(env_factory, monkeypatch):
     env = env_factory(active="claude")
     import tandem.runner as runner_mod

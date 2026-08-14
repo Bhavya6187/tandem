@@ -588,8 +588,12 @@ class InteractiveRunner:
             status_probe=status_probe_fn if hasattr(adapter, "session_status") else None,
         )
         # Fired at most once, on the monitor thread, between the flip
-        # decision and the ladder. It starts a worker and returns immediately,
-        # so a slow fork/exec cannot hold up teardown of the outgoing harness.
+        # decision and the ladder. It does only the in-memory eligibility
+        # checks there and starts a worker for everything else — the shadow
+        # stat, the recipe build (config.toml reads, the sentinel mkdir) and
+        # the fork/exec are all unbounded filesystem work, and any of it on
+        # the monitor thread would hold up teardown of the outgoing harness:
+        # the ladder starts only when this returns.
         # The finally below closes the handoff slot after the ladder: a child
         # that has landed by then is adopted, while a worker that lands later
         # sees the closed slot and kills its child instead of stranding it.
@@ -608,17 +612,18 @@ class InteractiveRunner:
                 # before the final drain would cache the session pre-drain and
                 # never show the last turn. Opencode-bound flips run cold.
                 return
-            size = _shadow_size(session, shadow)
-            if size is None:
-                return   # no shadow file yet: switch_session's late-create
-                         # + a cold spawn own that flip; never fresh-mint
-            # not `recipe`: that name is taken by the *active* side's launch,
-            # which this closure must never rebuild or shadow
-            shadow_recipe = build_launch(session, shadow)
-            dims = _winsize(sys.stdin.fileno())
 
             def spawn() -> None:
                 try:
+                    size = _shadow_size(session, shadow)
+                    if size is None:
+                        return   # no shadow file yet: switch_session's
+                                 # late-create + a cold spawn own that flip;
+                                 # never fresh-mint
+                    # not `recipe`: that name is taken by the *active* side's
+                    # launch, which this closure must never rebuild or shadow
+                    shadow_recipe = build_launch(session, shadow)
+                    dims = _winsize(sys.stdin.fileno())
                     child = spawn_hidden(shadow_recipe, dims, size)
                 except Exception:
                     return   # a failed fire means a cold flip
