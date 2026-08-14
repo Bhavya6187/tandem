@@ -1,11 +1,10 @@
-"""Process warmup: the incoming harness boots while the outgoing one dies.
+"""Process warmup: keep the incoming harness booted on a hidden PTY.
 
-Nothing here runs on its own schedule. The runner fires `spawn_hidden`
-from the monitor thread the moment a flip is decided, so the child boots
-through the outgoing harness's teardown; whether that child is still
-usable by the time the flip lands is flip.py's freshness gate to decide,
-and this module only hands it the evidence (the recipe, the shadow-size
-snapshot).
+Nothing here runs on its own schedule. The runner calls `spawn_hidden` at
+entry and refreshes the standby when transcript sync grows the shadow;
+whether that child is still usable by the time the flip lands is flip.py's
+freshness gate to decide, and this module only hands it the evidence (the
+recipe, the shadow-size snapshot).
 
 `LaunchRecipe` is the frozen record of how a harness invocation was (or
 will be) launched. It exists because config is read per call
@@ -134,15 +133,18 @@ class WarmChild:
     def kill(self) -> None:
         """Short version of the ladder: soft quit keys first so the CLI
         cleans its own state (claude removes its session-registry file),
-        then TERM/KILL to the process group."""
-        self._stop.set()
-        self._reader.join(timeout=2)
+        then TERM/KILL to the process group. Keep draining through the
+        ladder so the CLI cannot block while writing its exit repaint."""
         control = PtyControl()
         control.attach(self.child)
-        control.terminate(
-            get_adapter(self.recipe.side).quit_keystrokes(),
-            soft_timeout=1.5, term_timeout=1.0,
-        )
+        try:
+            control.terminate(
+                get_adapter(self.recipe.side).quit_keystrokes(),
+                soft_timeout=1.5, term_timeout=1.0,
+            )
+        finally:
+            self._stop.set()
+            self._reader.join(timeout=2)
 
 
 def spawn_hidden(

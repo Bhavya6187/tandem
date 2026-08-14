@@ -525,9 +525,13 @@ def test_feed_after_flush_starts_clean():
 
 
 def test_claude_quit_recipe():
-    # Ctrl-C clears the composer / interrupts, Ctrl-D on the empty
-    # composer exits
-    assert get_adapter("claude").quit_keystrokes() == [b"\x03", b"\x04"]
+    # claude ≥2.1.229 exits only on a same-key double-press ("press
+    # Ctrl-C again to exit") — a mixed ^C/^D recipe arms two different
+    # confirmations and never quits, so the ladder SIGTERMs and claude
+    # skips its own transcript finalization. First ^C clears the
+    # composer AND arms, second exits; third backstops a dismissed
+    # dialog eating one press.
+    assert get_adapter("claude").quit_keystrokes() == [b"\x03", b"\x03", b"\x03"]
 
 
 def test_codex_quit_recipe():

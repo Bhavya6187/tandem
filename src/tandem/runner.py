@@ -141,6 +141,20 @@ def _stdin_tty() -> bool:
         return False
 
 
+def _flip_debug(msg: str) -> None:
+    """Timestamped line into ~/.tandem/logs/flip-debug.log. Temporary
+    diagnostic for the live flip-latency hunt: never raises, and never
+    called from the pump thread (flip_pressed records to memory instead;
+    the monitor thread writes on its behalf)."""
+    try:
+        path = paths.log_dir() / "flip-debug.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a") as fh:
+            fh.write(f"{time.time():.3f} pid={os.getpid()} {msg}\n")
+    except Exception:
+        pass
+
+
 def wait_until_safe(
     transcript: Path | None,
     sentinel: Path | None,
@@ -256,8 +270,8 @@ class FlipMonitor:
     entirely — see `wait_until_safe`.
 
     `on_flip_decided` fires once, on this thread, in the gap between the
-    decision and the ladder — the runner starts the incoming harness's launch
-    worker there, so its boot overlaps the outgoing one's teardown. It is
+    decision and the ladder — the runner makes a final freshness check on the
+    resident incoming harness there. It is
     called with the flag already set (`flip_requested` is what makes the flip
     inevitable, and a callback must not be able to take it back) and its
     exceptions are swallowed: a failed hook costs a cold flip, never the flip
@@ -280,6 +294,7 @@ class FlipMonitor:
         self.on_flip_decided = on_flip_decided
         self.flip_requested = False
         self.how = ""
+        self._key_events: list[tuple[float, str]] = []
         self._armed = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(
@@ -307,8 +322,12 @@ class FlipMonitor:
         that `armed()` needs — `armed()` runs inside the SIGWINCH handler on
         this same thread, and a shared lock would deadlock the pump."""
         if self._armed.is_set():
+            # memory only — this thread must never do I/O (see docstring);
+            # the monitor thread flushes these to the debug log
+            self._key_events.append((time.time(), "cancel"))
             self._armed.clear()  # toggle: cancel a pending flip
         else:
+            self._key_events.append((time.time(), "arm"))
             self._armed.set()
 
     def armed(self) -> bool:
@@ -320,11 +339,18 @@ class FlipMonitor:
         fires, so the bar stops advertising an arm that is already spent."""
         return self._armed.is_set() and not self.flip_requested
 
+    def _flush_key_events(self) -> None:
+        while self._key_events:
+            ts, ev = self._key_events.pop(0)
+            _flip_debug(f"key {ev} pressed_at={ts:.3f}")
+
     def _run(self) -> None:
         while not self._stop.is_set():
             self._armed.wait()
             if self._stop.is_set():
                 return
+            self._flush_key_events()
+            _flip_debug("wait-start")
             ok = wait_until_safe(
                 self.transcript,
                 self.sentinel,
@@ -339,8 +365,11 @@ class FlipMonitor:
             )
             if self._stop.is_set():
                 return
+            self._flush_key_events()
             if not ok:
+                _flip_debug("wait-cancelled")
                 continue  # cancelled: back to waiting for the next arm
+            _flip_debug("wait-released ladder-start")
             self.flip_requested = True
             if self.on_flip_decided is not None:
                 try:
@@ -348,6 +377,7 @@ class FlipMonitor:
                 except Exception:
                     pass   # a failed fire means a cold flip, never a dead thread
             self.how = self.control.terminate(self.quit_bytes)
+            _flip_debug(f"ladder-done how={self.how}")
             return
 
 
@@ -447,8 +477,8 @@ class InteractiveRunner:
         # set here too so the attributes exist even if run() raises early
         self._released = False
         self.flip_requested = False
-        # The harness this run fired at its flip decision, surrendered to the
-        # flip loop's carry. Only a flip can fill it: no flip, no fire.
+        # The resident standby this run surrenders to the flip loop's carry.
+        # A normal exit reaps it instead of publishing it here.
         self.warm_child: WarmChild | None = None
         # Formatted, ready-to-print report lines for the session that just
         # ran. `run()` prints them itself on a normal exit; on a flip it does
@@ -505,6 +535,7 @@ class InteractiveRunner:
         # otherwise: rebuilding for an adopted child could disagree with what
         # is already running.
         recipe = self.adopt_child.recipe if adopting else build_launch(session, active)
+        _flip_debug(f"run-start side={active} adopting={adopting}")
         transcript = recipe.transcript
         sentinel = recipe.sentinel
         argv = recipe.argv
@@ -512,6 +543,8 @@ class InteractiveRunner:
 
         frame_cfg = load_frame_config()
         control = PtyControl()
+        probe_last: dict = {"status": "<unpolled>"}
+
         def claude_probe() -> str | None:
             # A raising probe would kill the tandem-flip thread and leave
             # the bar advertising an armed flip that can never fire (os.kill
@@ -520,9 +553,13 @@ class InteractiveRunner:
             # guards). Single tier reads any non-answer as flippable, so an
             # escape maps to None, never to a dead thread.
             try:
-                return adapter.session_status(active_sid)
+                status = adapter.session_status(active_sid)
             except Exception:
-                return None
+                status = None
+            if status != probe_last["status"]:
+                _flip_debug(f"probe {probe_last['status']} -> {status}")
+                probe_last["status"] = status
+            return status
 
         monitor = FlipMonitor(
             control, adapter.quit_keystrokes(), transcript, sentinel,
@@ -532,19 +569,21 @@ class InteractiveRunner:
             # answers, is how codex opts out.
             status_probe=claude_probe if active == "claude" else None,
         )
-        # Fired at most once, on the monitor thread, between the flip
-        # decision and the ladder. It starts a worker and returns immediately,
-        # so a slow fork/exec cannot hold up teardown of the outgoing harness.
+        # Keeps one shadow harness resident. It starts at runner entry and is
+        # refreshed after a tail drain changes the shadow transcript; the flip
+        # monitor calls it once more between the decision and the ladder as a
+        # final freshness check. Spawn and stale-child teardown stay off the
+        # caller, so neither the PTY pump nor transcript tailing blocks on them.
         # The finally below closes the handoff slot after the ladder: a child
         # that has landed by then is adopted, while a worker that lands later
         # sees the closed slot and kills its child instead of stranding it.
-        # The non-tty path never flips, so a spawn there could only ever
-        # leak a hidden harness: the gate is read at fire time, and takes
-        # both the [frame] `warm` flag and a real stdin tty.
-        fired: dict = {"child": None, "closed": False}
+        # The non-tty path cannot adopt a standby, so a spawn there could only
+        # leak a hidden harness. The gate takes both the [frame] `warm` flag
+        # and a real stdin tty.
+        fired: dict = {"child": None, "closed": False, "spawning": False}
         fired_lock = threading.Lock()
 
-        def fire_warm() -> None:
+        def ensure_warm() -> None:
             if not (frame_cfg.warm and _stdin_tty()):
                 return
             shadow = session.shadow
@@ -554,31 +593,72 @@ class InteractiveRunner:
                          # + a cold spawn own that flip; never fresh-mint
             # not `recipe`: that name is taken by the *active* side's launch,
             # which this closure must never rebuild or shadow
-            shadow_recipe = build_launch(session, shadow)
-            dims = _winsize(sys.stdin.fileno())
+            with fired_lock:
+                current = fired["child"]
+                if (
+                    current is not None
+                    and current.alive()
+                    and current.shadow_size == size
+                ):
+                    return
+                if fired["closed"] or fired["spawning"]:
+                    return
+                fired["spawning"] = True
+
+            try:
+                shadow_recipe = build_launch(session, shadow)
+                dims = _winsize(sys.stdin.fileno())
+            except Exception:
+                with fired_lock:
+                    fired["spawning"] = False
+                return   # standby setup must never cost the active harness
 
             def spawn() -> None:
                 try:
                     child = spawn_hidden(shadow_recipe, dims, size)
                 except Exception:
+                    with fired_lock:
+                        fired["spawning"] = False
                     return   # a failed fire means a cold flip
+                _flip_debug(
+                    f"warm-spawned side={shadow}"
+                    f" child={getattr(getattr(child, 'child', None), 'pid', '?')}"
+                    f" shadow_size={size}"
+                )
+                displaced = None
                 with fired_lock:
+                    fired["spawning"] = False
                     if not fired["closed"]:
+                        displaced = fired["child"]
                         fired["child"] = child
-                        return
-                try:
-                    child.kill()   # the runner already read the slot and left
-                except Exception:
-                    pass
+                    else:
+                        displaced = child
+                if displaced is not None:
+                    threading.Thread(
+                        target=lambda: _kill_warm(displaced),
+                        name="tandem-warm-replace", daemon=True,
+                    ).start()
+                # The shadow may have grown while this process was booting.
+                # The tail-side refresh saw `spawning` and deliberately did
+                # not start a duplicate worker, so the landing worker owns the
+                # follow-up that closes that race.
+                if _shadow_size(session, shadow) != size:
+                    ensure_warm()
 
             threading.Thread(
                 target=spawn, name="tandem-warm-fire", daemon=True
             ).start()
 
+        def _kill_warm(child: WarmChild) -> None:
+            try:
+                child.kill()
+            except Exception:
+                pass
+
         # The monitor exists before the closure does, so the hook is wired by
         # assignment — `monitor.start()` is called far below, which is what
         # makes a plain write safe: the thread has not run yet.
-        monitor.on_flip_decided = fire_warm
+        monitor.on_flip_decided = ensure_warm
         frame = FrameIO(
             flip_byte=frame_cfg.flip_byte,
             on_flip=monitor.flip_pressed,
@@ -650,7 +730,9 @@ class InteractiveRunner:
                 try:
                     while not stop.is_set():
                         with ops._sub_lock():
-                            loop.drain()
+                            drained = loop.drain()
+                        if drained:
+                            ensure_warm()
                         watcher.wait()
                     # final drain after the CLI exits
                     with ops._sub_lock():
@@ -663,6 +745,7 @@ class InteractiveRunner:
         thread = threading.Thread(target=tail_thread, name="tandem-tail", daemon=True)
         thread.start()
         monitor.start()   # before the try: stop() on an unstarted thread raises
+        ensure_warm()
         try:
             # A release that returns None means the discard reader still owns
             # the fd, so there is nothing safe to hand over: run_in_pty spawns
@@ -715,6 +798,9 @@ class InteractiveRunner:
             )
         self.reports = [f"tandem: sync error: {err}" for err in errors]
         self.reports += [f"tandem: {note}" for note in notes]
+        _flip_debug(
+            f"run-exit side={active} code={code} flip={self.flip_requested}"
+        )
         if not self.flip_requested:
             for line in self.reports:
                 print(line)
