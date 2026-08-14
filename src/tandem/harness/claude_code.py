@@ -146,7 +146,10 @@ class ClaudeCodeAdapter(HarnessAdapter):
         return ["--settings", json.dumps(settings)]
 
     def quit_keystrokes(self) -> list[bytes]:
-        return [b"\x03", b"\x04"]
+        # claude ≥2.1.229 exits only on a same-key double-press; ^C both
+        # clears a drafted composer and arms the confirmation, so three
+        # presses cover every prompt state (live-verified 2026-08-13)
+        return [b"\x03", b"\x03", b"\x03"]
 
     def session_status(self, session_id: str) -> str | None:
         """Live turn state from claude's session registry: "busy" while a

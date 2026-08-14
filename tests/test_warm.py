@@ -168,7 +168,9 @@ def test_release_refuses_to_hand_over_a_still_owned_fd(env_factory):
     assert wc.release() is fake
 
 
-def test_kill_runs_the_short_ladder(env_factory, monkeypatch):
+def test_kill_keeps_reader_draining_through_the_short_ladder(
+    env_factory, monkeypatch
+):
     env = env_factory()
     fake = _FakePty()
     wc = WarmChild(_recipe(env), fake, shadow_size=0)
@@ -178,6 +180,7 @@ def test_kill_runs_the_short_ladder(env_factory, monkeypatch):
                        attach_timeout=5.0):
         calls["soft"] = soft
         calls["timeouts"] = (soft_timeout, term_timeout)
+        calls["reader_alive"] = wc._reader.is_alive()
         return "soft"
 
     from tandem import ptyrun
@@ -186,6 +189,7 @@ def test_kill_runs_the_short_ladder(env_factory, monkeypatch):
     from tandem.harness import get_adapter
     assert calls["soft"] == get_adapter("codex").quit_keystrokes()
     assert calls["timeouts"] == (1.5, 1.0)
+    assert calls["reader_alive"]
     assert not wc._reader.is_alive()
 
 

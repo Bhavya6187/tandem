@@ -141,6 +141,20 @@ def _stdin_tty() -> bool:
         return False
 
 
+def _flip_debug(msg: str) -> None:
+    """Timestamped line into ~/.tandem/logs/flip-debug.log. Temporary
+    diagnostic for the live flip-latency hunt: never raises, and never
+    called from the pump thread (flip_pressed records to memory instead;
+    the monitor thread writes on its behalf)."""
+    try:
+        path = paths.log_dir() / "flip-debug.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a") as fh:
+            fh.write(f"{time.time():.3f} pid={os.getpid()} {msg}\n")
+    except Exception:
+        pass
+
+
 def wait_until_safe(
     transcript: Path | None,
     sentinel: Path | None,
@@ -280,6 +294,7 @@ class FlipMonitor:
         self.on_flip_decided = on_flip_decided
         self.flip_requested = False
         self.how = ""
+        self._key_events: list[tuple[float, str]] = []
         self._armed = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(
@@ -307,8 +322,12 @@ class FlipMonitor:
         that `armed()` needs — `armed()` runs inside the SIGWINCH handler on
         this same thread, and a shared lock would deadlock the pump."""
         if self._armed.is_set():
+            # memory only — this thread must never do I/O (see docstring);
+            # the monitor thread flushes these to the debug log
+            self._key_events.append((time.time(), "cancel"))
             self._armed.clear()  # toggle: cancel a pending flip
         else:
+            self._key_events.append((time.time(), "arm"))
             self._armed.set()
 
     def armed(self) -> bool:
@@ -320,11 +339,18 @@ class FlipMonitor:
         fires, so the bar stops advertising an arm that is already spent."""
         return self._armed.is_set() and not self.flip_requested
 
+    def _flush_key_events(self) -> None:
+        while self._key_events:
+            ts, ev = self._key_events.pop(0)
+            _flip_debug(f"key {ev} pressed_at={ts:.3f}")
+
     def _run(self) -> None:
         while not self._stop.is_set():
             self._armed.wait()
             if self._stop.is_set():
                 return
+            self._flush_key_events()
+            _flip_debug("wait-start")
             ok = wait_until_safe(
                 self.transcript,
                 self.sentinel,
@@ -339,8 +365,11 @@ class FlipMonitor:
             )
             if self._stop.is_set():
                 return
+            self._flush_key_events()
             if not ok:
+                _flip_debug("wait-cancelled")
                 continue  # cancelled: back to waiting for the next arm
+            _flip_debug("wait-released ladder-start")
             self.flip_requested = True
             if self.on_flip_decided is not None:
                 try:
@@ -348,6 +377,7 @@ class FlipMonitor:
                 except Exception:
                     pass   # a failed fire means a cold flip, never a dead thread
             self.how = self.control.terminate(self.quit_bytes)
+            _flip_debug(f"ladder-done how={self.how}")
             return
 
 
@@ -505,6 +535,7 @@ class InteractiveRunner:
         # otherwise: rebuilding for an adopted child could disagree with what
         # is already running.
         recipe = self.adopt_child.recipe if adopting else build_launch(session, active)
+        _flip_debug(f"run-start side={active} adopting={adopting}")
         transcript = recipe.transcript
         sentinel = recipe.sentinel
         argv = recipe.argv
@@ -512,6 +543,8 @@ class InteractiveRunner:
 
         frame_cfg = load_frame_config()
         control = PtyControl()
+        probe_last: dict = {"status": "<unpolled>"}
+
         def claude_probe() -> str | None:
             # A raising probe would kill the tandem-flip thread and leave
             # the bar advertising an armed flip that can never fire (os.kill
@@ -520,9 +553,13 @@ class InteractiveRunner:
             # guards). Single tier reads any non-answer as flippable, so an
             # escape maps to None, never to a dead thread.
             try:
-                return adapter.session_status(active_sid)
+                status = adapter.session_status(active_sid)
             except Exception:
-                return None
+                status = None
+            if status != probe_last["status"]:
+                _flip_debug(f"probe {probe_last['status']} -> {status}")
+                probe_last["status"] = status
+            return status
 
         monitor = FlipMonitor(
             control, adapter.quit_keystrokes(), transcript, sentinel,
@@ -583,6 +620,11 @@ class InteractiveRunner:
                     with fired_lock:
                         fired["spawning"] = False
                     return   # a failed fire means a cold flip
+                _flip_debug(
+                    f"warm-spawned side={shadow}"
+                    f" child={getattr(getattr(child, 'child', None), 'pid', '?')}"
+                    f" shadow_size={size}"
+                )
                 displaced = None
                 with fired_lock:
                     fired["spawning"] = False
@@ -756,6 +798,9 @@ class InteractiveRunner:
             )
         self.reports = [f"tandem: sync error: {err}" for err in errors]
         self.reports += [f"tandem: {note}" for note in notes]
+        _flip_debug(
+            f"run-exit side={active} code={code} flip={self.flip_requested}"
+        )
         if not self.flip_requested:
             for line in self.reports:
                 print(line)

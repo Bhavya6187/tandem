@@ -248,11 +248,14 @@ def _switch(
     _report_switch(old, new_active, problems, mem)
     if carry is not None:
         standby = carry.get("standby")
-        if standby is not None and not _standby_fresh(
-            standby, new_active, session, mem
-        ):
-            carry["standby"] = None
-            _reap(standby, carry)   # off-thread: the flip must not wait
+        if standby is not None:
+            from .runner import _flip_debug
+
+            fresh = _standby_fresh(standby, new_active, session, mem)
+            _flip_debug(f"standby-gate side={new_active} fresh={fresh}")
+            if not fresh:
+                carry["standby"] = None
+                _reap(standby, carry)   # off-thread: the flip must not wait
     code, flip, launched = _try_enter(tandem_id, run_harness)
     if launched or not fall_back:
         return code, flip

@@ -133,15 +133,18 @@ class WarmChild:
     def kill(self) -> None:
         """Short version of the ladder: soft quit keys first so the CLI
         cleans its own state (claude removes its session-registry file),
-        then TERM/KILL to the process group."""
-        self._stop.set()
-        self._reader.join(timeout=2)
+        then TERM/KILL to the process group. Keep draining through the
+        ladder so the CLI cannot block while writing its exit repaint."""
         control = PtyControl()
         control.attach(self.child)
-        control.terminate(
-            get_adapter(self.recipe.side).quit_keystrokes(),
-            soft_timeout=1.5, term_timeout=1.0,
-        )
+        try:
+            control.terminate(
+                get_adapter(self.recipe.side).quit_keystrokes(),
+                soft_timeout=1.5, term_timeout=1.0,
+            )
+        finally:
+            self._stop.set()
+            self._reader.join(timeout=2)
 
 
 def spawn_hidden(
