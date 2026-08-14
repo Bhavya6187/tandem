@@ -215,6 +215,37 @@ class OpencodeAdapter(HarnessAdapter):
     def mint_session_id(self) -> str:
         return mint_id("ses", descending=True)
 
+    # -- doctor ---------------------------------------------------------------
+
+    def validate_transcript(self, path: Path, session_id: str | None) -> list[str]:
+        """Structural dry-resume for a DB-backed session. `path` is the DB."""
+        problems: list[str] = []
+        try:
+            with connect(path) as conn:
+                if session_id is not None:
+                    row = conn.execute("SELECT 1 FROM session WHERE id = ?",
+                                       (session_id,)).fetchone()
+                    if row is None:
+                        return [f"session {session_id} not in the opencode database"]
+                mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+                if str(mode).lower() != "wal":
+                    problems.append(f"journal_mode is {mode!r}, expected wal")
+                last = conn.execute(
+                    "SELECT data FROM message WHERE session_id = ?"
+                    " ORDER BY time_created DESC, id DESC LIMIT 1",
+                    (session_id,)).fetchone()
+        except sqlite3.Error as exc:
+            return [f"cannot read opencode database: {exc}"]
+        if last is None:
+            problems.append("no messages (session would render empty)")
+            return problems
+        data = json.loads(last["data"])
+        if data.get("role") != "assistant" or not _is_closed(data):
+            problems.append(
+                "last message is not a completed assistant — the opencode TUI"
+                " would show this session as perpetually working")
+        return problems
+
     # -- storage capabilities -------------------------------------------------
 
     def make_source_reader(self, session, cursor, transcript):

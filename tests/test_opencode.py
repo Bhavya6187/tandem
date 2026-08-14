@@ -40,6 +40,7 @@ CREATE TABLE part (
 def mini_db(tmp_path, monkeypatch):
     db = tmp_path / "opencode.db"
     conn = sqlite3.connect(db)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(MINI_SCHEMA)
     conn.commit()
     conn.close()
@@ -410,3 +411,23 @@ def test_launch_surface():
         ["opencode", "run", "-s", "ses_x", "hi"]
     assert adapter.hook_argv_extra(Path("/tmp/s")) == []
     assert adapter.quit_keystrokes() == [b"\x03", b"\x03"]
+
+
+def test_validate_transcript_healthy(mini_db):
+    sid = _insert_session(mini_db)
+    _seed_turn(mini_db, sid, complete=True)
+    adapter = opencode.OpencodeAdapter()
+    assert adapter.validate_transcript(mini_db, sid) == []
+
+
+def test_validate_transcript_flags_open_turn(mini_db):
+    sid = _insert_session(mini_db)
+    _seed_turn(mini_db, sid, complete=False)
+    problems = opencode.OpencodeAdapter().validate_transcript(mini_db, sid)
+    assert any("completed" in p for p in problems)
+
+
+def test_validate_transcript_missing_session(mini_db):
+    problems = opencode.OpencodeAdapter().validate_transcript(
+        mini_db, "ses_nope")
+    assert any("not in the opencode database" in p for p in problems)
