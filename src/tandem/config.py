@@ -87,7 +87,7 @@ def load_harness_args(harness: str) -> list[str]:
 class FrameConfig:
     flip_byte: int = 0x1D   # Ctrl-]
     bar: bool = True
-    warm: bool = True       # keep the other harness booted on a hidden PTY
+    warm: bool = True       # boot the other harness during the flip's teardown
 
 
 def _parse_flip_key(value: str) -> int | None:

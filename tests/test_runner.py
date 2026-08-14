@@ -451,9 +451,11 @@ def _fire_and_join(control, hook, tmp_path):
 
 
 def test_monitor_fires_the_flip_hook_before_the_ladder(tmp_path):
-    # The hook is the resident standby's final freshness check. It must run
-    # before teardown so a replacement, when needed, boots in parallel with
-    # the outgoing harness's quit ladder. The order is the contract.
+    # The hook is where the incoming harness is spawned, and the whole point
+    # of firing it from here is that the boot overlaps the outgoing harness's
+    # teardown. Run after `control.terminate` it would still spawn, still
+    # hand over, still pass every runner test — and serialize precisely what
+    # this pipelines. So the order is the contract.
     order = []
     m = _fire_and_join(_OrderingControl(order), lambda: order.append("fired"),
                        tmp_path)
@@ -1010,7 +1012,7 @@ def test_runner_probe_swallows_raising_session_status(env_factory, monkeypatch):
     assert made["kw"]["status_probe"]() is None
 
 
-# -- resident warm spawn --------------------------------------------------
+# -- the fire-at-flip warm spawn ------------------------------------------
 
 
 class _StdinWithFileno:
@@ -1178,10 +1180,7 @@ def test_a_slow_fire_does_not_delay_the_termination_ladder(env_factory,
         release_spawn.wait(timeout=1)
         order.append("spawn-done")
         spawn_done.set()
-        child = _DeadChild()
-        child.shadow_size = args[2]
-        child.alive = lambda: True
-        return child
+        return _DeadChild()
 
     def terminate(self, soft, **kwargs):
         order.append("ladder")
@@ -1202,182 +1201,28 @@ def test_a_slow_fire_does_not_delay_the_termination_ladder(env_factory,
     assert order.index("ladder") < order.index("spawn-done")
 
 
-def test_warm_starts_before_flip_and_normal_exit_reaps_it(env_factory, monkeypatch):
+def test_no_flip_leaves_no_fire_spawn(env_factory, monkeypatch):
     env = env_factory(active="claude")
     import tandem.runner as runner_mod
     spawns = []
-
-    class FakeChild:
-        def __init__(self, shadow_size):
-            self.shadow_size = shadow_size
-            self.killed = False
-
-        def alive(self):
-            return True
-
-        def kill(self):
-            self.killed = True
-
-    def fake_spawn_hidden(recipe, dims, shadow_size):
-        spawns.append(FakeChild(shadow_size))
-        return spawns[-1]
-
-    monkeypatch.setattr(runner_mod, "spawn_hidden", fake_spawn_hidden)
+    monkeypatch.setattr(runner_mod, "spawn_hidden",
+                        lambda *a, **kw: spawns.append(1))
     monkeypatch.setattr(runner_mod, "TranscriptWatcher", _QuietWatcher)
     monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: True)
-    monkeypatch.setattr(sys, "stdin", _StdinWithFileno())
-
-    def fake_run_in_pty(*args, **kwargs):
-        deadline = time.time() + 3
-        while not spawns and time.time() < deadline:
-            time.sleep(0.02)
-        return 0
-
-    monkeypatch.setattr(runner_mod, "run_in_pty", fake_run_in_pty)
+    monkeypatch.setattr(runner_mod, "run_in_pty", lambda *a, **kw: 0)
     r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink)
     r.run()
-    assert not r.flip_requested
-    assert len(spawns) == 1 and spawns[0].killed
-    assert r.warm_child is None
+    assert not r.flip_requested and spawns == [] and r.warm_child is None
 
 
-def test_sync_growth_replaces_the_resident_warm_child(env_factory, monkeypatch):
-    env = env_factory(active="claude")
-    import tandem.runner as runner_mod
-
-    with open(env.claude_shadow, "a") as fh:
-        fh.write(json.dumps({
-            "type": "user",
-            "uuid": "warm-refresh-user",
-            "message": {"role": "user", "content": "refresh warm child"},
-        }) + "\n")
-
-    spawns = []
-    first_spawned = threading.Event()
-
-    class FakeChild:
-        def __init__(self, shadow_size):
-            self.shadow_size = shadow_size
-            self.killed = False
-
-        def alive(self):
-            return True
-
-        def kill(self):
-            self.killed = True
-
-    def fake_spawn_hidden(recipe, dims, shadow_size):
-        child = FakeChild(shadow_size)
-        spawns.append(child)
-        first_spawned.set()
-        return child
-
-    class GrowingSink(_Sink):
-        def handle(self, line, ctx, cursor):
-            assert first_spawned.wait(3)
-            with open(env.codex_shadow, "ab") as fh:
-                fh.write(b'{"synced":true}\n')
-
-    monkeypatch.setattr(runner_mod, "spawn_hidden", fake_spawn_hidden)
-    monkeypatch.setattr(runner_mod, "TranscriptWatcher", _QuietWatcher)
-    monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: True)
-    monkeypatch.setattr(sys, "stdin", _StdinWithFileno())
-
-    def fake_run_in_pty(*args, **kwargs):
-        deadline = time.time() + 3
-        while len(spawns) < 2 and time.time() < deadline:
-            time.sleep(0.02)
-        return 0
-
-    monkeypatch.setattr(runner_mod, "run_in_pty", fake_run_in_pty)
-    r = runner_mod.InteractiveRunner(
-        env.session, sink_factory=lambda *args: GrowingSink()
-    )
-    r.run()
-
-    assert len(spawns) == 2
-    assert spawns[0].shadow_size < spawns[1].shadow_size
-    assert spawns[0].killed and spawns[1].killed
-
-
-def test_sync_growth_during_spawn_gets_a_followup_warm_child(env_factory,
-                                                            monkeypatch):
-    env = env_factory(active="claude")
-    import tandem.runner as runner_mod
-
-    with open(env.claude_shadow, "a") as fh:
-        fh.write(json.dumps({
-            "type": "user", "uuid": "warm-race-user",
-            "message": {"role": "user", "content": "race warm spawn"},
-        }) + "\n")
-
-    spawn_started = threading.Event()
-    shadow_grew = threading.Event()
-    drain_cycle_done = threading.Event()
-    release_spawn = threading.Event()
-    spawns = []
-
-    class FakeChild:
-        def __init__(self, shadow_size):
-            self.shadow_size = shadow_size
-            self.killed = False
-
-        def alive(self):
-            return True
-
-        def kill(self):
-            self.killed = True
-
-    def fake_spawn_hidden(recipe, dims, shadow_size):
-        if not spawns:
-            spawn_started.set()
-            assert release_spawn.wait(3)
-        child = FakeChild(shadow_size)
-        spawns.append(child)
-        return child
-
-    class GrowingSink(_Sink):
-        def handle(self, line, ctx, cursor):
-            assert spawn_started.wait(3)
-            with open(env.codex_shadow, "ab") as fh:
-                fh.write(b'{"synced":"during-spawn"}\n')
-            shadow_grew.set()
-
-    class SignalingWatcher(_QuietWatcher):
-        def wait(self):
-            drain_cycle_done.set()
-            super().wait()
-
-    monkeypatch.setattr(runner_mod, "spawn_hidden", fake_spawn_hidden)
-    monkeypatch.setattr(runner_mod, "TranscriptWatcher", SignalingWatcher)
-    monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: True)
-    monkeypatch.setattr(sys, "stdin", _StdinWithFileno())
-
-    def fake_run_in_pty(*args, **kwargs):
-        assert shadow_grew.wait(3)
-        assert drain_cycle_done.wait(3)
-        release_spawn.set()
-        deadline = time.time() + 3
-        while len(spawns) < 2 and time.time() < deadline:
-            time.sleep(0.02)
-        return 0
-
-    monkeypatch.setattr(runner_mod, "run_in_pty", fake_run_in_pty)
-    runner_mod.InteractiveRunner(
-        env.session, sink_factory=lambda *args: GrowingSink()
-    ).run()
-
-    assert len(spawns) == 2
-    assert spawns[0].shadow_size < spawns[1].shadow_size
-    assert spawns[0].killed and spawns[1].killed
-
-
-def test_a_closed_slot_rejects_a_refire(env_factory, monkeypatch):
-    # ensure_warm called after the run ended (a monitor join that expired
-    # mid-flip can leave the hook to fire this late) must not boot anything:
-    # the slot is closed for good, and a child spawned now would have nobody
-    # left to adopt or reap it. Driven by calling the hook once run() has
-    # returned.
+def test_fire_kills_its_child_when_the_slot_is_already_closed(env_factory,
+                                                             monkeypatch):
+    # The one case monitor.stop()'s join cannot cover: its timeout expires
+    # with a spawn still in flight, so the runner's finally reads and closes
+    # the slot first and the fire lands after. Driven by calling the fire
+    # hook once run() has returned — the slot is then closed for good, which
+    # is exactly the state an expired join leaves behind. The child must be
+    # killed by the fire itself; nothing else is left to reap it.
     import tandem.runner as runner_mod
     env = env_factory(active="claude")
     monitors = []
@@ -1388,12 +1233,8 @@ def test_a_closed_slot_rejects_a_refire(env_factory, monkeypatch):
             monitors.append(self)
 
     class FakeChild:
-        def __init__(self, shadow_size):
-            self.shadow_size = shadow_size
+        def __init__(self):
             self.killed = False
-
-        def alive(self):
-            return True
 
         def kill(self):
             self.killed = True
@@ -1401,7 +1242,7 @@ def test_a_closed_slot_rejects_a_refire(env_factory, monkeypatch):
     spawns = []
 
     def fake_spawn_hidden(recipe, dims, shadow_size):
-        spawns.append(FakeChild(shadow_size))
+        spawns.append(FakeChild())
         return spawns[-1]
 
     monkeypatch.setattr(runner_mod, "FlipMonitor", CapturingMonitor)
@@ -1412,55 +1253,14 @@ def test_a_closed_slot_rejects_a_refire(env_factory, monkeypatch):
     monkeypatch.setattr(runner_mod, "run_in_pty", lambda *a, **kw: 0)
     r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink)
     r.run()
-    assert len(spawns) == 1 and spawns[0].killed
-    assert r.warm_child is None
+    assert spawns == [] and r.warm_child is None   # nothing fired during the run
 
-    monitors[0].on_flip_decided()                  # fires against a closed slot
-    time.sleep(0.05)
-    assert len(spawns) == 1 and spawns[0].killed   # no second spawn
+    monitors[0].on_flip_decided()                  # the in-flight spawn lands
+    deadline = time.time() + 3
+    while not (spawns and spawns[0].killed) and time.time() < deadline:
+        time.sleep(0.02)
+    assert len(spawns) == 1 and spawns[0].killed   # reaped, not stranded
     assert r.warm_child is None                    # and never adopted
-
-
-def test_a_spawn_landing_after_close_kills_its_child(env_factory, monkeypatch):
-    # The startup fire is still in flight when the run ends: the finally
-    # closes the slot with the worker blocked inside spawn_hidden, so nothing
-    # was published to adopt. The landing worker must see the closed slot and
-    # kill the child it just booted — nothing else holds a reference to it.
-    import tandem.runner as runner_mod
-    env = env_factory(active="claude")
-    release_spawn = threading.Event()
-    reaped = threading.Event()
-    spawns = []
-
-    class FakeChild:
-        def __init__(self, shadow_size):
-            self.shadow_size = shadow_size
-            self.killed = False
-
-        def alive(self):
-            return True
-
-        def kill(self):
-            self.killed = True
-            reaped.set()
-
-    def fake_spawn_hidden(recipe, dims, shadow_size):
-        assert release_spawn.wait(3)
-        spawns.append(FakeChild(shadow_size))
-        return spawns[-1]
-
-    monkeypatch.setattr(runner_mod, "spawn_hidden", fake_spawn_hidden)
-    monkeypatch.setattr(runner_mod, "TranscriptWatcher", _QuietWatcher)
-    monkeypatch.setattr(runner_mod, "_stdin_tty", lambda: True)
-    monkeypatch.setattr(sys, "stdin", _StdinWithFileno())
-    monkeypatch.setattr(runner_mod, "run_in_pty", lambda *a, **kw: 0)
-    r = runner_mod.InteractiveRunner(env.session, sink_factory=_null_sink)
-    r.run()
-    assert spawns == []          # the worker never landed during the run
-    release_spawn.set()          # now it lands on a closed slot
-    assert reaped.wait(3)
-    assert len(spawns) == 1 and spawns[0].killed
-    assert r.warm_child is None
 
 
 def test_runner_adopts_a_live_child(env_factory, monkeypatch):
@@ -1693,7 +1493,7 @@ def test_tail_thread_drains_all_directions(tmp_path, monkeypatch):
 
 
 def test_warm_skips_opencode_target(tmp_path, monkeypatch):
-    """ensure_warm never spawns when next-in-cycle is opencode (v1 carve-out):
+    """fire_warm never spawns when next-in-cycle is opencode (v1 carve-out):
     an opencode TUI booted pre-drain would cache the session pre-drain and
     never show the last turn, so opencode-bound flips run cold."""
     from conftest import Env3

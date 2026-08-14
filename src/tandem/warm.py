@@ -1,10 +1,11 @@
-"""Process warmup: keep the incoming harness booted on a hidden PTY.
+"""Process warmup: the incoming harness boots while the outgoing one dies.
 
-Nothing here runs on its own schedule. The runner calls `spawn_hidden` at
-entry and refreshes the standby when transcript sync grows the shadow;
-whether that child is still usable by the time the flip lands is flip.py's
-freshness gate to decide, and this module only hands it the evidence (the
-recipe, the shadow-size snapshot).
+Nothing here runs on its own schedule. The runner fires `spawn_hidden`
+from the monitor thread the moment a flip is decided, so the child boots
+through the outgoing harness's teardown; whether that child is still
+usable by the time the flip lands is flip.py's freshness gate to decide,
+and this module only hands it the evidence (the recipe, the shadow-size
+snapshot).
 
 `LaunchRecipe` is the frozen record of how a harness invocation was (or
 will be) launched. It exists because config is read per call
