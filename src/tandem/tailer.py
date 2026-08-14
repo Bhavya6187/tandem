@@ -22,10 +22,19 @@ from watchdog.observers.polling import PollingObserver
 
 @dataclass
 class TailedLine:
-    line_index: int      # 0-based index in the file
-    end_offset: int      # byte offset just past this line's newline
-    raw: dict | None     # parsed JSON, None if the line was not valid JSON
+    line_index: int      # 0-based index in the file (or turn ordinal)
+    end_offset: int      # byte offset just past this line's newline (0 for DB units)
+    raw: dict | None     # parsed JSON / native unit, None if not valid JSON
     text: str
+    pos: dict | None = None   # storage-adapter cursor coords (opencode turns)
+
+    def advance(self, cursor) -> None:
+        """The one place a consumed unit moves the durable cursor. File units
+        move byte/line; DB units additionally record their native position."""
+        cursor.byte_offset = self.end_offset
+        cursor.line_index = self.line_index + 1
+        if self.pos is not None:
+            cursor.pending["source_pos"] = self.pos
 
 
 class JsonlTailer:

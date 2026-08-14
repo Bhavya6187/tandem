@@ -75,15 +75,8 @@ def fast_forward(store: StateStore, session: PairedSession, source: str,
                  target: str) -> None:
     """Mark everything currently in `source`'s store as already-synced for
     the (source -> target) direction."""
-    transcript = source_transcript(session, source)
     cursor = store.get_cursor(session.tandem_id, source, target)
-    if transcript is None:
-        cursor.byte_offset = 0
-        cursor.line_index = 0
-    else:
-        data = transcript.read_bytes()
-        cursor.byte_offset = len(data)
-        cursor.line_index = data.count(b"\n")
+    get_adapter(source).fast_forward_cursor(session, cursor)
     cursor.pending.pop("intent", None)
     store.save_cursor(cursor)
 
@@ -98,17 +91,8 @@ def fast_forward_all(store: StateStore, session: PairedSession, source: str) -> 
 
 def unsynced_lines(session: PairedSession, store: StateStore, source: str,
                    target: str) -> int:
-    transcript = source_transcript(session, source)
-    if transcript is None:
-        return 0
     cursor = store.get_cursor(session.tandem_id, source, target)
-    try:
-        data = transcript.read_bytes()
-    except OSError:
-        return 0
-    if len(data) <= cursor.byte_offset:
-        return 0
-    return data[cursor.byte_offset :].count(b"\n")
+    return get_adapter(source).pending_units(session, cursor)
 
 
 def switch_session(store: StateStore, session: PairedSession,

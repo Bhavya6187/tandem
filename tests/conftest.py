@@ -147,10 +147,14 @@ class Env:
         )
 
 
-class FakeOpencodeAdapter:
+from tandem.harness.base import HarnessAdapter
+
+
+class FakeOpencodeAdapter(HarnessAdapter):
     """Minimal file-backed stand-in registered as 'opencode' for core tests.
     Replaced by the real adapter's tests in Phase 2; core tests keep using
-    the fake so they stay hermetic."""
+    the fake so they stay hermetic. Subclasses HarnessAdapter so it inherits
+    the file-backed storage-capability defaults."""
     id = "opencode"
     display_name = "opencode"
     binary = "opencode"
