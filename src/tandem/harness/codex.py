@@ -39,6 +39,7 @@ class CodexAdapter(HarnessAdapter):
     id = "codex"
     display_name = "Codex CLI"
     binary = "codex"
+    install_hint = "npm install -g @openai/codex"
 
     # -- environment ---------------------------------------------------------
 

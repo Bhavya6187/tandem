@@ -61,6 +61,32 @@ def test_resolution_fewer_than_two_errors(tmp_path, monkeypatch):
         _resolve_participants()
 
 
+def test_resolution_error_includes_install_hints(tmp_path, monkeypatch, capsys):
+    """The <2-usable error tells a new user how to get a second harness:
+    one install line per not-installed harness."""
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path))
+    _fake_versions(monkeypatch, {"claude": "2.1.220", "codex": None,
+                                 "opencode": None})
+    with pytest.raises(SystemExit):
+        _resolve_participants()
+    err = capsys.readouterr().err
+    assert "npm install -g @openai/codex" in err
+    assert "npm install -g opencode-ai" in err
+
+
+def test_resolution_no_hint_for_installed_but_unusable(tmp_path, monkeypatch, capsys):
+    """A below-floor codex already got its own exclusion warning; the
+    install hint is only for harnesses that are absent altogether."""
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path))
+    _fake_versions(monkeypatch, {"claude": "2.1.220", "codex": "0.100.0",
+                                 "opencode": None})
+    with pytest.raises(SystemExit):
+        _resolve_participants()
+    err = capsys.readouterr().err
+    assert "npm install -g @openai/codex" not in err
+    assert "npm install -g opencode-ai" in err
+
+
 def test_resume_narrows_and_persists(tmp_path, monkeypatch):
     """A stored 3-way session resumed with opencode gone drops it for good."""
     env = Env3(tmp_path, monkeypatch)

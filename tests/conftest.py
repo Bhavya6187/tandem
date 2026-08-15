@@ -181,6 +181,7 @@ class FakeOpencodeAdapter(HarnessAdapter):
     id = "opencode"
     display_name = "opencode"
     binary = "opencode"
+    install_hint = "npm install -g opencode-ai"
 
     def __init__(self, root: Path):
         self.root = root

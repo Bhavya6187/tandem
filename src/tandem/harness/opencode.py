@@ -188,6 +188,7 @@ class OpencodeAdapter(HarnessAdapter):
     id = "opencode"
     display_name = "opencode"
     binary = "opencode"
+    install_hint = "npm install -g opencode-ai"
 
     # -- environment ---------------------------------------------------------
 
