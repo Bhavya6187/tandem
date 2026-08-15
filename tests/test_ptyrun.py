@@ -450,6 +450,28 @@ def test_a_bar_dropped_by_the_row_floor_does_not_come_back_on_grow(monkeypatch):
     assert pump.frame.bar_dropped is False
 
 
+def test_usage_change_repaints_the_bar(monkeypatch):
+    """The tail thread updates the usage text between output events; the
+    pump's tick must notice and repaint without any child output or resize."""
+    usage = {"text": ""}
+    frame = FrameIO(
+        flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False,
+        active="claude", others=["codex"], usage=lambda: usage["text"],
+    )
+    pump = _Pump(monkeypatch, frame=frame)
+
+    def drive():
+        usage["text"] = "142k ctx"
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            if any("142k ctx".encode() in w for w in pump.writes):
+                break
+            time.sleep(0.02)
+        assert any("142k ctx".encode() in w for w in pump.writes)
+
+    assert pump.run(drive) == 0
+
+
 def test_drop_bar_survives_a_sigwinch_landing_inside_its_own_teardown(monkeypatch):
     """Drops and resizes are causally correlated, so the SIGWINCH handler
     lands inside drop_bar's writes all the time. The bar must already be gone

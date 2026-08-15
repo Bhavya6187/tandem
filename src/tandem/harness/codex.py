@@ -26,7 +26,44 @@ from ..events import (
     UserMessage,
 )
 from ..util import append_jsonl_fsync, iso_now_ms, uuid7
-from .base import HarnessAdapter
+from .base import HarnessAdapter, UsageMeter, UsageSnapshot
+
+
+class _CodexUsageMeter(UsageMeter):
+    """Codex precomputes both numbers in event_msg/token_count: cumulative
+    (total_token_usage), the last request (≈ current context), and — unlike
+    claude — the model's context window, so the bar can show an exact
+    percent. `info` is null on rate-limit-only events."""
+
+    def __init__(self):
+        self._total = 0
+        self._ctx: int | None = None
+        self._pct: int | None = None
+
+    def feed(self, raw: Any) -> None:
+        if not isinstance(raw, dict) or raw.get("type") != "event_msg":
+            return
+        payload = raw.get("payload") or {}
+        if payload.get("type") != "token_count":
+            return
+        info = payload.get("info") or {}
+        total = (info.get("total_token_usage") or {}).get("total_tokens")
+        if isinstance(total, int):
+            self._total = total
+        last = (info.get("last_token_usage") or {}).get("total_tokens")
+        if isinstance(last, int):
+            self._ctx = last
+            window = info.get("model_context_window")
+            self._pct = (
+                round(100 * last / window)
+                if isinstance(window, int) and window > 0
+                else None
+            )
+
+    def snapshot(self) -> UsageSnapshot:
+        return UsageSnapshot(
+            ctx_tokens=self._ctx, ctx_percent=self._pct, total_tokens=self._total
+        )
 
 
 _CODEX_LINE_TYPES = {
@@ -192,6 +229,9 @@ class CodexAdapter(HarnessAdapter):
 
     def quit_keystrokes(self) -> list[bytes]:
         return [b"\x03", b"\x03", b"\x04"]
+
+    def make_usage_meter(self) -> UsageMeter:
+        return _CodexUsageMeter()
 
     # -- parsing -------------------------------------------------------------
 

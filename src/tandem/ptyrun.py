@@ -150,6 +150,10 @@ class FrameIO:
     # how `flip_byte` is spelled on the bar; the runner derives it from the
     # configured byte so a rebound key advertises itself correctly
     key_label: str = "^]"
+    # live usage text for the active slot ("" hides it); read on every paint
+    # and polled on the pump tick, so the tail thread publishes by plain
+    # assignment into whatever this closure reads
+    usage: Callable[[], str] | None = None
     bar_dropped: bool = False
 
 
@@ -236,7 +240,8 @@ def run_in_pty(
         if b is None:
             return
         region = b"" if (g is not None and g.child_owns_region) else b.region()
-        _write_all(out_fd, region + b.paint(frame.armed()))
+        usage = frame.usage() if frame.usage is not None else ""
+        _write_all(out_fd, region + b.paint(frame.armed(), usage))
 
     def drop_bar(reason: str) -> None:
         """Terminal state: the guard's drop verdict is not latched, so the
@@ -347,6 +352,9 @@ def run_in_pty(
         # seeded from the state just painted, so an already-armed frame does
         # not draw a redundant repaint on the first iteration
         last_armed = frame.armed() if bar is not None else False
+        last_usage = (
+            frame.usage() if bar is not None and frame.usage is not None else ""
+        )
         last_stdin = time.monotonic()
         stdin_open = True
         # _is_alive, not isalive(): a PtyControl on another thread polls
@@ -412,6 +420,11 @@ def run_in_pty(
             if bar is not None and frame.armed() != last_armed:
                 last_armed = frame.armed()
                 paint()
+            if bar is not None and frame.usage is not None:
+                usage_now = frame.usage()
+                if usage_now != last_usage:
+                    last_usage = usage_now
+                    paint()
     finally:
         # SIGWINCH goes back first: its handler is the one that paints, and
         # both the clear and tcsetattr (which blocks until the tty drains)

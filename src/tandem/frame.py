@@ -241,25 +241,34 @@ class StatusBar:
         self.rows = rows
         self.cols = cols
 
-    def line(self, armed: bool) -> str:
+    def line(self, armed: bool, usage: str = "") -> str:
         # padded and truncated by character count, so every glyph here must be
         # one terminal cell wide: a two-cell glyph (any with East_Asian_Width
         # W/F, e.g. ⏳ U+23F3) makes the painted row cols+1 cells and wraps off
-        # the last line. ● │ ○ ◐ are 'A' (ambiguous) — one cell outside
+        # the last line. ● │ ○ ◐ · are 'A' (ambiguous) — one cell outside
         # CJK-wide terminal configs.
         if armed:
-            text = f" {self.active} ◐ flipping at turn end…  {self.key_label} cancels"
-        else:
-            slots = " │ ".join([f"{self.active} ●"] + [f"{o} ○" for o in self.others])
-            text = f" {slots}   {self.key_label} flips"
+            return (f" {self.active} ◐ flipping at turn end…  "
+                    f"{self.key_label} cancels")[: self.cols].ljust(self.cols)
+
+        def compose(stats: str) -> str:
+            head = f"{self.active} ●" + (f" {stats}" if stats else "")
+            slots = " │ ".join([head] + [f"{o} ○" for o in self.others])
+            return f" {slots}   {self.key_label} flips"
+
+        text = compose(usage)
+        if usage and len(text) > self.cols:
+            # stats are the first thing to go: the key hint is the keybind's
+            # only advertisement, and the slot names are what it cycles
+            text = compose("")
         return text[: self.cols].ljust(self.cols)
 
-    def paint(self, armed: bool) -> bytes:
+    def paint(self, armed: bool, usage: str = "") -> bytes:
         return (
             b"\x1b7"
             + f"\x1b[{self.rows};1H".encode()
             + b"\x1b[7m"
-            + self.line(armed).encode()
+            + self.line(armed, usage).encode()
             + b"\x1b[0m\x1b8"
         )
 
