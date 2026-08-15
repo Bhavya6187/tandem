@@ -127,6 +127,13 @@ remove tandem` to also unregister the marketplace.
 Hacking on the plugin itself? Skip the marketplace and point Claude at your
 clone: `claude --plugin-dir /path/to/tandem/plugin`.
 
-Startup flags for the harnesses themselves (`[claude]` / `[codex]` args)
-are not a subagent setting; they live in the
+The worker is always codex, so the `codex` CLI must be installed and
+signed in, but codex needn't be one of the session's participants: the
+default task-only worker starts cold from a fresh seed, so a
+claude+opencode pair dispatches just fine. Only `context = "full"` forks
+the session's codex shadow, and that history exists when codex is a
+participant.
+
+Startup flags for the harnesses themselves (`[claude]` / `[codex]` /
+`[opencode]` args) are not a subagent setting; they live in the
 [configuration reference](configuration.md).

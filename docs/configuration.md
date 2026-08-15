@@ -1,8 +1,32 @@
 # Configuration
 
 tandem reads one optional file: `~/.tandem/config.toml`. No file is
-required; every key has a working default. (Back to the
+required; every key has a working default, and a malformed value falls
+back to it rather than failing a launch. (Back to the
 [README](../README.md).)
+
+## harnesses — who participates, and in what order
+
+A top-level list naming the harnesses a fresh session may include, in
+flip-cycle order. Default: all three, claude first.
+
+```toml
+harnesses = ["claude", "codex", "opencode"]
+```
+
+Naming a harness here is an *intent*, not a requirement: a fresh
+`tandem` session pairs the listed harnesses that are actually installed
+and usable — not-installed ones are skipped silently, ones that are
+installed but unusable warn and drop out, and fewer than two usable is
+an error that prints the install command for each missing CLI. The
+order sets both the **Ctrl-]** cycle and the default starting harness
+(`tandem` enters the first usable one; `--active` overrides that per
+launch).
+Leave a harness off the list to keep it out of new sessions even though
+it's installed — `harnesses = ["claude", "codex"]` gives two-way
+sessions on a machine that also has opencode. Unknown names are
+dropped, duplicates deduped, and anything else malformed falls back to
+all three. Sessions already paired keep their own participant list.
 
 ## [subagents] — GPT subagent workers
 
@@ -18,11 +42,11 @@ context = "match"       # match | task | full
 keep_forks = false      # keep each worker's rollout for debugging
 ```
 
-## [claude] / [codex] — per-harness startup args
+## [claude] / [codex] / [opencode] — per-harness startup args
 
 Optional per-harness tables add flags to every interactive session tandem
-opens (`tandem`, `tandem resume`) — one-off relays (`tandem run`),
-subagent dispatch, and doctor probes are unaffected:
+opens (`tandem`, `tandem resume`, and each flip) — one-off relays
+(`tandem run`), subagent dispatch, and doctor probes are unaffected:
 
 ```toml
 [claude]
@@ -30,10 +54,14 @@ args = ["--dangerously-skip-permissions"]
 
 [codex]
 args = ["--dangerously-bypass-approvals-and-sandbox"]
+
+[opencode]
+args = []   # same mechanism; opencode's own flags go here
 ```
 
-The flags shown disable the harnesses' own permission prompts for
-sessions tandem launches — set them only if that is what you want.
+The claude/codex flags shown disable the harnesses' own permission
+prompts for sessions tandem launches — set them only if that is what you
+want.
 The list is passed to the harness raw: a flag that expects a value can
 swallow the settings tandem appends after it and break turn tracking.
 Malformed values (a non-list, empty or non-string elements) are
@@ -42,8 +70,9 @@ silently ignored rather than failing the launch.
 ## [frame] — the flip key, the tab bar, and warm flips
 
 The frame is tandem's own surface inside a running session: one reserved
-keybind that flips to the other harness, the one-line tab bar on the
-bottom terminal row, and the pipelined boot behind the flip.
+keybind that flips to the next harness in the cycle, the one-line tab
+bar on the bottom terminal row (participants, flip key, and the active
+model's live token stats), and the pipelined boot behind the flip.
 
 ```toml
 [frame]
@@ -55,8 +84,8 @@ warm = true   # boot the incoming harness while the outgoing one shuts down
 | key | default | meaning |
 | --- | --- | --- |
 | `flip_key` | `"ctrl-]"` | The flip keybind, consumed by tandem (never forwarded). Accepts `ctrl-<char>` or a hex byte like `"0x1d"`; printable keys are rejected (they would swallow typing). The bar relabels itself to match (`ctrl-t` shows `^T flips`). |
-| `bar` | `true` | The one-line tab bar on the bottom terminal row. `false` hides it; the flip still works. |
-| `warm` | `true` | Overlap the two halves of a flip: the incoming harness starts booting the moment the flip fires (a mid-turn press waits for the turn boundary first), while the outgoing one is still shutting down. `false` gives fully serial flips — the boot only begins once the old harness is gone. |
+| `bar` | `true` | The one-line tab bar on the bottom terminal row, including the active slot's token stats. `false` hides it; the flip still works. |
+| `warm` | `true` | Overlap the two halves of a flip: the incoming harness starts booting the moment the flip fires (a mid-turn press waits for the turn boundary first), while the outgoing one is still shutting down. `false` gives fully serial flips — the boot only begins once the old harness is gone. Flips *into* opencode are always serial (its TUI must open after the last turn has landed in its database). |
 
 An unparseable value falls back to the default rather than failing the
 launch. If a terminal can't sustain the bar, tandem drops it for the rest
@@ -75,3 +104,11 @@ speed instead of that plus the shutdown. Nothing exists before you press
 the key and nothing survives the flip — between flips a tandem session is
 exactly one harness process. `warm = false` restores the fully serial
 flip, which is slower but does the same thing.
+
+## Environment variables
+
+Not config keys, but honored everywhere: `TANDEM_HOME` relocates
+tandem's own state (`state.db`, config, quarantine, subagent logs) from
+`~/.tandem`; the harnesses' own overrides — `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME`, `OPENCODE_DB` — are respected when tandem looks for their
+session stores.
