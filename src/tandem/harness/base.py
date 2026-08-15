@@ -9,10 +9,54 @@ only claude_code and codex.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..events import NormalizedEvent, SessionContext
+
+
+def _fmt_tokens(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n // 1_000}k"
+    return str(n)
+
+
+@dataclass
+class UsageSnapshot:
+    """What a usage meter knows right now. `ctx_percent` only when the
+    harness reports its own context window (codex does; claude's transcript
+    never records the window size, so its slot shows raw tokens)."""
+
+    ctx_tokens: int | None = None
+    ctx_percent: int | None = None
+    total_tokens: int = 0
+
+    def bar_text(self) -> str:
+        # `·` is East_Asian_Width A like the bar's ● │ ○ — one cell outside
+        # CJK-wide terminal configs (frame.StatusBar.line's width rule).
+        parts = []
+        if self.ctx_percent is not None:
+            parts.append(f"{self.ctx_percent}% ctx")
+        elif self.ctx_tokens is not None:
+            parts.append(f"{_fmt_tokens(self.ctx_tokens)} ctx")
+        if self.total_tokens:
+            parts.append(f"{_fmt_tokens(self.total_tokens)} tot")
+        return " · ".join(parts)
+
+
+class UsageMeter(ABC):
+    """Token accounting fed with the same native units the sync tailer
+    reads. Purely cosmetic (feeds the status bar), so implementations must
+    tolerate any entry shape without raising."""
+
+    @abstractmethod
+    def feed(self, raw: Any) -> None: ...
+
+    @abstractmethod
+    def snapshot(self) -> UsageSnapshot: ...
 
 
 class JsonlSourceReader:
@@ -135,6 +179,11 @@ class HarnessAdapter(ABC):
 
     def make_source_reader(self, session, cursor, transcript: Path):
         return JsonlSourceReader(transcript, cursor)
+
+    def make_usage_meter(self) -> UsageMeter | None:
+        """Meter for this harness's native units, or None if it has no
+        usable token accounting."""
+        return None
 
     def watch_paths(self, session, transcript: Path) -> list[Path]:
         return [transcript]

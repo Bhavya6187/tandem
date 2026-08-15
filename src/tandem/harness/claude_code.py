@@ -28,7 +28,49 @@ from ..events import (
     UserMessage,
 )
 from ..util import append_jsonl_fsync, git_branch, iso_now_ms
-from .base import HarnessAdapter
+from .base import HarnessAdapter, UsageMeter, UsageSnapshot
+
+
+class _ClaudeUsageMeter(UsageMeter):
+    """Claude writes one transcript entry per content block, each repeating
+    the whole message's usage with output_tokens still growing — so totals
+    keep the *latest* usage per message id (parallel Task sidechains
+    interleave ids, which rules out commit-on-id-change). Context fill is
+    the latest main-chain prompt side: input + cache read + cache write.
+    Sidechains are real spend but a different context window, so they count
+    toward the total and never move ctx."""
+
+    def __init__(self):
+        self._by_id: dict[str, int] = {}
+        self._total = 0
+        self._ctx: int | None = None
+
+    def feed(self, raw: Any) -> None:
+        if not isinstance(raw, dict) or raw.get("type") != "assistant":
+            return
+        msg = raw.get("message") or {}
+        usage = msg.get("usage")
+        if not isinstance(usage, dict):
+            return
+
+        def n(key: str) -> int:
+            v = usage.get(key)
+            return v if isinstance(v, int) else 0
+
+        prompt = (n("input_tokens") + n("cache_read_input_tokens")
+                  + n("cache_creation_input_tokens"))
+        entry_total = prompt + n("output_tokens")
+        mid = msg.get("id")
+        if isinstance(mid, str):
+            self._total += entry_total - self._by_id.get(mid, 0)
+            self._by_id[mid] = entry_total
+        else:
+            self._total += entry_total
+        if not raw.get("isSidechain"):
+            self._ctx = prompt
+
+    def snapshot(self) -> UsageSnapshot:
+        return UsageSnapshot(ctx_tokens=self._ctx, total_tokens=self._total)
 
 
 def _stringify_block_content(content: Any) -> str:
@@ -223,6 +265,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
         if "busy" in statuses:
             return "busy"
         return statuses[0] if statuses else None
+
+    def make_usage_meter(self) -> UsageMeter:
+        return _ClaudeUsageMeter()
 
     # -- parsing -------------------------------------------------------------
 

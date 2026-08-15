@@ -391,6 +391,35 @@ def test_bar_line_truncates_to_width():
     assert len(bar.line(armed=False)) == 12
 
 
+def test_bar_line_shows_usage_on_active_slot():
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
+    line = bar.line(armed=False, usage="142k ctx · 1.2M tot")
+    assert "claude ● 142k ctx · 1.2M tot" in line
+    assert "codex ○" in line and "^] flips" in line
+    assert len(line) == 60
+
+
+def test_bar_line_elides_usage_before_the_flip_hint():
+    # The bare bar fits cols=30 exactly; the stats push it over. Stats go
+    # first: the bar is the only place the keybind is advertised, and slot
+    # names are what the flip cycles through.
+    bar = StatusBar(rows=40, cols=30, active="claude", others=["codex"])
+    line = bar.line(armed=False, usage="142k ctx · 1.2M tot")
+    assert "ctx" not in line
+    assert "^] flips" in line
+    assert len(line) == 30
+
+
+def test_bar_line_armed_state_ignores_usage():
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
+    assert bar.line(armed=True, usage="142k ctx") == bar.line(armed=True)
+
+
+def test_bar_paint_carries_usage():
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
+    assert "142k ctx".encode() in bar.paint(armed=False, usage="142k ctx")
+
+
 def test_bar_paint_targets_real_bottom_row_and_restores_cursor():
     bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     b = bar.paint(armed=False)

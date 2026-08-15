@@ -37,7 +37,42 @@ from ..events import (
     ToolResult,
     UserMessage,
 )
-from .base import HarnessAdapter
+from .base import HarnessAdapter, UsageMeter, UsageSnapshot
+
+
+class _OpencodeUsageMeter(UsageMeter):
+    """Fed whole turn units (OpencodeTurnReader yields each exactly once):
+    every assistant row carries its request's tokens block. Rows tandem
+    seeded are all zeros — skipped whole, so a synced shadow turn never
+    blanks a real context reading."""
+
+    def __init__(self):
+        self._total = 0
+        self._ctx: int | None = None
+
+    def feed(self, raw: Any) -> None:
+        if not isinstance(raw, dict):
+            return
+        for a in raw.get("assistants") or []:
+            tokens = (a.get("message") or {}).get("tokens")
+            if not isinstance(tokens, dict):
+                continue
+
+            def n(key: str) -> int:
+                v = tokens.get(key)
+                return v if isinstance(v, int) else 0
+
+            cache = tokens.get("cache") or {}
+            read = cache.get("read") if isinstance(cache.get("read"), int) else 0
+            write = cache.get("write") if isinstance(cache.get("write"), int) else 0
+            row_total = n("input") + n("output") + n("reasoning") + read + write
+            if row_total == 0:
+                continue
+            self._total += row_total
+            self._ctx = n("input") + read
+
+    def snapshot(self) -> UsageSnapshot:
+        return UsageSnapshot(ctx_tokens=self._ctx, total_tokens=self._total)
 
 SENTINEL_PROVIDER = "tandem"
 SENTINEL_MODEL = "<synced>"
@@ -261,6 +296,9 @@ class OpencodeAdapter(HarnessAdapter):
 
     def make_source_reader(self, session, cursor, transcript):
         return OpencodeTurnReader(session.native_id("opencode"), db_path(), cursor)
+
+    def make_usage_meter(self) -> UsageMeter:
+        return _OpencodeUsageMeter()
 
     def watch_paths(self, session, transcript) -> list[Path]:
         db = db_path()

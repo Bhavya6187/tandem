@@ -441,6 +441,41 @@ class TailLoop:
         return consumed
 
 
+class UsageFeed:
+    """Cosmetic tap on the active transcript for the bar's token stats: its
+    own reader over a throwaway in-memory cursor, so it works uniformly for
+    JSONL and DB-unit sources, never touches durable sync state, and cannot
+    double-count off `ShadowBusy` re-polls. Any failure goes quiet and stays
+    quiet — stats must never cost the user their sync."""
+
+    def __init__(self, adapter, session, transcript: Path, state: dict):
+        self.state = state
+        self.meter = adapter.make_usage_meter()
+        self._cursor = SyncCursor(
+            tandem_id=session.tandem_id, source=adapter.id, target="__usage__"
+        )
+        try:
+            self._reader = (
+                adapter.make_source_reader(session, self._cursor, transcript)
+                if self.meter is not None
+                else None
+            )
+        except Exception:
+            self._reader = None
+
+    def poll(self) -> None:
+        if self._reader is None:
+            return
+        try:
+            for line in self._reader.poll():
+                if line.raw is not None:
+                    self.meter.feed(line.raw)
+                line.advance(self._cursor)
+            self.state["text"] = self.meter.snapshot().bar_text()
+        except Exception:
+            self._reader = None
+
+
 # Rollouts tandem wrote itself: "tandem" heads a seeded shadow (codex
 # adapter), "tandem-sub" heads a subagent rollout (ops.fork_shadow for
 # --context full, ops.seed_sub_rollout for the cold path). Both live in
@@ -649,6 +684,10 @@ class InteractiveRunner:
         # assignment — `monitor.start()` is called far below, which is what
         # makes a plain write safe: the thread has not run yet.
         monitor.on_flip_decided = fire_warm
+        # written by the tail thread, read by the pump on every paint/tick;
+        # a plain dict-slot assignment is the entire synchronization (GIL),
+        # same as monitor.transcript
+        usage_state = {"text": ""}
         frame = FrameIO(
             flip_byte=frame_cfg.flip_byte,
             on_flip=monitor.flip_pressed,
@@ -657,6 +696,7 @@ class InteractiveRunner:
             active=active,
             others=session.targets_for(active),
             key_label=_key_label(frame_cfg.flip_byte),
+            usage=lambda: usage_state["text"],
         )
         self.flip_requested = False
         self.warm_child = None
@@ -698,6 +738,7 @@ class InteractiveRunner:
                             break
                     if path is None:
                         return
+                ufeed = UsageFeed(get_adapter(active), current, path, usage_state)
                 loops: list[TailLoop] = []
                 sinks: list[EventSink] = []
                 try:
@@ -729,6 +770,7 @@ class InteractiveRunner:
                         with ops._sub_lock():
                             for loop in loops:
                                 loop.drain()
+                        ufeed.poll()
                         watcher.wait()
                     # final drain after the CLI exits
                     with ops._sub_lock():
