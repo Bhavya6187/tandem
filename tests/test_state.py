@@ -183,3 +183,52 @@ def test_old_schema_recreated_over_existing_backup(tmp_path):
     with StateStore(db_path=db) as store:
         assert store.get_session("old") is None
     assert (tmp_path / "s.db.old").read_bytes() != b"earlier backup"  # replaced
+
+
+def test_list_sessions_most_recent_first_across_cwds(tmp_path):
+    with make_store(tmp_path) as store:
+        s1 = store.create_session("/a", "claude", ["claude", "codex"],
+                                  {"claude": "c-1", "codex": "x-1"})
+        s2 = store.create_session("/b", "codex", ["claude", "codex"],
+                                  {"claude": "c-2", "codex": "x-2"})
+        s3 = store.create_session("/a", "claude", ["claude", "codex"],
+                                  {"claude": "c-3", "codex": "x-3"})
+        store.touch_used(s1.tandem_id)
+        ids = [s.tandem_id for s in store.list_sessions()]
+        assert ids == [s1.tandem_id, s3.tandem_id, s2.tandem_id]
+
+
+def test_list_sessions_honours_limit(tmp_path):
+    with make_store(tmp_path) as store:
+        for i in range(4):
+            store.create_session("/proj", "claude", ["claude", "codex"],
+                                 {"claude": f"c-{i}", "codex": f"x-{i}"})
+        assert len(store.list_sessions(limit=2)) == 2
+        assert len(store.list_sessions(limit=10)) == 4
+
+
+def test_list_sessions_empty_store(tmp_path):
+    with make_store(tmp_path) as store:
+        assert store.list_sessions() == []
+
+
+def test_list_sessions_is_immune_to_null_last_used(tmp_path):
+    with make_store(tmp_path) as store:
+        older = store.create_session("/proj", "claude", ["claude", "codex"],
+                                     {"claude": "c-1", "codex": "x-1"})
+        newer = store.create_session("/proj", "claude", ["claude", "codex"],
+                                     {"claude": "c-2", "codex": "x-2"})
+        store._conn.execute(
+            "UPDATE sessions SET last_used_at = ?, created_at = ?"
+            " WHERE tandem_id = ?",
+            ("2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00",
+             older.tandem_id),
+        )
+        store._conn.execute(
+            "UPDATE sessions SET last_used_at = NULL, created_at = ?"
+            " WHERE tandem_id = ?",
+            ("2026-06-01T00:00:00+00:00", newer.tandem_id),
+        )
+        store._conn.commit()
+        ids = [s.tandem_id for s in store.list_sessions()]
+        assert ids == [newer.tandem_id, older.tandem_id]

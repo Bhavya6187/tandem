@@ -242,3 +242,106 @@ def test_run_on_nonparticipant_is_a_clean_error(homes, ok_versions, monkeypatch)
     assert r.exit_code == 1
     assert "not a participant" in r.stderr
     assert r.exception is None or isinstance(r.exception, SystemExit)
+
+
+# -- tandem sessions ---------------------------------------------------------
+
+
+def test_sessions_empty_store_hints_tandem(homes):
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    assert r.exit_code == 0
+    assert "No tandem sessions yet" in r.output
+    assert "Run `tandem` to start one" in r.output
+
+
+def test_sessions_lists_newest_first_across_directories(homes, tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    s1 = _mk_session(homes, n=1)
+    s2 = _mk_session(other, active="codex", n=2)
+    s3 = _mk_session(homes, n=3)
+    with StateStore() as store:
+        store.touch_used(s1.tandem_id)
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    assert r.exit_code == 0
+    lines = [ln for ln in r.output.splitlines() if ln.strip()]
+    rows = [ln for ln in lines if any(s.tandem_id in ln for s in (s1, s2, s3))]
+    # column 0 is the this-directory marker; the id is the first field after it
+    ids = [ln[1:].split()[0] for ln in rows]
+    assert ids == [s1.tandem_id, s3.tandem_id, s2.tandem_id]
+    by_id = dict(zip(ids, rows))
+    assert by_id[s1.tandem_id][0] == "*"
+    assert by_id[s3.tandem_id][0] == "*"
+    assert by_id[s2.tandem_id][0] == " "
+    # active harness, participants and directory are all visible
+    fields = by_id[s2.tandem_id].split()
+    assert "codex" in fields and fields.index("codex") < fields.index("claude+codex")
+    assert str(other) in by_id[s2.tandem_id]
+    assert "tandem resume" in r.output
+
+
+def test_sessions_defaults_to_ten_and_honours_limit(homes):
+    for i in range(12):
+        _mk_session(homes, n=i)
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    assert r.exit_code == 0
+    assert sum(ln.startswith("*") for ln in r.output.splitlines()) == 10
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions", "-n", "3"])
+    assert r.exit_code == 0
+    assert sum(ln.startswith("*") for ln in r.output.splitlines()) == 3
+
+
+def test_sessions_marks_missing_directories(homes, tmp_path):
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    s = _mk_session(gone, n=1)
+    gone.rmdir()
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    row = next(ln for ln in r.output.splitlines() if s.tandem_id in ln)
+    assert "(missing)" in row
+
+
+def test_sessions_shortens_home_to_tilde(homes, monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    (home / "work").mkdir(parents=True)
+    monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: home))
+    s = _mk_session(home / "work", n=1)
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    row = next(ln for ln in r.output.splitlines() if s.tandem_id in ln)
+    assert "~/work" in row
+    assert str(home) not in row
+
+
+def test_sessions_shows_relative_last_used(homes):
+    from datetime import datetime, timedelta, timezone
+
+    s = _mk_session(homes, n=1)
+    last_used = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    with StateStore() as store:
+        store._conn.execute(
+            "UPDATE sessions SET last_used_at = ? WHERE tandem_id = ?",
+            (last_used, s.tandem_id),
+        )
+        store._conn.commit()
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    row = next(ln for ln in r.output.splitlines() if s.tandem_id in ln)
+    assert "40d ago" in row
+    assert last_used not in row
+
+
+@pytest.mark.parametrize(
+    "delta_s, expected",
+    [(5, "just now"), (90, "1m ago"), (3 * 3600 + 5, "3h ago"),
+     (2 * 86400 + 3600, "2d ago"), (40 * 86400, "40d ago")],
+)
+def test_ago_buckets(delta_s, expected):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    then = (now - timedelta(seconds=delta_s)).isoformat()
+    assert cli._ago(then, now=now) == expected
+
+
+def test_ago_tolerates_garbage():
+    assert cli._ago(None) == "?"
+    assert cli._ago("not-a-date") == "?"
