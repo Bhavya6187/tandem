@@ -6,6 +6,7 @@ import json
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -275,7 +276,8 @@ def status() -> None:
 def resume(tandem_id: str | None) -> None:
     """Resume a paired session (most recent for this directory by default).
 
-    The id is printed when you leave a session, and shown by `tandem status`.
+    The id is printed when you leave a session, and shown by `tandem status`
+    and `tandem sessions`.
     """
     cwd = _cwd()
     with StateStore() as store:
@@ -303,6 +305,70 @@ def resume(tandem_id: str | None) -> None:
         store.touch_used(session.tandem_id)
         session = _narrow_participants(store, session)
     sys.exit(_enter_session(session))
+
+
+def _ago(stamp: str | None, now: datetime | None = None) -> str:
+    """Coarse relative age of an ISO timestamp: `just now`, `Nm ago`,
+    `Nh ago`, `Nd ago`. Unparseable or missing input renders as `?` —
+    a listing must never traceback on one bad row."""
+    if not stamp:
+        return "?"
+    try:
+        then = datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return "?"
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    secs = max(0, int((now - then).total_seconds()))
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    return f"{secs // 86400}d ago"
+
+
+def _short_dir(cwd: str) -> str:
+    """`~`-collapse the home prefix; tag directories that no longer exist."""
+    path = Path(cwd)
+    home = Path.home()
+    try:
+        shown = "~/" + str(path.relative_to(home)) if path != home else "~"
+    except ValueError:
+        shown = cwd
+    if not path.is_dir():
+        shown += " (missing)"
+    return shown
+
+
+@main.command()
+@click.option("-n", "--limit", default=10, show_default=True, type=click.IntRange(min=1),
+              help="How many sessions to show.")
+def sessions(limit: int) -> None:
+    """List your most recent paired sessions, newest first.
+
+    Sessions in the current directory are marked with `*`; resume any of
+    them with `tandem resume <id>` from its directory.
+    """
+    cwd = _cwd()
+    with StateStore() as store:
+        rows = store.list_sessions(limit=limit)
+    if not rows:
+        click.echo("No tandem sessions yet. Run `tandem` to start one.")
+        return
+    click.echo(f"  {'ID':<12}  {'LAST USED':<9}  {'ACTIVE':<8}  "
+               f"{'PARTICIPANTS':<22}  DIRECTORY")
+    for s in rows:
+        mark = "*" if s.cwd == cwd else " "
+        click.echo(
+            f"{mark} {s.tandem_id:<12}  {_ago(s.last_used_at or s.created_at):<9}  "
+            f"{s.active:<8}  {'+'.join(s.participants):<22}  {_short_dir(s.cwd)}"
+        )
+    click.echo()
+    click.echo("Rows marked * are in this directory. Continue one with "
+               "`tandem resume <id>` from its directory.")
 
 
 def _default_sink_factory(store, session, source, target):

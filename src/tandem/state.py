@@ -175,6 +175,18 @@ class StateStore:
         ).fetchone()
         return self._row_to_session(row) if row else None
 
+    def list_sessions(self, limit: int = 10) -> list[PairedSession]:
+        """Most recently used paired sessions across every working
+        directory, newest first (same NULL-immune ordering as
+        latest_session_for_cwd)."""
+        rows = self._conn.execute(
+            "SELECT * FROM sessions"
+            " ORDER BY COALESCE(last_used_at, created_at) DESC, created_at DESC"
+            " LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [self._row_to_session(r) for r in rows]
+
     def touch_used(self, tandem_id: str) -> None:
         with self._conn:
             self._conn.execute(

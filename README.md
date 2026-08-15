@@ -136,6 +136,7 @@ Full mechanics — sync engine, crash safety, compatibility ranges:
 | `tandem` | Start a fresh paired session (Claude active; `--active codex` to flip) |
 | `Ctrl-]` | Flip to the other harness from inside a running session (rebindable in `[frame]`) |
 | `tandem resume [id]` | Continue the most recent (or a specific) session |
+| `tandem sessions` | List your 10 most recent paired sessions across directories (`-n` for more) |
 | `tandem run --on codex "…"` | One-off prompt to the *other* agent, with full context |
 | `tandem sub "…"` | Run one delegated task on a codex model (what GPT subagents use under the hood) |
 | `tandem status` | Show pairing, roles, and sync position |
