@@ -366,3 +366,31 @@ class TestFanOut:
         env = Env3(tmp_path, monkeypatch)          # active=claude
         new_active, _, _ = ops.switch_session(env.store, env.session)
         assert new_active == "codex"
+
+    def test_leaving_zero_turn_claude_seeds_its_shadow(self, tmp_path, monkeypatch):
+        """claude -> codex -> opencode with no claude turn. claude's CLI
+        writes its transcript on the first turn, so leaving a zero-turn
+        claude leaves its recorded id with no file. From then on claude is a
+        TARGET of every codex drain (the runner's codex->claude engine and
+        the codex->opencode flip's drain), which must not die on a missing
+        shadow: the leave-claude flip seeds it."""
+        from conftest import Env3
+        from tandem.sync import SyncEngine
+
+        env = Env3(tmp_path, monkeypatch)          # active=claude
+        env.claude_shadow.unlink()
+
+        new_active, _, _ = ops.switch_session(env.store, env.session)
+        assert new_active == "codex"
+        session = env.refresh()
+        # what the runner's codex tail thread builds next: must not raise
+        SyncEngine(env.store, session, "codex", "claude")
+
+        for obj in codex_turn("hello from codex", "Hi!"):
+            write_line(env.codex_shadow, obj)
+        new_active, problems, _ = ops.switch_session(env.store, session)
+        assert new_active == "opencode"
+        assert problems == []
+        contents = [json.dumps(e) for e in read_jsonl(env.claude_shadow)]
+        assert any("[via codex] hello from codex" in c for c in contents)
+        assert any("[via codex] Hi!" in c for c in contents)
