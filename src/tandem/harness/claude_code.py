@@ -41,8 +41,9 @@ class _ClaudeUsageMeter(UsageMeter):
     toward the total and never move ctx."""
 
     def __init__(self):
-        self._by_id: dict[str, int] = {}
-        self._total = 0
+        self._by_id: dict[str, tuple[int, int]] = {}
+        self._input = 0
+        self._output = 0
         self._ctx: int | None = None
 
     def feed(self, raw: Any) -> None:
@@ -59,18 +60,23 @@ class _ClaudeUsageMeter(UsageMeter):
 
         prompt = (n("input_tokens") + n("cache_read_input_tokens")
                   + n("cache_creation_input_tokens"))
-        entry_total = prompt + n("output_tokens")
+        out = n("output_tokens")
         mid = msg.get("id")
         if isinstance(mid, str):
-            self._total += entry_total - self._by_id.get(mid, 0)
-            self._by_id[mid] = entry_total
+            seen_prompt, seen_out = self._by_id.get(mid, (0, 0))
+            self._input += prompt - seen_prompt
+            self._output += out - seen_out
+            self._by_id[mid] = (prompt, out)
         else:
-            self._total += entry_total
+            self._input += prompt
+            self._output += out
         if not raw.get("isSidechain"):
             self._ctx = prompt
 
     def snapshot(self) -> UsageSnapshot:
-        return UsageSnapshot(ctx_tokens=self._ctx, total_tokens=self._total)
+        return UsageSnapshot(ctx_tokens=self._ctx,
+                             input_tokens=self._input,
+                             output_tokens=self._output)
 
 
 def _stringify_block_content(content: Any) -> str:
