@@ -117,11 +117,15 @@ def switch_session(store: StateStore, session: PairedSession,
 
     # If claude never ran, its file does not exist either: claude's CLI
     # creates the transcript on the first turn, not at launch, so a flip
-    # away from a zero-turn claude leaves its recorded id with no file and
-    # the drain below no target to append to. Seed it now — but only when
-    # tandem has never consumed a byte of it; a consumed-then-missing file
-    # is data loss, and the drain's hard error is the right answer there.
-    if new_active == "claude" and session.native_id("claude"):
+    # away from a zero-turn claude leaves its recorded id with no file. That
+    # bites whichever way this flip goes: leaving claude makes it a fileless
+    # TARGET of every other side's drain (the runner's ->claude engine and
+    # every later flip's drain refuse to start on a missing shadow), and
+    # flipping back into it leaves the drain below no file to append to.
+    # Seed it now — but only when tandem has never consumed a byte of it; a
+    # consumed-then-missing file is data loss, and the drain's hard error is
+    # the right answer there.
+    if session.native_id("claude"):
         expected = get_adapter("claude").expected_transcript_path(
             session.cwd, session.native_id("claude")
         )
@@ -130,7 +134,8 @@ def switch_session(store: StateStore, session: PairedSession,
             for t in session.targets_for("claude")
         )
         if not expected.exists() and never_ran:
-            _create_claude_shadow_late(store, session)
+            other = new_active if old_active == "claude" else old_active
+            _create_claude_shadow_late(store, session, other)
 
     drain_source(store, session, old_active, flush_dangling=True)
     fast_forward_all(store, session, new_active)
@@ -154,20 +159,23 @@ def switch_session(store: StateStore, session: PairedSession,
     return new_active, problems, memory_report
 
 
-def _create_claude_shadow_late(store: StateStore, session: PairedSession) -> None:
+def _create_claude_shadow_late(store: StateStore, session: PairedSession,
+                               other: str) -> None:
+    """Seed claude's transcript after the fact. `other` is the harness whose
+    turns will flow into it next (the side being left when claude is the
+    incoming active, the side being entered when claude is the outgoing
+    one): the ctx belongs to the (other -> claude) direction."""
     from .constants import SEED_NOTE
     from .runner import ctx_from_cursor
 
     adapter = get_adapter("claude")
-    # only ever called with new_active == "claude": the ctx belongs to the
-    # (active -> claude) direction
-    cursor = store.get_cursor(session.tandem_id, session.active, "claude")
+    cursor = store.get_cursor(session.tandem_id, other, "claude")
     ctx = ctx_from_cursor(session, cursor)
     # Any leaf uuid the cursor still holds points into the missing file;
     # the seed is the new file's root, so it must not chain onto it.
     ctx.state_for("claude")["leaf_uuid"] = None
     note = SEED_NOTE.format(
-        tandem_id=session.tandem_id, other=get_adapter(session.active).display_name
+        tandem_id=session.tandem_id, other=get_adapter(other).display_name
     )
     adapter.create_shadow_transcript(session.cwd, session.native_id("claude"), ctx, note)
     cursor.pending.setdefault("harness_state", {}).setdefault("claude", {})[
