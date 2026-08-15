@@ -20,7 +20,7 @@ per turn; the others stay in sync through pure local translation.
 uv tool install tandem-cli
 ```
 
-![tandem demo — one session moving between Claude Code and Codex](https://raw.githubusercontent.com/Bhavya6187/tandem/main/docs/demo.gif)
+![tandem demo — one session relayed across Claude Code, Codex and opencode: Claude builds a feature, Ctrl-] hands the same conversation to Codex for review, opencode applies the fix, Claude opens and merges the PR](https://raw.githubusercontent.com/Bhavya6187/tandem/main/docs/demo.gif)
 
 </div>
 
@@ -90,8 +90,6 @@ and your Claude quota stays on the main thread. Pin any model your
 codex account offers ("ask sol to review it") or set a cheap default
 once. Setup and routing:
 [GPT subagents guide](https://github.com/Bhavya6187/tandem/blob/main/docs/subagents.md).
-
-![gpt subagent demo — ask for a GPT review in Claude Code, tandem dispatches a codex worker, the verdict comes back, fixes get committed](https://raw.githubusercontent.com/Bhavya6187/tandem/main/docs/gpt-subagent.gif)
 
 ### ⏳ Hit a usage limit? Just keep going.
 
