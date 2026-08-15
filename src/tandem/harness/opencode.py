@@ -44,10 +44,13 @@ class _OpencodeUsageMeter(UsageMeter):
     """Fed whole turn units (OpencodeTurnReader yields each exactly once):
     every assistant row carries its request's tokens block. Rows tandem
     seeded are all zeros — skipped whole, so a synced shadow turn never
-    blanks a real context reading."""
+    blanks a real context reading. Reasoning is its own field here but a
+    subset of output in codex's — folded into output so ↓ means the same
+    thing on both slots."""
 
     def __init__(self):
-        self._total = 0
+        self._input = 0
+        self._output = 0
         self._ctx: int | None = None
 
     def feed(self, raw: Any) -> None:
@@ -65,14 +68,18 @@ class _OpencodeUsageMeter(UsageMeter):
             cache = tokens.get("cache") or {}
             read = cache.get("read") if isinstance(cache.get("read"), int) else 0
             write = cache.get("write") if isinstance(cache.get("write"), int) else 0
-            row_total = n("input") + n("output") + n("reasoning") + read + write
-            if row_total == 0:
+            row_input = n("input") + read + write
+            row_output = n("output") + n("reasoning")
+            if row_input + row_output == 0:
                 continue
-            self._total += row_total
+            self._input += row_input
+            self._output += row_output
             self._ctx = n("input") + read
 
     def snapshot(self) -> UsageSnapshot:
-        return UsageSnapshot(ctx_tokens=self._ctx, total_tokens=self._total)
+        return UsageSnapshot(ctx_tokens=self._ctx,
+                             input_tokens=self._input,
+                             output_tokens=self._output)
 
 SENTINEL_PROVIDER = "tandem"
 SENTINEL_MODEL = "<synced>"

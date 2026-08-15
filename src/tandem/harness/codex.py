@@ -33,10 +33,13 @@ class _CodexUsageMeter(UsageMeter):
     """Codex precomputes both numbers in event_msg/token_count: cumulative
     (total_token_usage), the last request (≈ current context), and — unlike
     claude — the model's context window, so the bar can show an exact
-    percent. `info` is null on rate-limit-only events."""
+    percent. `info` is null on rate-limit-only events. input_tokens already
+    includes cached_input_tokens (live: total = input + output exactly) and
+    reasoning is a subset of output_tokens, so both sides read straight."""
 
     def __init__(self):
-        self._total = 0
+        self._input = 0
+        self._output = 0
         self._ctx: int | None = None
         self._pct: int | None = None
 
@@ -47,9 +50,12 @@ class _CodexUsageMeter(UsageMeter):
         if payload.get("type") != "token_count":
             return
         info = payload.get("info") or {}
-        total = (info.get("total_token_usage") or {}).get("total_tokens")
-        if isinstance(total, int):
-            self._total = total
+        total = info.get("total_token_usage") or {}
+        inp, out = total.get("input_tokens"), total.get("output_tokens")
+        if isinstance(inp, int):
+            self._input = inp
+        if isinstance(out, int):
+            self._output = out
         last = (info.get("last_token_usage") or {}).get("total_tokens")
         if isinstance(last, int):
             self._ctx = last
@@ -62,7 +68,8 @@ class _CodexUsageMeter(UsageMeter):
 
     def snapshot(self) -> UsageSnapshot:
         return UsageSnapshot(
-            ctx_tokens=self._ctx, ctx_percent=self._pct, total_tokens=self._total
+            ctx_tokens=self._ctx, ctx_percent=self._pct,
+            input_tokens=self._input, output_tokens=self._output,
         )
 
 

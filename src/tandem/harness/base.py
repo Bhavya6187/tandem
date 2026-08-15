@@ -28,22 +28,26 @@ def _fmt_tokens(n: int) -> str:
 class UsageSnapshot:
     """What a usage meter knows right now. `ctx_percent` only when the
     harness reports its own context window (codex does; claude's transcript
-    never records the window size, so its slot shows raw tokens)."""
+    never records the window size, so its slot shows raw tokens).
+    `input_tokens` is the whole prompt side as billed — fresh input plus
+    cache reads and writes; `output_tokens` includes reasoning."""
 
     ctx_tokens: int | None = None
     ctx_percent: int | None = None
-    total_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
 
     def bar_text(self) -> str:
-        # `·` is East_Asian_Width A like the bar's ● │ ○ — one cell outside
-        # CJK-wide terminal configs (frame.StatusBar.line's width rule).
+        # `·` `↑` `↓` are East_Asian_Width A like the bar's ● │ ○ — one cell
+        # outside CJK-wide terminal configs (frame.StatusBar.line's width rule).
         parts = []
         if self.ctx_percent is not None:
             parts.append(f"{self.ctx_percent}% ctx")
         elif self.ctx_tokens is not None:
             parts.append(f"{_fmt_tokens(self.ctx_tokens)} ctx")
-        if self.total_tokens:
-            parts.append(f"{_fmt_tokens(self.total_tokens)} tot")
+        if self.input_tokens or self.output_tokens:
+            parts.append(f"{_fmt_tokens(self.input_tokens)}↑"
+                         f" {_fmt_tokens(self.output_tokens)}↓")
         return " · ".join(parts)
 
 
