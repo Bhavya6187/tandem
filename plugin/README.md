@@ -1,19 +1,31 @@
 # tandem's Claude Code plugin
 
-Lets Claude Code dispatch subagents to GPT models: in a tandem-paired
-session, "ask gpt to review this migration" runs the task on a local
-codex worker and the result comes back like any subagent's.
+Lets Claude Code dispatch subagents to GPT models. In a tandem-paired
+session, "ask gpt to review this migration" runs the task on a local codex
+worker — with the brief forwarded verbatim — and the result comes back
+like any subagent's. Name a model ("ask sol to review it") to pin the
+worker to it; set `route = "all"` to reroute every dispatch without
+asking. Claude orchestrates, codex does the legwork, and your Claude
+quota stays on the main thread. The worker is always codex, so the `codex`
+CLI must be installed and signed in — whether the paired session is
+claude+codex, all three with opencode, or even claude+opencode (a
+task-only worker starts cold; only `context = "full"` forks the session's
+codex history, which exists when codex is a participant).
 
 ```bash
 tandem plugin install   # = claude plugin marketplace add Bhavya6187/tandem
                         #   + claude plugin install tandem@tandem
 ```
 
-Setup and usage: the [GPT subagents guide](../docs/subagents.md). The
-plugin is static registration only — all the work happens in the
-`tandem` binary the hook shells out to (`uv tool install tandem-cli`).
-Without that binary on PATH the plugin is inert: the hook command exits
-nonzero, `|| true` swallows it, and every dispatch runs natively.
+The first `tandem` launch offers this install too. Setup and usage: the
+[GPT subagents guide](../docs/subagents.md); config keys (`model`, `route`,
+`context`, `keep_forks`) in the
+[configuration reference](../docs/configuration.md). The plugin is static
+registration only — all the work happens in the `tandem` binary the hook
+shells out to (`uv tool install tandem-cli`). Without that binary on PATH
+the plugin is inert: the hook command exits nonzero, `|| true` swallows it,
+and every dispatch runs natively. Flipping between harnesses with Ctrl-]
+does not need the plugin at all; it exists only for GPT subagents.
 
 ## Internals
 

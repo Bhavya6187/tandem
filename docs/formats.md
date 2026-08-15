@@ -1,16 +1,17 @@
 # Observed session formats
 
-Everything tandem knows about the two native session formats was observed on
-this machine by creating throwaway sessions and reading the files the CLIs
-wrote. Versions observed:
+Everything tandem knows about the three native session formats was observed
+on this machine by creating throwaway sessions and reading the files (or
+database) the CLIs wrote. Versions observed:
 
 | CLI | version | session storage |
 | --- | --- | --- |
 | Claude Code (`claude`) | 2.1.220 | `~/.claude/projects/<munged-cwd>/<sessionId>.jsonl` |
 | Codex CLI (`codex`) | 0.145.0 | `~/.codex/sessions/YYYY/MM/DD/rollout-<YYYY-MM-DDThh-mm-ss>-<uuidv7>.jsonl` |
+| opencode (`opencode`) | 1.18.15 | one SQLite database, the path `opencode db path` prints (see below) |
 
 Env overrides honored: `CLAUDE_CONFIG_DIR` (claude home), `CODEX_HOME` (codex
-home), `TANDEM_HOME` (tandem state).
+home), `OPENCODE_DB` (opencode database), `TANDEM_HOME` (tandem state).
 
 ## Claude Code transcript (claude 2.1.220)
 

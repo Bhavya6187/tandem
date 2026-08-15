@@ -2,164 +2,117 @@
 
 # 🤝 tandem
 
-**One coding session. Two AI agents. Zero lost context.**
+**One coding session. Multiple AI agents. Shared context.**
 
-Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
+Use [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
 [OpenAI Codex CLI](https://github.com/openai/codex), and
-[opencode](https://opencode.ai) as a single paired session — each model
-in its own native harness. Work in any one, flip to the next with
-**Ctrl-]**, and pick up exactly where you left off. Only one model runs
-per turn; the others stay in sync through pure local translation.
+[opencode](https://opencode.ai) in one continuous coding session. Work in
+their native interfaces, press **Ctrl-]** to move to the next CLI, and
+continue without copying prompts or rebuilding context by hand.
 
 [![CI](https://github.com/Bhavya6187/tandem/actions/workflows/ci.yml/badge.svg)](https://github.com/Bhavya6187/tandem/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tandem-cli)](https://pypi.org/project/tandem-cli/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://github.com/Bhavya6187/tandem/blob/main/pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/Bhavya6187/tandem/blob/main/LICENSE)
 
-```bash
-uv tool install tandem-cli
-```
-
-![tandem demo — one session relayed across Claude Code, Codex and opencode: Claude builds a feature, Ctrl-] hands the same conversation to Codex for review, opencode applies the fix, Claude opens and merges the PR](https://raw.githubusercontent.com/Bhavya6187/tandem/main/docs/demo.gif)
+![tandem demo — one session relayed across Claude Code, Codex and opencode](https://raw.githubusercontent.com/Bhavya6187/tandem/main/docs/demo.gif)
 
 </div>
 
----
-
 ## Quick start
 
-You'll need Python 3.11+ and at least two of the `claude`, `codex`, and
-`opencode` CLIs on your PATH (any pair works; all three make a
-three-way session).
+You need Python 3.11+ and at least two supported CLIs installed and signed
+in: [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
+[Codex CLI](https://github.com/openai/codex), or
+[opencode](https://opencode.ai).
 
 ```bash
 uv tool install tandem-cli   # or: pip install tandem-cli
 cd your-project
-tandem                       # fresh paired session; drops you into claude
+tandem
 ```
 
-Work normally — that's the real Claude Code TUI. When you want the other
-model, press **Ctrl-]**: tandem closes out the harness at the turn
-boundary and reopens the same conversation in Codex a couple of seconds
-later. Press it again to come back. The bottom row tracks who you're
-facing:
+Work normally in the CLI that opens. Press **Ctrl-]** to continue the same
+session in the next CLI. If you press it while the model is working, tandem
+waits until the response finishes; press it again to cancel the switch.
 
-```
-claude ● │ codex ○   ^] flips
-```
-
-With opencode installed too, the session is three-way and **Ctrl-]**
-cycles through all of them in order:
-
-```
-claude ● │ codex ○ │ opencode ○   ^] flips
-```
-
-Pressed mid-turn, the flip arms and fires the moment the model finishes
-(the bar says so; press again to cancel).
-
-Exit the harness the usual way and you're back at your shell, with the
-session saved and a hint for picking it up again:
-
-```
-to continue this session: tandem resume a1b2c3d4e5f6
-```
-
-Come back anytime:
+Exit normally when you're done. Come back later with:
 
 ```bash
-tandem resume                # most recent session in this directory
-tandem resume a1b2c3d4e5f6   # a specific one (id from the exit hint)
+tandem resume      # resume the latest session in this directory
+tandem sessions    # find recent sessions across directories
 ```
+
+By default, tandem opens the first usable CLI in your configured order. Use
+`tandem --active codex` or `tandem --active opencode` to choose another.
 
 ## Why tandem?
 
-### 🖥️ One CLI, two harnesses, zero ceremony.
+- **Keep going when a model hits its limit.** Move to another CLI and
+  continue with the same files and conversation history.
+- **Bring different models to the same problem.** Ask another CLI for a
+  second opinion without copying a wall of context between terminals.
+- **Keep the native tools you already use.** Claude Code, Codex, and
+  opencode retain their own interfaces, commands, keybindings, and MCP
+  servers.
+- **Work through a single-provider outage.** If another configured CLI is
+  available, switch and continue until the affected provider recovers.
 
-`tandem` is the terminal you live in. It fronts the real Claude Code or
-Codex TUI — pixel-for-pixel native — and **Ctrl-]** flips to the other
-one in a couple of seconds, same conversation, same files, same history.
-A one-line tab bar on the bottom row shows which model you're facing;
-everything above it is the untouched native UI.
-
-### 🆕 0.2 — GPT subagents inside Claude Code
-
-Type "get the code reviewed by gpt" and tandem's plugin hands the task
-to a local codex worker; the verdict lands back in your Claude session,
-and your Claude quota stays on the main thread. Pin any model your
-codex account offers ("ask sol to review it") or set a cheap default
-once. Setup and routing:
+Want GPT subagents inside Claude Code too? See the
 [GPT subagents guide](https://github.com/Bhavya6187/tandem/blob/main/docs/subagents.md).
-
-### ⏳ Hit a usage limit? Just keep going.
-
-Claude runs out of its usage window mid-refactor? Press **Ctrl-]** and
-Codex continues the **same conversation** a second later — same files,
-same history, same plan. Two subscriptions become one long runway.
-
-### 🌩️ Immune to outages.
-
-An Anthropic or OpenAI outage doesn't stop your work: **Ctrl-]**, keep
-going in the other harness, and flip back whenever it clears.
-
-Five more reasons — subscriptions not API bills, two model families on
-one problem, native harnesses, instant switching, privacy:
-[Why tandem?](https://github.com/Bhavya6187/tandem/blob/main/docs/why.md)
+For more use cases, see
+[Why tandem?](https://github.com/Bhavya6187/tandem/blob/main/docs/why.md).
 
 ## How it works
 
-- Only one model runs per turn — the other side is never invoked to
-  "catch up".
-- As you work, tandem translates the growing transcript into the other
-  CLI's native session format — pure local file I/O, no model calls —
-  so the other side is always resume-ready.
-- Each CLI is the real thing running on a PTY: your keybindings, slash
-  commands, and MCP servers all work exactly as they do today — tandem
-  reserves exactly one key (Ctrl-]) and one terminal row (the tab bar).
-- A flip waits for the turn boundary, exits the fronted CLI gracefully,
-  lets the sync settle, and resumes the other side — no stop in
-  between.
-- Everything stays local: the CLIs' own session files plus a small
-  SQLite database in `~/.tandem`. No cloud sync, no telemetry.
-- Uninstall tandem tomorrow and every side still resumes natively with
-  `claude --resume`, `codex resume`, and `opencode -s`.
+```text
+┌──────────────────────────────────────────────┐
+│ Work normally in a native coding CLI         │
+└──────────────────────┬───────────────────────┘
+                       ▼
+┌──────────────────────────────────────────────┐
+│ tandem keeps the other sessions in sync      │
+│ locally — without calling another model      │
+└──────────────────────┬───────────────────────┘
+                       ▼
+┌──────────────────────────────────────────────┐
+│ Press Ctrl-] and continue in the next CLI    │
+└──────────────────────────────────────────────┘
+```
 
-Full mechanics — sync engine, crash safety, compatibility ranges:
-[How tandem works](https://github.com/Bhavya6187/tandem/blob/main/docs/how-it-works.md).
+Only the active model runs. tandem translates its growing conversation into
+the other CLIs' native session formats using local file access, so they are
+ready when you switch. Your session stays in the CLIs' own storage plus a
+small local database in `~/.tandem`; tandem adds no cloud sync or telemetry.
 
-## Command cheat sheet
+See [How tandem works](https://github.com/Bhavya6187/tandem/blob/main/docs/how-it-works.md)
+for transcript translation, switching, crash safety, compatibility, and data
+locations.
+
+## Everyday commands
 
 | Command | What it does |
 | --- | --- |
-| `tandem` | Start a fresh paired session (Claude active; `--active codex` to flip) |
-| `Ctrl-]` | Flip to the other harness from inside a running session (rebindable in `[frame]`) |
-| `tandem resume [id]` | Continue the most recent (or a specific) session |
-| `tandem sessions` | List your 10 most recent paired sessions across directories (`-n` for more) |
-| `tandem run --on codex "…"` | One-off prompt to the *other* agent, with full context |
-| `tandem sub "…"` | Run one delegated task on a codex model (what GPT subagents use under the hood) |
-| `tandem status` | Show pairing, roles, and sync position |
-| `tandem plugin install` | Install the Claude Code plugin (also offered on first `tandem` launch) |
+| `tandem` | Start a new session |
+| `Ctrl-]` | Continue in the next CLI |
+| `tandem resume [id]` | Resume the latest or a specific session in this directory |
+| `tandem sessions [-n N]` | List recent sessions across directories |
+| `tandem run --on codex "…"` | Send one contextual prompt to another CLI (`claude`, `codex`, or `opencode`) |
 
-Three maintenance commands round it out: `tandem doctor` (health
-check), `tandem sync` (manual catch-up translation), and `tandem
-sync-mcp` (share MCP server configs between the tools).
+## Learn more
 
-## Docs
-
-- [GPT subagents](https://github.com/Bhavya6187/tandem/blob/main/docs/subagents.md) —
-  plugin install, worker model, routing modes, sandbox & trust boundary
 - [Why tandem?](https://github.com/Bhavya6187/tandem/blob/main/docs/why.md) —
-  the full pitch, all eight reasons
+  use cases, subscriptions, native tools, token visibility, and privacy
+- [GPT subagents](https://github.com/Bhavya6187/tandem/blob/main/docs/subagents.md) —
+  plugin setup, worker models, routing, and sandboxing
 - [Configuration](https://github.com/Bhavya6187/tandem/blob/main/docs/configuration.md) —
-  the optional `~/.tandem/config.toml`: subagent workers, per-harness
-  startup args, the flip key and tab bar
+  participants, startup arguments, the switch key, and the status bar
 - [How tandem works](https://github.com/Bhavya6187/tandem/blob/main/docs/how-it-works.md) —
-  sync engine, PTY passthrough, compatibility, where your data lives
+  synchronization, switching, compatibility, and local data
 - [Developing tandem](https://github.com/Bhavya6187/tandem/blob/main/docs/development.md) —
-  dev setup and the converter adapter interface
+  development setup and the harness adapter interface
 - [Observed session formats](https://github.com/Bhavya6187/tandem/blob/main/docs/formats.md) —
-  the claude/codex/opencode session-storage details tandem is pinned
-  against
+  Claude Code, Codex, and opencode storage formats
 
 ## License
 
