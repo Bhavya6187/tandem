@@ -586,3 +586,68 @@ def test_bar_three_slots_truncates_to_cols():
     bar = StatusBar(rows=40, cols=24, active="claude",
                     others=["codex", "opencode"])
     assert len(bar.line(armed=False)) == 24
+
+
+# -- rate limits on the bar ---------------------------------------------------
+
+
+def test_bar_line_shows_limits_on_every_slot():
+    bar = StatusBar(rows=40, cols=90, active="claude", others=["codex", "opencode"])
+    line = bar.line(
+        armed=False,
+        usage="12% ctx · 7.6M↑ 312k↓",
+        limits={"claude": "5h 4% 7d 4%", "codex": "7d 12%"},
+    )
+    assert "claude ● 12% ctx · 7.6M↑ 312k↓ · 5h 4% 7d 4% │ codex ○ 7d 12% │ opencode ○" in line
+    assert "^] flips" in line
+    assert len(line) == 90
+
+
+def test_bar_line_limits_without_usage_sit_alone_on_the_active_slot():
+    # before the first turn there are no token stats yet, but the account
+    # limits are already known: no dangling separator
+    bar = StatusBar(rows=40, cols=60, active="codex", others=["claude"])
+    line = bar.line(armed=False, usage="", limits={"codex": "7d 12%"})
+    assert "codex ● 7d 12% │ claude ○" in line
+
+
+def test_bar_line_elides_token_totals_before_limits():
+    # tiered elision: the ↑↓ totals go first, the limits second, the ctx
+    # figure third, so a narrower row keeps the numbers that decide a flip
+    usage = "12% ctx · 7.6M↑ 312k↓"
+    limits = {"claude": "5h 4% 7d 4%", "codex": "7d 12%"}
+    full = " claude ● 12% ctx · 7.6M↑ 312k↓ · 5h 4% 7d 4% │ codex ○ 7d 12%   ^] flips"
+    bar = StatusBar(rows=40, cols=len(full) - 1, active="claude", others=["codex"])
+    line = bar.line(armed=False, usage=usage, limits=limits)
+    assert "↑" not in line
+    assert "12% ctx · 5h 4% 7d 4%" in line and "codex ○ 7d 12%" in line
+
+
+def test_bar_line_elides_limits_before_ctx():
+    usage = "12% ctx · 7.6M↑ 312k↓"
+    limits = {"claude": "5h 4% 7d 4%", "codex": "7d 12%"}
+    no_tokens = " claude ● 12% ctx · 5h 4% 7d 4% │ codex ○ 7d 12%   ^] flips"
+    bar = StatusBar(rows=40, cols=len(no_tokens) - 1, active="claude", others=["codex"])
+    line = bar.line(armed=False, usage=usage, limits=limits)
+    assert "5h" not in line and "7d" not in line
+    assert "claude ● 12% ctx │ codex ○" in line
+
+
+def test_bar_line_elides_ctx_last_and_keeps_the_flip_hint():
+    usage = "12% ctx · 7.6M↑ 312k↓"
+    limits = {"claude": "5h 4% 7d 4%", "codex": "7d 12%"}
+    ctx_only = " claude ● 12% ctx │ codex ○   ^] flips"
+    bar = StatusBar(rows=40, cols=len(ctx_only) - 1, active="claude", others=["codex"])
+    line = bar.line(armed=False, usage=usage, limits=limits)
+    assert "ctx" not in line
+    assert "claude ● │ codex ○" in line and "^] flips" in line
+
+
+def test_bar_line_armed_state_ignores_limits():
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
+    assert bar.line(armed=True, limits={"codex": "7d 12%"}) == bar.line(armed=True)
+
+
+def test_bar_paint_carries_limits():
+    bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
+    assert "7d 12%".encode() in bar.paint(armed=False, limits={"codex": "7d 12%"})

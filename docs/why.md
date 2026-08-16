@@ -75,15 +75,20 @@ last turn has landed in its database).
 The tab bar's active slot shows the model's live context (`144k ctx`, or
 `43% ctx` where the harness reports its window) and the session's
 input↑ / output↓ token totals — read straight from the transcript,
-updated as you work, no extra calls:
+updated as you work. Every slot also shows its account's rate-limit
+windows (percent used), so you can see which subscription has room
+before you flip:
 
 ```
- claude ● 144k ctx · 7.6M↑ 312k↓ │ codex ○ │ opencode ○   ^] flips
+ claude ● 144k ctx · 7.6M↑ 312k↓ · 5h 4% 7d 41% │ codex ○ 7d 12% │ opencode ○   ^] flips
 ```
 
 ## 🔒 Local, private, no lock-in.
 
 Everything lives in the CLIs' own session files plus a small SQLite
-database in `~/.tandem`. No cloud sync, no telemetry. Uninstall tandem
+database in `~/.tandem`. No cloud sync, no telemetry — the only network
+calls tandem makes are the rate-limit polls above, to the same account
+endpoints the CLIs' own `/usage` and `/status` use, and `[frame]
+rate_limits = false` turns those off. Uninstall tandem
 tomorrow and every session still resumes natively with `claude --resume`,
 `codex resume`, and `opencode -s`.

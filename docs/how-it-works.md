@@ -71,9 +71,14 @@ flip, compatibility ranges, and where your data lives. (Back to the
   `43% ctx` for codex, which reports its window) and the session's
   input↑ / output↓ totals, where input is the whole prompt side as billed
   (fresh input plus cache reads and writes) and output includes
-  reasoning. Stats are cosmetic — any failure there disables them for the
-  session and never touches sync — and they're the first thing elided
-  when the row is too narrow. If a terminal can't sustain the bar it drops
+  reasoning. Every slot also carries its account's rate-limit windows
+  (`5h 4% 7d 41%`, percent used), polled on a side thread from the same
+  endpoints `claude`'s `/usage` and `codex`'s `/status` call, using the
+  credentials those CLIs keep on disk — tandem's only network calls, off
+  with `[frame] rate_limits = false`. Stats are cosmetic — any failure
+  there blanks them and never touches sync — and they're elided in
+  tiers when the row is too narrow: the ↑↓ totals first, then the rate
+  limits, then the ctx figure. If a terminal can't sustain the bar it drops
   for the session (the flip keeps working) and `tandem doctor` says so
   until you delete the marker file it names; shrinking the window below
   the bar's row floor drops it just as permanently, but silently — that

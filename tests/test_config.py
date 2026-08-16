@@ -177,3 +177,20 @@ def test_frame_flip_key_multichar_casefold_does_not_raise(tmp_path, monkeypatch)
 def test_frame_malformed_values_fall_back(tmp_path, monkeypatch):
     _write_config(tmp_path, monkeypatch, '[frame]\nflip_key = 29\nbar = "yes"\n')
     assert load_frame_config() == FrameConfig()
+
+
+def test_frame_rate_limits_defaults_true(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, "[frame]\n")
+    assert load_frame_config().rate_limits is True
+
+
+def test_frame_rate_limits_off(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, "[frame]\nrate_limits = false\n")
+    assert load_frame_config().rate_limits is False
+
+
+def test_frame_rate_limits_garbage_falls_back_to_default(tmp_path, monkeypatch):
+    # rate_limits gates tandem's only outbound network calls; a stray
+    # string must read as the default, not as "on"
+    _write_config(tmp_path, monkeypatch, '[frame]\nrate_limits = "off"\n')
+    assert load_frame_config().rate_limits is True

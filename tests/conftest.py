@@ -262,6 +262,28 @@ class Env3(Env):
 
 
 @pytest.fixture(autouse=True)
+def _rate_limits_hermetic(monkeypatch):
+    """No test may carry the developer's real credentials to a real endpoint.
+    The Env sandbox moves CLAUDE_CONFIG_DIR/CODEX_HOME, but the macOS
+    keychain read sits outside any env dir — stub it — and refuse every
+    non-loopback URL outright so a gap anywhere else fails loudly instead of
+    phoning home. Cross-run poller state (backoff, last figures) starts
+    fresh per test."""
+    from tandem import ratelimit
+
+    monkeypatch.setattr(ratelimit, "_keychain_secret", lambda: None)
+    monkeypatch.setattr(ratelimit, "_shared", ratelimit._SharedState())
+    real_get_json = ratelimit._get_json
+
+    def guarded(url, headers, timeout):
+        if not url.startswith("http://127.0.0.1:"):
+            raise RuntimeError(f"test tried to reach the network: {url}")
+        return real_get_json(url, headers, timeout)
+
+    monkeypatch.setattr(ratelimit, "_get_json", guarded)
+
+
+@pytest.fixture(autouse=True)
 def _warm_gate_closed(monkeypatch):
     """No test may boot a hidden harness for real. Under plain `pytest` stdin
     is not a terminal and the warm gate is shut anyway, but `pytest -s` on a

@@ -154,7 +154,23 @@ class FrameIO:
     # and polled on the pump tick, so the tail thread publishes by plain
     # assignment into whatever this closure reads
     usage: Callable[[], str] | None = None
+    # per-slot account rate-limit text (harness id → "5h 4% 7d 4%"), any
+    # slot; published the same way by the rate-limit poller thread
+    limits: Callable[[], dict[str, str]] | None = None
+    # the pump's word on whether a bar is actually drawn: True once at
+    # setup when it is, False when it never is (no tty, too few rows) or
+    # when it drops. Anything that only exists to feed the bar (the
+    # rate-limit poll) starts and stops on this.
+    on_bar: Callable[[bool], None] | None = None
     bar_dropped: bool = False
+
+
+def _report_bar(frame: FrameIO | None, on: bool) -> None:
+    if frame is not None and frame.on_bar is not None:
+        try:
+            frame.on_bar(on)
+        except Exception:
+            pass   # a listener must never take the pump down
 
 
 def _child_dims(rows: int, cols: int, bar_on: bool) -> tuple[int, int]:
@@ -199,6 +215,7 @@ def run_in_pty(
         # A pre-spawned `child` never legitimately reaches here: the flip
         # loop's own `_stdin_tty` gate kills a standby rather than hand it to
         # a path that spawns cold and would leave it unreaped.
+        _report_bar(frame, False)
         return subprocess.run(argv, cwd=cwd, env=env).returncode
 
     rows, cols = _winsize(stdin_fd)
@@ -214,6 +231,8 @@ def run_in_pty(
         if bar_on
         else None
     )
+    if not bar_on:
+        _report_bar(frame, False)   # "on" is reported after the first paint
 
     adopted = child is not None and _is_alive(child)
     if not adopted:
@@ -241,7 +260,8 @@ def run_in_pty(
             return
         region = b"" if (g is not None and g.child_owns_region) else b.region()
         usage = frame.usage() if frame.usage is not None else ""
-        _write_all(out_fd, region + b.paint(frame.armed(), usage))
+        limits = frame.limits() if frame.limits is not None else None
+        _write_all(out_fd, region + b.paint(frame.armed(), usage, limits))
 
     def drop_bar(reason: str) -> None:
         """Terminal state: the guard's drop verdict is not latched, so the
@@ -280,6 +300,7 @@ def run_in_pty(
         bar_on, guard = False, None
         if reason == "conflict":
             frame.bar_dropped = True
+        _report_bar(frame, False)
         if detector is not None:
             detector.bar_row = None
         _write_all(out_fd, dying.clear())
@@ -349,11 +370,16 @@ def run_in_pty(
             except Exception:
                 pass   # child died in the gap: the liveness loop ends the pump
         paint()
+        if bar is not None:
+            _report_bar(frame, True)   # drawn for real: bytes are on the terminal
         # seeded from the state just painted, so an already-armed frame does
         # not draw a redundant repaint on the first iteration
         last_armed = frame.armed() if bar is not None else False
         last_usage = (
             frame.usage() if bar is not None and frame.usage is not None else ""
+        )
+        last_limits = (
+            frame.limits() if bar is not None and frame.limits is not None else None
         )
         last_stdin = time.monotonic()
         stdin_open = True
@@ -424,6 +450,13 @@ def run_in_pty(
                 usage_now = frame.usage()
                 if usage_now != last_usage:
                     last_usage = usage_now
+                    paint()
+            if bar is not None and frame.limits is not None:
+                # the poller replaces the whole dict, so identity is the
+                # cheap change check and equality the correct one
+                limits_now = frame.limits()
+                if limits_now is not last_limits and limits_now != last_limits:
+                    last_limits = limits_now
                     paint()
     finally:
         # SIGWINCH goes back first: its handler is the one that paints, and
