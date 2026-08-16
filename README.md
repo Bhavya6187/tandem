@@ -83,7 +83,8 @@ For more use cases, see
 Only the active model runs. tandem translates its growing conversation into
 the other CLIs' native session formats using local file access, so they are
 ready when you switch. Your session stays in the CLIs' own storage plus a
-small local database in `~/.tandem`; tandem adds no cloud sync or telemetry.
+small local database in `~/.tandem`; tandem adds no cloud sync or telemetry
+(its only network calls are the optional rate-limit polls for the tab bar).
 
 See [How tandem works](https://github.com/Bhavya6187/tandem/blob/main/docs/how-it-works.md)
 for transcript translation, switching, crash safety, compatibility, and data

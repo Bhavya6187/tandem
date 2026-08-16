@@ -40,6 +40,8 @@ class UsageSnapshot:
     def bar_text(self) -> str:
         # `·` `↑` `↓` are East_Asian_Width A like the bar's ● │ ○ — one cell
         # outside CJK-wide terminal configs (frame.StatusBar.line's width rule).
+        # Parts are most-important-first, ` · `-joined: the bar elides from
+        # the end (↑↓ totals before ctx) when the row is too narrow.
         parts = []
         if self.ctx_percent is not None:
             parts.append(f"{self.ctx_percent}% ctx")

@@ -23,6 +23,7 @@ from .config import load_frame_config
 from .events import SessionContext
 from .harness import get_adapter
 from .ptyrun import FrameIO, PtyControl, _winsize, run_in_pty
+from .ratelimit import RateLimitPoller
 from .state import PairedSession, StateStore, SyncCursor
 from .tailer import TailedLine, TranscriptTruncated, TranscriptWatcher
 from .util import json_line
@@ -687,7 +688,15 @@ class InteractiveRunner:
         # written by the tail thread, read by the pump on every paint/tick;
         # a plain dict-slot assignment is the entire synchronization (GIL),
         # same as monitor.transcript
-        usage_state = {"text": ""}
+        usage_state = {"text": "", "limits": {}}
+        # Account rate limits for every slot, polled on their own thread
+        # (network calls must never sit on the tail thread's sync path).
+        # Only with a bar to paint them on: no bar, no calls.
+        poller = (
+            RateLimitPoller([active, *session.targets_for(active)], usage_state)
+            if frame_cfg.bar and frame_cfg.rate_limits
+            else None
+        )
         frame = FrameIO(
             flip_byte=frame_cfg.flip_byte,
             on_flip=monitor.flip_pressed,
@@ -697,6 +706,7 @@ class InteractiveRunner:
             others=session.targets_for(active),
             key_label=_key_label(frame_cfg.flip_byte),
             usage=lambda: usage_state["text"],
+            limits=(lambda: usage_state["limits"]) if poller is not None else None,
         )
         self.flip_requested = False
         self.warm_child = None
@@ -770,7 +780,12 @@ class InteractiveRunner:
                         with ops._sub_lock():
                             for loop in loops:
                                 loop.drain()
+                        before = usage_state["text"]
                         ufeed.poll()
+                        if poller is not None and usage_state["text"] != before:
+                            # a response just landed: the account figures
+                            # moved, refresh them ahead of the interval
+                            poller.poke()
                         watcher.wait()
                     # final drain after the CLI exits
                     with ops._sub_lock():
@@ -786,6 +801,8 @@ class InteractiveRunner:
         thread = threading.Thread(target=tail_thread, name="tandem-tail", daemon=True)
         thread.start()
         monitor.start()   # before the try: stop() on an unstarted thread raises
+        if poller is not None:
+            poller.start()
         try:
             # A release that returns None means the discard reader still owns
             # the fd, so there is nothing safe to hand over: run_in_pty spawns
@@ -804,6 +821,8 @@ class InteractiveRunner:
                               control=control, child=pre_spawned)
         finally:
             stop.set()
+            if poller is not None:
+                poller.stop()
             # stop() first, and only then read the monitor: `flip_requested`
             # and `how` are assigned as the ladder finishes, so a read before
             # the join races the flip thread.

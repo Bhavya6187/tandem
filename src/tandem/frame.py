@@ -241,7 +241,8 @@ class StatusBar:
         self.rows = rows
         self.cols = cols
 
-    def line(self, armed: bool, usage: str = "") -> str:
+    def line(self, armed: bool, usage: str = "",
+             limits: dict[str, str] | None = None) -> str:
         # padded and truncated by character count, so every glyph here must be
         # one terminal cell wide: a two-cell glyph (any with East_Asian_Width
         # W/F, e.g. ⏳ U+23F3) makes the painted row cols+1 cells and wraps off
@@ -251,24 +252,47 @@ class StatusBar:
             return (f" {self.active} ◐ flipping at turn end…  "
                     f"{self.key_label} cancels")[: self.cols].ljust(self.cols)
 
-        def compose(stats: str) -> str:
-            head = f"{self.active} ●" + (f" {stats}" if stats else "")
-            slots = " │ ".join([head] + [f"{o} ○" for o in self.others])
-            return f" {slots}   {self.key_label} flips"
+        # `usage` is the active slot's stats, most-important-first and
+        # ` · `-separated (UsageSnapshot.bar_text: ctx, then ↑↓ totals);
+        # `limits` is per-slot account rate-limit text for any harness.
+        parts = [pt for pt in usage.split(" · ") if pt] if usage else []
+        limits = limits or {}
 
-        text = compose(usage)
-        if usage and len(text) > self.cols:
-            # stats are the first thing to go: the key hint is the keybind's
-            # only advertisement, and the slot names are what it cycles
-            text = compose("")
+        def compose(stats: list[str], with_limits: bool) -> str:
+            def slot(name: str, glyph: str, extra: list[str]) -> str:
+                lim = limits.get(name, "") if with_limits else ""
+                bits = [*extra] + ([lim] if lim else [])
+                return f"{name} {glyph}" + (f" {' · '.join(bits)}" if bits else "")
+            slots = [slot(self.active, "●", stats)]
+            slots += [slot(o, "○", []) for o in self.others]
+            return f" {' │ '.join(slots)}   {self.key_label} flips"
+
+        # Elision order when the row is too narrow: the ↑↓ totals first, the
+        # rate limits second, the ctx figure third — the numbers that decide a
+        # flip outlive the ones that only describe the session — and the key
+        # hint last of all: it is the keybind's only advertisement, and the
+        # slot names are what it cycles.
+        tiers = [
+            (parts, True),
+            (parts[:1], True),
+            (parts[:1], False),
+            ([], False),
+        ]
+        text = compose(*tiers[-1])
+        for stats, with_limits in tiers:
+            candidate = compose(stats, with_limits)
+            if len(candidate) <= self.cols:
+                text = candidate
+                break
         return text[: self.cols].ljust(self.cols)
 
-    def paint(self, armed: bool, usage: str = "") -> bytes:
+    def paint(self, armed: bool, usage: str = "",
+              limits: dict[str, str] | None = None) -> bytes:
         return (
             b"\x1b7"
             + f"\x1b[{self.rows};1H".encode()
             + b"\x1b[7m"
-            + self.line(armed, usage).encode()
+            + self.line(armed, usage, limits).encode()
             + b"\x1b[0m\x1b8"
         )
 

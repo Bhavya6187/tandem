@@ -1545,3 +1545,70 @@ def test_warm_skips_opencode_target(tmp_path, monkeypatch):
     assert env.session.next_active("codex") == "opencode"
     r, spawns = _drive_flip(monkeypatch, env, expect_spawn=False)
     assert spawns == [] and r.warm_child is None
+
+
+# -- rate limits on the bar ---------------------------------------------------
+
+
+def _wait_for(pred, timeout=3.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
+def test_runner_polls_rate_limits_for_every_participant(env_factory, monkeypatch):
+    from tandem import ratelimit
+    env = env_factory(active="claude")
+    monkeypatch.setitem(ratelimit.DEFAULT_FETCHERS, "claude",
+                        lambda: [ratelimit.Window("5h", 4), ratelimit.Window("7d", 41)])
+    monkeypatch.setitem(ratelimit.DEFAULT_FETCHERS, "codex",
+                        lambda: [ratelimit.Window("7d", 12)])
+    seen = {}
+
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
+        # the poller starts before the pty runs and publishes on its own thread
+        assert _wait_for(lambda: frame.limits() and "codex" in frame.limits())
+        seen["limits"] = dict(frame.limits())
+        return 0
+
+    monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
+    runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink()).run()
+    assert seen["limits"] == {"claude": "5h 4% 7d 41%", "codex": "7d 12%"}
+    # and it is torn down with the run
+    assert not any(t.name == "tandem-ratelimit" and t.is_alive()
+                   for t in threading.enumerate())
+
+
+def test_runner_skips_the_rate_limit_poll_when_disabled(env_factory, monkeypatch):
+    from tandem import ratelimit
+    env = env_factory(active="claude")
+    (paths.tandem_home() / "config.toml").write_text("[frame]\nrate_limits = false\n")
+    called = []
+    monkeypatch.setitem(ratelimit.DEFAULT_FETCHERS, "claude", lambda: called.append(1))
+    monkeypatch.setitem(ratelimit.DEFAULT_FETCHERS, "codex", lambda: called.append(1))
+    seen = {}
+    monkeypatch.setattr(
+        runner, "run_in_pty",
+        lambda argv, cwd=None, frame=None, control=None, child=None:
+            seen.update(frame=frame) or 0,
+    )
+    runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink()).run()
+    assert seen["frame"].limits is None
+    assert called == []
+
+
+def test_runner_skips_the_rate_limit_poll_without_a_bar(env_factory, monkeypatch):
+    # nothing to paint the figures on: no network calls either
+    from tandem import ratelimit
+    env = env_factory(active="claude")
+    (paths.tandem_home() / "config.toml").write_text("[frame]\nbar = false\n")
+    called = []
+    monkeypatch.setitem(ratelimit.DEFAULT_FETCHERS, "claude", lambda: called.append(1))
+    monkeypatch.setitem(ratelimit.DEFAULT_FETCHERS, "codex", lambda: called.append(1))
+    monkeypatch.setattr(runner, "run_in_pty",
+                        lambda argv, cwd=None, frame=None, control=None, child=None: 0)
+    runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink()).run()
+    assert called == []

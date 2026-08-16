@@ -472,6 +472,28 @@ def test_usage_change_repaints_the_bar(monkeypatch):
     assert pump.run(drive) == 0
 
 
+def test_limits_change_repaints_the_bar(monkeypatch):
+    """The rate-limit poller publishes per-slot text on its own thread; the
+    pump's tick must notice a change there just like a usage change."""
+    limits = {"by": {}}
+    frame = FrameIO(
+        flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False,
+        active="claude", others=["codex"], limits=lambda: limits["by"],
+    )
+    pump = _Pump(monkeypatch, frame=frame)
+
+    def drive():
+        limits["by"] = {"codex": "7d 12%"}
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            if any("codex ○ 7d 12%".encode() in w for w in pump.writes):
+                break
+            time.sleep(0.02)
+        assert any("codex ○ 7d 12%".encode() in w for w in pump.writes)
+
+    assert pump.run(drive) == 0
+
+
 def test_drop_bar_survives_a_sigwinch_landing_inside_its_own_teardown(monkeypatch):
     """Drops and resizes are causally correlated, so the SIGWINCH handler
     lands inside drop_bar's writes all the time. The bar must already be gone

@@ -154,6 +154,9 @@ class FrameIO:
     # and polled on the pump tick, so the tail thread publishes by plain
     # assignment into whatever this closure reads
     usage: Callable[[], str] | None = None
+    # per-slot account rate-limit text (harness id → "5h 4% 7d 4%"), any
+    # slot; published the same way by the rate-limit poller thread
+    limits: Callable[[], dict[str, str]] | None = None
     bar_dropped: bool = False
 
 
@@ -241,7 +244,8 @@ def run_in_pty(
             return
         region = b"" if (g is not None and g.child_owns_region) else b.region()
         usage = frame.usage() if frame.usage is not None else ""
-        _write_all(out_fd, region + b.paint(frame.armed(), usage))
+        limits = frame.limits() if frame.limits is not None else None
+        _write_all(out_fd, region + b.paint(frame.armed(), usage, limits))
 
     def drop_bar(reason: str) -> None:
         """Terminal state: the guard's drop verdict is not latched, so the
@@ -355,6 +359,9 @@ def run_in_pty(
         last_usage = (
             frame.usage() if bar is not None and frame.usage is not None else ""
         )
+        last_limits = (
+            frame.limits() if bar is not None and frame.limits is not None else None
+        )
         last_stdin = time.monotonic()
         stdin_open = True
         # _is_alive, not isalive(): a PtyControl on another thread polls
@@ -424,6 +431,13 @@ def run_in_pty(
                 usage_now = frame.usage()
                 if usage_now != last_usage:
                     last_usage = usage_now
+                    paint()
+            if bar is not None and frame.limits is not None:
+                # the poller replaces the whole dict, so identity is the
+                # cheap change check and equality the correct one
+                limits_now = frame.limits()
+                if limits_now is not last_limits and limits_now != last_limits:
+                    last_limits = limits_now
                     paint()
     finally:
         # SIGWINCH goes back first: its handler is the one that paints, and

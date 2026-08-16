@@ -2,8 +2,8 @@
 
 [subagents] controls codex subagent routing; [claude] / [codex] hold an
 `args` list appended to every interactive launch of that harness; [frame]
-holds the meta-harness flip keybind, its status bar toggle, and the
-pipelined-flip toggle.
+holds the meta-harness flip keybind, its status bar toggle, the
+pipelined-flip toggle, and the bar's rate-limit poll toggle.
 
 Unknown keys are ignored and every error yields defaults — configuration
 must never be the reason a launch breaks or subagent routing stops (the
@@ -88,6 +88,7 @@ class FrameConfig:
     flip_byte: int = 0x1D   # Ctrl-]
     bar: bool = True
     warm: bool = True       # boot the other harness during the flip's teardown
+    rate_limits: bool = True  # poll each account's usage windows for the bar
 
 
 def _parse_flip_key(value: str) -> int | None:
@@ -110,8 +111,8 @@ def _parse_flip_key(value: str) -> int | None:
 
 
 def load_frame_config() -> FrameConfig:
-    """[frame] table: the flip keybind, the status bar toggle, and the
-    pipelined-flip toggle."""
+    """[frame] table: the flip keybind, the status bar toggle, the
+    pipelined-flip toggle, and the bar's rate-limit poll toggle."""
     raw = _read_config().get("frame")
     if not isinstance(raw, dict):
         return FrameConfig()
@@ -120,10 +121,12 @@ def load_frame_config() -> FrameConfig:
     byte = _parse_flip_key(key) if isinstance(key, str) else None
     bar = raw.get("bar")
     warm = raw.get("warm")
+    limits = raw.get("rate_limits")
     return FrameConfig(
         flip_byte=byte if byte is not None else d.flip_byte,
         bar=bar if isinstance(bar, bool) else d.bar,
         warm=warm if isinstance(warm, bool) else d.warm,
+        rate_limits=limits if isinstance(limits, bool) else d.rate_limits,
     )
 
 
