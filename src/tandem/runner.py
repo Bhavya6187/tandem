@@ -691,12 +691,23 @@ class InteractiveRunner:
         usage_state = {"text": "", "limits": {}}
         # Account rate limits for every slot, polled on their own thread
         # (network calls must never sit on the tail thread's sync path).
-        # Only with a bar to paint them on: no bar, no calls.
+        # Only with a bar to paint them on — no bar, no calls — and the pump
+        # is the one that knows: it starts the poll when it draws the bar
+        # and halts it when the bar is never drawn or drops.
         poller = (
             RateLimitPoller([active, *session.targets_for(active)], usage_state)
             if frame_cfg.bar and frame_cfg.rate_limits
             else None
         )
+
+        def on_bar(drawn: bool) -> None:
+            if poller is None:
+                return
+            if drawn:
+                poller.ensure_started()
+            else:
+                poller.halt()
+
         frame = FrameIO(
             flip_byte=frame_cfg.flip_byte,
             on_flip=monitor.flip_pressed,
@@ -707,6 +718,7 @@ class InteractiveRunner:
             key_label=_key_label(frame_cfg.flip_byte),
             usage=lambda: usage_state["text"],
             limits=(lambda: usage_state["limits"]) if poller is not None else None,
+            on_bar=on_bar if poller is not None else None,
         )
         self.flip_requested = False
         self.warm_child = None
@@ -801,8 +813,6 @@ class InteractiveRunner:
         thread = threading.Thread(target=tail_thread, name="tandem-tail", daemon=True)
         thread.start()
         monitor.start()   # before the try: stop() on an unstarted thread raises
-        if poller is not None:
-            poller.start()
         try:
             # A release that returns None means the discard reader still owns
             # the fd, so there is nothing safe to hand over: run_in_pty spawns

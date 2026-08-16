@@ -1,4 +1,5 @@
 import fcntl
+import io
 import os
 import pty
 import signal
@@ -492,6 +493,42 @@ def test_limits_change_repaints_the_bar(monkeypatch):
         assert any("codex ○ 7d 12%".encode() in w for w in pump.writes)
 
     assert pump.run(drive) == 0
+
+
+def test_pump_reports_the_bar_on_and_then_off_around_a_drop(monkeypatch):
+    """The runner gates its rate-limit polls on the bar actually being drawn,
+    which only the pump knows: it reports on at setup and off at a drop."""
+    events = []
+    frame = FrameIO(flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False,
+                    on_bar=events.append)
+    pump = _Pump(monkeypatch, frame=frame)
+
+    def drive():
+        assert events == [True]
+        pump.feed(b"\x1b[1;24r")            # conflict: DECSTBM covers the bar row
+        assert pump.await_clear()
+
+    assert pump.run(drive) == 0
+    assert events == [True, False]
+
+
+def test_pump_reports_the_bar_off_when_the_window_is_too_short(monkeypatch):
+    events = []
+    frame = FrameIO(flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False,
+                    on_bar=events.append)
+    pump = _Pump(monkeypatch, frame=frame, rows=3)
+    pump.painted.set()          # no bar means no paint: don't wait for one
+    assert pump.run(lambda: None) == 0
+    assert events == [False]
+
+
+def test_pump_reports_the_bar_off_on_the_non_tty_path(monkeypatch):
+    events = []
+    frame = FrameIO(flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False,
+                    on_bar=events.append)
+    monkeypatch.setattr(ptyrun.sys, "stdin", io.StringIO())   # no fileno: not a tty
+    assert run_in_pty(["true"], frame=frame) == 0
+    assert events == [False]
 
 
 def test_drop_bar_survives_a_sigwinch_landing_inside_its_own_teardown(monkeypatch):

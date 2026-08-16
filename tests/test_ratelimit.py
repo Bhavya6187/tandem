@@ -8,6 +8,7 @@ so every parser must go quiet on any shape it doesn't recognize.
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -49,7 +50,7 @@ CODEX_PAYLOAD = {
 
 
 def test_parse_claude_reads_both_windows_in_order():
-    assert parse_claude(CLAUDE_PAYLOAD) == [Window("5h", 4), Window("7d", 41)]
+    assert parse_claude(CLAUDE_PAYLOAD) == [Window("5h", 4), Window("7d", 42)]
 
 
 def test_parse_claude_skips_absent_windows():
@@ -199,7 +200,7 @@ def server():
 def test_fetch_claude_sends_bearer_and_beta_header(server):
     _Handler.status, _Handler.body = 200, json.dumps(CLAUDE_PAYLOAD).encode()
     assert ratelimit.fetch_claude("tok", url=server + "/usage") == [
-        Window("5h", 4), Window("7d", 41)]
+        Window("5h", 4), Window("7d", 42)]
     path, headers = _Handler.seen[-1]
     assert path == "/usage"
     assert headers["authorization"] == "Bearer tok"
@@ -227,6 +228,15 @@ def test_fetch_unreachable_is_none():
 
 
 # -- poller ------------------------------------------------------------------
+
+
+def _eventually(pred, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
 
 
 def test_poller_refresh_publishes_text_per_harness():
@@ -275,11 +285,11 @@ def test_poller_thread_fetches_on_start_and_on_poke():
     p.start()
     try:
         assert fetched.acquire(timeout=5)
-        assert state["limits"]["claude"] == "5h 4%"
+        assert _eventually(lambda: state.get("limits", {}).get("claude") == "5h 4%")
         value["pct"] = 9
         p.poke()
         assert fetched.acquire(timeout=5)
-        assert state["limits"]["claude"] == "5h 9%"
+        assert _eventually(lambda: state["limits"]["claude"] == "5h 9%")
     finally:
         p.stop()
     assert not p.is_alive()
@@ -363,3 +373,127 @@ def test_poller_throttled_with_nothing_known_stays_blank():
     p = RateLimitPoller(["claude"], state, fetchers={"claude": fetch})
     p.refresh()
     assert state["limits"] == {"claude": ""}
+
+
+def test_parse_rejects_bool_typed_numbers():
+    assert parse_claude({"five_hour": {"utilization": True}}) == []
+    assert parse_codex({"rate_limit": {"primary_window": {
+        "used_percent": True, "limit_window_seconds": 18000}}}) == []
+    assert parse_codex({"rate_limit": {"primary_window": {
+        "used_percent": 5, "limit_window_seconds": True}}}) == []
+
+
+def test_parse_codex_accepts_float_window_seconds():
+    assert parse_codex({"rate_limit": {"primary_window": {
+        "used_percent": 5, "limit_window_seconds": 604800.0}}}) == [Window("7d", 5)]
+
+
+def test_percent_rounds_rather_than_truncates():
+    assert parse_claude({"five_hour": {"utilization": 41.6}}) == [Window("5h", 42)]
+    assert parse_claude({"five_hour": {"utilization": 41.4}}) == [Window("5h", 41)]
+
+
+def test_fetch_refuses_to_follow_redirects(server):
+    # urllib would re-send the bearer to wherever a 302 points; a redirect is
+    # treated as a failed fetch instead
+    _Handler.status, _Handler.body = 302, b""
+    _Handler.extra_headers = {"Location": server + "/elsewhere"}
+    try:
+        assert ratelimit.fetch_claude("tok", url=server + "/usage") is None
+        assert [p for p, _ in _Handler.seen] == ["/usage"]   # never followed
+    finally:
+        _Handler.extra_headers = {}
+
+
+# -- keychain ----------------------------------------------------------------
+
+
+def test_keychain_read_latches_off_after_a_failure(monkeypatch):
+    # a keychain that prompts or errors must not be re-asked every minute of
+    # an interactive session: one failure and the file path is all we use
+    calls = []
+
+    def boom(*a, **kw):
+        calls.append(kw)
+        raise OSError("no security binary")
+
+    monkeypatch.setattr(ratelimit.sys, "platform", "darwin")
+    monkeypatch.setattr(ratelimit.subprocess, "run", boom)
+    monkeypatch.setattr(ratelimit, "_keychain_secret", ratelimit._keychain_secret_uncached)
+    assert ratelimit._keychain_secret() is None
+    assert ratelimit._keychain_secret() is None
+    assert len(calls) == 1
+    assert calls[0]["stdin"] is ratelimit.subprocess.DEVNULL
+
+
+def test_keychain_read_off_platform_never_spawns(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ratelimit.sys, "platform", "linux")
+    monkeypatch.setattr(ratelimit.subprocess, "run", lambda *a, **kw: calls.append(1))
+    monkeypatch.setattr(ratelimit, "_keychain_secret", ratelimit._keychain_secret_uncached)
+    assert ratelimit._keychain_secret() is None
+    assert calls == []
+
+
+# -- state that outlives one poller (one flip leg) ---------------------------
+
+
+def test_new_poller_paints_the_last_known_figures_before_its_first_fetch():
+    a_state = {}
+    a = RateLimitPoller(["claude", "codex"], a_state,
+                        fetchers={"claude": lambda: [Window("5h", 4)],
+                                  "codex": lambda: [Window("7d", 12)]})
+    a.refresh()
+    b_state = {}
+    RateLimitPoller(["claude", "codex"], b_state, fetchers={"claude": lambda: None,
+                                                            "codex": lambda: None})
+    assert b_state["limits"] == {"claude": "5h 4%", "codex": "7d 12%"}
+
+
+def test_backoff_survives_a_new_poller():
+    def throttled():
+        raise ratelimit.Throttled(3600)
+
+    calls = {"n": 0}
+
+    def counting():
+        calls["n"] += 1
+        return [Window("5h", 1)]
+
+    a = RateLimitPoller(["claude"], {}, fetchers={"claude": throttled})
+    a.refresh()
+    b_state = {}
+    b = RateLimitPoller(["claude"], b_state, fetchers={"claude": counting})
+    b.refresh()
+    assert calls["n"] == 0
+    assert b_state["limits"] == {"claude": ""}
+
+
+def test_min_gap_survives_a_new_poller():
+    calls = {"n": 0}
+
+    def counting():
+        calls["n"] += 1
+        return [Window("5h", 1)]
+
+    a = RateLimitPoller(["claude"], {}, fetchers={"claude": counting}, min_gap=3600)
+    a.refresh()
+    b = RateLimitPoller(["claude"], {}, fetchers={"claude": counting},
+                        interval=3600, min_gap=3600)
+    b.start()
+    try:
+        time.sleep(0.3)
+        assert calls["n"] == 1     # the new leg did not fetch again on start
+    finally:
+        b.stop()
+
+
+def test_poller_stop_before_start_and_halt_are_safe():
+    p = RateLimitPoller(["claude"], {}, fetchers={"claude": lambda: None})
+    p.stop()
+    p.halt()
+    p.ensure_started()
+    p.ensure_started()   # idempotent: a bar reports on at most once, but be safe
+    p.halt()             # signal without joining: safe from any thread
+    p.stop()
+    assert not p.is_alive()

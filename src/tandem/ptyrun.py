@@ -157,7 +157,20 @@ class FrameIO:
     # per-slot account rate-limit text (harness id → "5h 4% 7d 4%"), any
     # slot; published the same way by the rate-limit poller thread
     limits: Callable[[], dict[str, str]] | None = None
+    # the pump's word on whether a bar is actually drawn: True once at
+    # setup when it is, False when it never is (no tty, too few rows) or
+    # when it drops. Anything that only exists to feed the bar (the
+    # rate-limit poll) starts and stops on this.
+    on_bar: Callable[[bool], None] | None = None
     bar_dropped: bool = False
+
+
+def _report_bar(frame: FrameIO | None, on: bool) -> None:
+    if frame is not None and frame.on_bar is not None:
+        try:
+            frame.on_bar(on)
+        except Exception:
+            pass   # a listener must never take the pump down
 
 
 def _child_dims(rows: int, cols: int, bar_on: bool) -> tuple[int, int]:
@@ -202,6 +215,7 @@ def run_in_pty(
         # A pre-spawned `child` never legitimately reaches here: the flip
         # loop's own `_stdin_tty` gate kills a standby rather than hand it to
         # a path that spawns cold and would leave it unreaped.
+        _report_bar(frame, False)
         return subprocess.run(argv, cwd=cwd, env=env).returncode
 
     rows, cols = _winsize(stdin_fd)
@@ -217,6 +231,7 @@ def run_in_pty(
         if bar_on
         else None
     )
+    _report_bar(frame, bar_on)
 
     adopted = child is not None and _is_alive(child)
     if not adopted:
@@ -284,6 +299,7 @@ def run_in_pty(
         bar_on, guard = False, None
         if reason == "conflict":
             frame.bar_dropped = True
+        _report_bar(frame, False)
         if detector is not None:
             detector.bar_row = None
         _write_all(out_fd, dying.clear())

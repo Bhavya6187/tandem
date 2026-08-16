@@ -1569,7 +1569,10 @@ def test_runner_polls_rate_limits_for_every_participant(env_factory, monkeypatch
     seen = {}
 
     def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
-        # the poller starts before the pty runs and publishes on its own thread
+        # the pump reports the bar drawn; only then does the poller start,
+        # publishing on its own thread
+        assert not any(frame.limits().values())   # seeded blank, nothing fetched yet
+        frame.on_bar(True)
         assert _wait_for(lambda: frame.limits() and "codex" in frame.limits())
         seen["limits"] = dict(frame.limits())
         return 0
@@ -1612,3 +1615,85 @@ def test_runner_skips_the_rate_limit_poll_without_a_bar(env_factory, monkeypatch
                         lambda argv, cwd=None, frame=None, control=None, child=None: 0)
     runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink()).run()
     assert called == []
+
+
+def test_runner_makes_no_rate_limit_calls_when_the_pump_never_draws_a_bar(
+        env_factory, monkeypatch):
+    # config says bar, but the pump found no tty / too few rows: no bar, no calls
+    from tandem import ratelimit
+    env = env_factory(active="claude")
+    called = []
+    monkeypatch.setitem(ratelimit.DEFAULT_FETCHERS, "claude", lambda: called.append(1))
+    monkeypatch.setitem(ratelimit.DEFAULT_FETCHERS, "codex", lambda: called.append(1))
+
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
+        frame.on_bar(False)
+        time.sleep(0.2)
+        return 0
+
+    monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
+    runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink()).run()
+    assert called == []
+
+
+def test_runner_halts_the_poll_when_the_bar_drops(env_factory, monkeypatch):
+    from tandem import ratelimit
+    env = env_factory(active="claude")
+    calls = {"n": 0}
+
+    def fetch():
+        calls["n"] += 1
+        return [ratelimit.Window("7d", 12)]
+
+    monkeypatch.setitem(ratelimit.DEFAULT_FETCHERS, "claude", fetch)
+    monkeypatch.setitem(ratelimit.DEFAULT_FETCHERS, "codex", fetch)
+
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
+        frame.on_bar(True)
+        assert _wait_for(lambda: calls["n"] >= 2)
+        frame.on_bar(False)
+        assert _wait_for(lambda: not any(
+            t.name == "tandem-ratelimit" and t.is_alive() for t in threading.enumerate()))
+        return 0
+
+    monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
+    runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink()).run()
+
+
+def test_runner_pokes_the_poller_when_a_response_lands(env_factory, monkeypatch):
+    """The tail thread sees the active transcript grow; a change in the usage
+    text means a response just landed, so the account figures get refreshed
+    ahead of the interval."""
+    import functools
+
+    from tandem import ratelimit
+    env = env_factory(active="claude")
+    calls = {"n": 0}
+
+    def fetch():
+        calls["n"] += 1
+        return [ratelimit.Window("5h", 4)]
+
+    monkeypatch.setitem(ratelimit.DEFAULT_FETCHERS, "claude", fetch)
+    monkeypatch.setitem(ratelimit.DEFAULT_FETCHERS, "codex", lambda: None)
+    monkeypatch.setattr(runner, "RateLimitPoller",
+                        functools.partial(ratelimit.RateLimitPoller,
+                                          interval=3600, min_gap=0))
+
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
+        frame.on_bar(True)
+        assert _wait_for(lambda: calls["n"] == 1)
+        time.sleep(0.2)
+        assert calls["n"] == 1
+        with open(env.claude_shadow, "a") as f:
+            f.write(json.dumps({
+                "type": "assistant", "uuid": "a-1", "sessionId": "x",
+                "message": {"id": "m1", "role": "assistant",
+                            "content": [{"type": "text", "text": "hi"}],
+                            "usage": {"input_tokens": 10, "output_tokens": 5}},
+            }) + "\n")
+        assert _wait_for(lambda: calls["n"] >= 2, timeout=5)
+        return 0
+
+    monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
+    runner.InteractiveRunner(env.session, lambda st, se, so, tg: _Sink()).run()

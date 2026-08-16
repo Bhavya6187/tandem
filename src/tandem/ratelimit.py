@@ -48,7 +48,7 @@ def window_label(seconds: int) -> str:
 def _percent(value) -> int | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return max(0, min(100, int(value)))
+    return max(0, min(100, round(value)))
 
 
 def parse_claude(payload) -> list[Window]:
@@ -80,9 +80,10 @@ def parse_codex(payload) -> list[Window]:
             continue
         pct = _percent(win.get("used_percent"))
         secs = win.get("limit_window_seconds")
-        if pct is None or isinstance(secs, bool) or not isinstance(secs, int) or secs <= 0:
+        if (pct is None or isinstance(secs, bool)
+                or not isinstance(secs, (int, float)) or secs <= 0):
             continue
-        out.append(Window(window_label(secs), pct))
+        out.append(Window(window_label(int(secs)), pct))
     return out
 
 
@@ -97,19 +98,48 @@ CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CODEX_DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/"
 
 
-def _keychain_secret() -> str | None:
+class _SharedState:
+    """Poller state that outlives one poller. A tandem session runs one
+    `InteractiveRunner` per flip leg, each with its own poller; the account
+    is the same throughout, so the endpoint's backoff, the min-gap clock and
+    the last figures must carry across — or every flip is an immediate
+    fetch pair that ignores an in-flight 429, and the new leg's bar goes
+    blank until its first fetch returns."""
+
+    def __init__(self) -> None:
+        self.not_before: dict[str, float] = {}   # per-harness 429 backoff
+        self.last_refresh: float = float("-inf")
+        self.text: dict[str, str] = {}           # last published, per harness
+        self.keychain_dead: bool = False         # one failure and we stop asking
+
+
+_shared = _SharedState()
+
+
+def _keychain_secret_uncached() -> str | None:
     """Claude Code keeps its OAuth blob in the login keychain on macOS
-    (service `Claude Code-credentials`); elsewhere it is a file."""
-    if sys.platform != "darwin":
+    (service `Claude Code-credentials`); elsewhere it is a file. One
+    failure — the binary missing, a denied or timed-out (i.e. prompting)
+    ACL — latches the read off for the process: a keychain dialog every
+    60 s of an interactive session is not fail-quiet."""
+    if sys.platform != "darwin" or _shared.keychain_dead:
         return None
     try:
         proc = subprocess.run(
             ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
             capture_output=True, text=True, timeout=5, check=False,
+            stdin=subprocess.DEVNULL,   # never touch the raw-mode tty
         )
     except (OSError, subprocess.SubprocessError):
+        _shared.keychain_dead = True
         return None
-    return proc.stdout.strip() if proc.returncode == 0 else None
+    if proc.returncode != 0:
+        _shared.keychain_dead = True
+        return None
+    return proc.stdout.strip()
+
+
+_keychain_secret = _keychain_secret_uncached
 
 
 def claude_token() -> str | None:
@@ -175,10 +205,20 @@ class Throttled(Exception):
         self.retry_after = retry_after
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # urllib re-sends Authorization across redirects, cross-host included;
+    # these are fixed-URL calls, so any 3xx is simply a failed fetch
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
 def _get_json(url: str, headers: dict[str, str], timeout: float):
     req = urllib.request.Request(url, headers={"Accept": "application/json", **headers})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _opener.open(req, timeout=timeout) as resp:
             if resp.status != 200:
                 return None
             return json.load(resp)
@@ -240,13 +280,17 @@ DEFAULT_FETCHERS: dict[str, Callable[[], list[Window] | None]] = {
 
 
 class RateLimitPoller(threading.Thread):
-    """Owns the bar's rate-limit figures for every participant of a session:
-    fetches each harness's account limits on start, every `interval`
-    seconds after, and on `poke()` (a turn just landed) no more than once
-    per `min_gap`. Publishes into `state["limits"]` — harness id → bar text
-    ("" when unknown) — with a whole-dict replace, so the pump's read is
-    a single GIL-atomic slot fetch, same as the usage text. Credentials
-    are re-read on every fetch: both CLIs rotate their tokens in place."""
+    """Owns the bar's rate-limit figures for every participant of a session
+    leg: fetches each harness's account limits when the pump reports a bar
+    (`ensure_started`), every `interval` seconds after, and on `poke()` (a
+    turn just landed) — never more than once per `min_gap`, counted across
+    legs. Publishes into `state["limits"]` — harness id → bar text ("" when
+    unknown) — with a whole-dict replace, so the pump's read is a single
+    GIL-atomic slot fetch, same as the usage text; the last figures of the
+    previous leg are published at construction, so a fresh leg's bar never
+    blanks. Credentials are re-read on every fetch: both CLIs rotate their
+    tokens in place. `halt()` signals from any thread (the pump's drop path
+    included) without joining; `stop()` also joins."""
 
     def __init__(self, harnesses: list[str], state: dict, *,
                  fetchers: dict[str, Callable[[], list[Window] | None]] | None = None,
@@ -259,41 +303,53 @@ class RateLimitPoller(threading.Thread):
         self.min_gap = min_gap
         self._halt = threading.Event()
         self._wake = threading.Event()
-        self._last = float("-inf")
-        self._not_before: dict[str, float] = {}   # per-harness 429 backoff
+        self._start_lock = threading.Lock()
+        self._launched = False
+        self.state["limits"] = {h: _shared.text.get(h, "") for h in self.fetchers}
 
     def refresh(self) -> None:
         now = time.monotonic()
-        self._last = now
-        prev = self.state.get("limits") or {}
+        _shared.last_refresh = now
         out: dict[str, str] = {}
         for h, fetch in self.fetchers.items():
-            if now < self._not_before.get(h, 0.0):
-                out[h] = prev.get(h, "")   # still told not to ask: keep what we had
+            if now < _shared.not_before.get(h, 0.0):
+                out[h] = _shared.text.get(h, "")   # still told not to ask: keep what we had
                 continue
             try:
                 windows = fetch()
             except Throttled as exc:
-                self._not_before[h] = now + exc.retry_after
-                out[h] = prev.get(h, "")
+                _shared.not_before[h] = now + exc.retry_after
+                out[h] = _shared.text.get(h, "")
                 continue
             except Exception:
                 windows = None
             out[h] = format_windows(windows) if windows else ""
+        _shared.text.update(out)
         self.state["limits"] = out
 
     def poke(self) -> None:
-        if time.monotonic() - self._last >= self.min_gap:
+        if time.monotonic() - _shared.last_refresh >= self.min_gap:
             self._wake.set()
+
+    def ensure_started(self) -> None:
+        with self._start_lock:
+            if self._launched or self._halt.is_set():
+                return
+            self._launched = True
+        self.start()
 
     def run(self) -> None:
         while not self._halt.is_set():
-            self.refresh()
+            if time.monotonic() - _shared.last_refresh >= self.min_gap:
+                self.refresh()
             self._wake.wait(self.interval)
             self._wake.clear()
 
-    def stop(self) -> None:
+    def halt(self) -> None:
         self._halt.set()
         self._wake.set()
+
+    def stop(self) -> None:
+        self.halt()
         if self.is_alive() and threading.current_thread() is not self:
             self.join(timeout=1.0)

@@ -87,8 +87,8 @@ rate_limits = true   # poll each account's usage windows for the bar
 | --- | --- | --- |
 | `flip_key` | `"ctrl-]"` | The flip keybind, consumed by tandem (never forwarded). Accepts `ctrl-<char>` or a hex byte like `"0x1d"`; printable keys are rejected (they would swallow typing). The bar relabels itself to match (`ctrl-t` shows `^T flips`). |
 | `bar` | `true` | The one-line tab bar on the bottom terminal row, including the active slot's token stats. `false` hides it; the flip still works. |
-| `rate_limits` | `true` | Show each participant's account rate limits on its slot (`5h 4% 7d 41%` — percent *used* per window). Polled every 60 s and after each response from the same account endpoints `claude`'s `/usage` and `codex`'s `/status` call, with the credentials those CLIs already keep; these are tandem's only outbound network calls. `false` makes none of them; the figures also stay blank for API-key logins or when a fetch fails. |
 | `warm` | `true` | Overlap the two halves of a flip: the incoming harness starts booting the moment the flip fires (a mid-turn press waits for the turn boundary first), while the outgoing one is still shutting down. `false` gives fully serial flips — the boot only begins once the old harness is gone. Flips *into* opencode are always serial (its TUI must open after the last turn has landed in its database). |
+| `rate_limits` | `true` | Show each participant's account rate limits on its slot (`5h 4% 7d 41%` — percent *used* per window). Polled every 60 s and after each response from the same account endpoints `claude`'s `/usage` and `codex`'s `/status` call, with the credentials those CLIs already keep; these are tandem's only outbound network calls. `false` makes none of them; the figures also stay blank for API-key logins or when a fetch fails. |
 
 An unparseable value falls back to the default rather than failing the
 launch. If a terminal can't sustain the bar, tandem drops it for the rest
