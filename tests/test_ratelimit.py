@@ -497,3 +497,30 @@ def test_poller_stop_before_start_and_halt_are_safe():
     p.halt()             # signal without joining: safe from any thread
     p.stop()
     assert not p.is_alive()
+
+
+# -- review follow-ups -------------------------------------------------------
+
+
+def test_refresh_stops_between_fetches_once_halted():
+    # a halt landing while one harness's fetch is in flight must not be
+    # followed by a fresh credentialed call for the next harness
+    state = {}
+    calls = []
+    p = RateLimitPoller(["claude", "codex"], state, fetchers={
+        "claude": lambda: (calls.append("claude"), p.halt(), [Window("5h", 1)])[2],
+        "codex": lambda: (calls.append("codex"), [Window("7d", 2)])[1],
+    })
+    p.refresh()
+    assert calls == ["claude"]
+
+
+def test_retry_after_accepts_an_http_date():
+    from email.utils import format_datetime
+    from datetime import datetime, timedelta, timezone
+    when = datetime.now(timezone.utc) + timedelta(seconds=120)
+    secs = ratelimit._retry_after(format_datetime(when, usegmt=True))
+    assert 100 <= secs <= 121
+    # a date in the past means "now": fall back to the default rather than 0
+    past = datetime.now(timezone.utc) - timedelta(seconds=30)
+    assert ratelimit._retry_after(format_datetime(past, usegmt=True)) == ratelimit.DEFAULT_RETRY_AFTER

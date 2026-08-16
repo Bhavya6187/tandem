@@ -17,6 +17,8 @@ populated. Percentages are *used*, matching claude's `/usage`.
 
 from __future__ import annotations
 
+import datetime
+import email.utils
 import json
 import subprocess
 import sys
@@ -232,12 +234,20 @@ def _get_json(url: str, headers: dict[str, str], timeout: float):
 
 
 def _retry_after(value) -> float:
-    # delta-seconds only; the HTTP-date form is legal but not worth parsing
-    # for a cosmetic figure — the default backoff covers it
+    """Retry-After is delta-seconds or an HTTP-date; anything else, or a
+    date already past, takes the default backoff."""
+    if value is None:
+        return DEFAULT_RETRY_AFTER
     try:
         secs = float(value)
     except (TypeError, ValueError):
-        return DEFAULT_RETRY_AFTER
+        try:
+            when = email.utils.parsedate_to_datetime(str(value))
+        except (TypeError, ValueError):
+            return DEFAULT_RETRY_AFTER
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=datetime.timezone.utc)
+        secs = (when - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
     return secs if secs > 0 else DEFAULT_RETRY_AFTER
 
 
@@ -312,6 +322,11 @@ class RateLimitPoller(threading.Thread):
         _shared.last_refresh = now
         out: dict[str, str] = {}
         for h, fetch in self.fetchers.items():
+            if self._halt.is_set():
+                # halted mid-refresh (bar dropped, leg ending): no further
+                # credentialed calls; what was already fetched still lands
+                out[h] = _shared.text.get(h, "")
+                continue
             if now < _shared.not_before.get(h, 0.0):
                 out[h] = _shared.text.get(h, "")   # still told not to ask: keep what we had
                 continue

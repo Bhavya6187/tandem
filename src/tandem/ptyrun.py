@@ -231,7 +231,8 @@ def run_in_pty(
         if bar_on
         else None
     )
-    _report_bar(frame, bar_on)
+    if not bar_on:
+        _report_bar(frame, False)   # "on" is reported after the first paint
 
     adopted = child is not None and _is_alive(child)
     if not adopted:
@@ -369,6 +370,8 @@ def run_in_pty(
             except Exception:
                 pass   # child died in the gap: the liveness loop ends the pump
         paint()
+        if bar is not None:
+            _report_bar(frame, True)   # drawn for real: bytes are on the terminal
         # seeded from the state just painted, so an already-armed frame does
         # not draw a redundant repaint on the first iteration
         last_armed = frame.armed() if bar is not None else False

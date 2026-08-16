@@ -499,12 +499,24 @@ def test_pump_reports_the_bar_on_and_then_off_around_a_drop(monkeypatch):
     """The runner gates its rate-limit polls on the bar actually being drawn,
     which only the pump knows: it reports on at setup and off at a drop."""
     events = []
+    painted_before_report = []
+    pump = None
+
+    def on_bar(on):
+        events.append(on)
+        if on:
+            # something was already written to the terminal when we hear "on"
+            painted_before_report.append(any(b"\x1b[7m" in w for w in pump.writes))
+
     frame = FrameIO(flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False,
-                    on_bar=events.append)
+                    on_bar=on_bar)
     pump = _Pump(monkeypatch, frame=frame)
 
     def drive():
+        # `drive` runs after the first paint: on(True) was reported by then,
+        # and only then — a bar is "drawn" once bytes hit the terminal
         assert events == [True]
+        assert painted_before_report == [True]
         pump.feed(b"\x1b[1;24r")            # conflict: DECSTBM covers the bar row
         assert pump.await_clear()
 
