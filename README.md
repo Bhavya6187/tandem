@@ -46,10 +46,33 @@ tandem sessions    # find recent sessions across directories
 By default, tandem opens the first usable CLI in your configured order. Use
 `tandem --active codex` or `tandem --active opencode` to choose another.
 
+## What's new in 0.5
+
+**Rate-limit windows on the tab bar.** Every slot now shows its account's
+rate limits — percent used per window, labeled by window length — so you
+can see which subscription has room *before* you press Ctrl-]. The active
+slot also carries the model's live context and the session's input↑ /
+output↓ token totals:
+
+```text
+ claude ● 144k ctx · 7.6M↑ 312k↓ · 5h 4% 7d 41% │ codex ○ 7d 12% │ opencode ○   ^] flips
+```
+
+The figures come from the same account endpoints that `claude`'s `/usage`
+and `codex`'s `/status` call, using the credentials those CLIs already keep
+on disk, refreshed every minute and after each response. They are cosmetic
+by design: a failed fetch blanks the figure and never touches sync, and
+API-key logins and opencode show none. These polls are tandem's only
+network calls — set `rate_limits = false` under `[frame]` in
+`~/.tandem/config.toml` to turn them off. See
+[Configuration](https://github.com/Bhavya6187/tandem/blob/main/docs/configuration.md)
+for the status bar's other settings.
+
 ## Why tandem?
 
-- **Keep going when a model hits its limit.** Move to another CLI and
-  continue with the same files and conversation history.
+- **Keep going when a model hits its limit.** The tab bar shows each
+  account's rate-limit windows; move to another CLI and continue with the
+  same files and conversation history.
 - **Bring different models to the same problem.** Ask another CLI for a
   second opinion without copying a wall of context between terminals.
 - **Keep the native tools you already use.** Claude Code, Codex, and
