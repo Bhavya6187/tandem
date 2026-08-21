@@ -896,6 +896,32 @@ def test_a_locked_store_at_startup_degrades_to_the_pre_mixed_frame(
     )
 
 
+def test_a_locked_store_at_startup_still_stamps_the_frame_file(sess, monkeypatch):
+    """The degraded start runs no mixer either, so the hook has to be told.
+    Left saying `mixed`, the frame file makes it block and stash a routed
+    prompt nothing will ever pick up — and a `pending` leftover is cleared
+    *silently* at the next mixed start (only `dispatched` earns the preserved
+    note), so the prompt is destroyed after the user was told it went to
+    another harness."""
+    routefile.write_frame_state(sess.tandem_id, {"tab": "mixed",
+                                                 "focus": "claude",
+                                                 "routing_ok": True})
+    real_store, calls = flip.StateStore, []
+
+    def guarded(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:            # `_tab_state`'s open, and only it
+            raise sqlite3.OperationalError("database is locked")
+        return real_store(*a, **kw)
+
+    monkeypatch.setattr(flip, "StateStore", guarded)
+    log = []
+    flip.run_session(sess.tandem_id, None, run_harness=fake_runner(log))
+    assert log == ["claude"]           # the session still ran
+    assert routefile.read_frame_state(sess.tandem_id) == {
+        "tab": "harness", "focus": "", "routing_ok": False}
+
+
 def test_run_session_stamps_a_stale_frame_file_when_mixed_is_off(sess):
     """`[frame] mixed = false` with a leftover `tab: mixed` file on disk: the
     hook reads the file, not the config, and would keep stashing prompts for

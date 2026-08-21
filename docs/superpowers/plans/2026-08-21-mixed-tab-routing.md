@@ -1798,24 +1798,36 @@ git commit -m "feat: mixed-mode runner wiring (mixer, routed arm, injector)"
 
 **Behavior:**
 
-1. **`run_session`** builds the TabState once and threads it through:
+1. **`run_session`** builds the TabState once, in a helper (`_tab_state`), and threads it through:
 
 ```python
-    from .config import load_frame_config
-    from .tabs import TabState
+    def _tab_state(tandem_id: str) -> TabState | None:
+        with StateStore() as store:
+            session = store.get_session(tandem_id)
+            meta = store.get_meta(tandem_id) if session is not None else {}
+        if session is None:
+            return None
+        if not load_frame_config().mixed:
+            routefile.write_frame_state(
+                tandem_id, {"tab": "harness", "focus": "", "routing_ok": False})
+            return None
+        return TabState(session.participants, tab=meta.get("tab", "harness"),
+                        focus=meta.get("mixed_focus", ""))
 
-    with StateStore() as store:
-        session = store.get_session(tandem_id)
-        meta = store.get_meta(tandem_id) if session else {}
-    tabs = (TabState(session.participants,
-                     tab=meta.get("tab", "harness"),
-                     focus=meta.get("mixed_focus", ""))
-            if session is not None and load_frame_config().mixed else None)
+    # in run_session, inside the try that the resume-hint finally guards:
+    try:
+        tabs = _tab_state(tandem_id)
+    except Exception:
+        tabs = None
+        routefile.write_frame_state(
+            tandem_id, {"tab": "harness", "focus": "", "routing_ok": False})
 ```
 
    The default `run_harness` closure passes `tabs=tabs` and `inject=carry.pop("route", None)` into `InteractiveRunner`, and after the run stores `carry["route"] = r.route_request`. Injected test runners never see tabs (they replace `run_harness` wholesale) — existing tests unchanged.
 
-   Amended: when the session exists but `tabs is None` (`[frame] mixed = false`), overwrite the frame file once at startup with `routefile.write_frame_state(tandem_id, {"tab": "harness", "focus": "", "routing_ok": False})`. The hook reads that file, not the config, so a leftover `tab: "mixed"` from a run that had the tab on would keep it stashing prompts for a mixer that no longer runs. With `tabs` live the runner's mixer owns the file and the flip loop must not write it.
+   Amended (frame file): whenever this process will not run a mixer, the frame file must say harness. The hook reads that file, not the config, so a leftover `tab: "mixed"` would keep it stashing routed prompts with nothing to pick them up — and a `pending` leftover is cleared *silently* at the next mixed start (only `dispatched` earns the preserved note), destroying a prompt the user was told had gone elsewhere. Two branches reach that state and both must stamp it: `[frame] mixed = false` (in `_tab_state`), and the guard below. With `tabs` live the runner's mixer owns the file and the flip loop must not write it.
+
+   Amended (guard): `_tab_state` is the first store open in the process, before any handler, so a locked sqlite (a concurrent `tandem sub` holds its own) would escape as a traceback where every other store failure in `run_session` is a red one-liner. Wrap it: a session that cannot read its tab state degrades to the pre-mixed frame rather than dying. The stamp inside the guard is correct whichever way the unread config would have gone — mixed off is exactly what `_tab_state` writes, and mixed on still has no mixer this run — and `routefile._write_json` is best-effort, so it cannot raise back into the guard.
 
 2. **Meta persistence**: three points, all through the one `_persist_tabs(store, tandem_id, tabs)` helper (`set_meta` replaces the whole blob, so both keys always travel together).
 

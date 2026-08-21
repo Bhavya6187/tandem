@@ -108,6 +108,20 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
             # holds its own) must never be the reason a session is lost. The
             # loop's own store opens keep their existing error paths.
             tabs = None
+            # Degraded or not, this process runs no mixer, and the hook reads
+            # the frame file to decide whether to hold a prompt. A file left
+            # saying `mixed` would have it stash a routed prompt with nothing
+            # to pick it up — and a `pending` leftover is cleared silently at
+            # the next mixed start (only `dispatched` earns the preserved
+            # note), so the prompt is destroyed after the user was told it
+            # went elsewhere. The stamp is right whichever way the unreadable
+            # config would have gone: mixed off is exactly what `_tab_state`
+            # writes, and mixed on still has no mixer this run. Best-effort by
+            # construction (`routefile._write_json` swallows its own errors),
+            # so it cannot raise back into this guard.
+            routefile.write_frame_state(
+                tandem_id, {"tab": "harness", "focus": "",
+                            "routing_ok": False})
         code = _flip_loop(
             tandem_id, run_harness, _enter(tandem_id, run_harness), reports,
             carry, tabs=tabs,
