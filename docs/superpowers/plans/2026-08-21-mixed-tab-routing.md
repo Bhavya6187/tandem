@@ -1817,14 +1817,19 @@ git commit -m "feat: mixed-mode runner wiring (mixer, routed arm, injector)"
 
    Amended: when the session exists but `tabs is None` (`[frame] mixed = false`), overwrite the frame file once at startup with `routefile.write_frame_state(tandem_id, {"tab": "harness", "focus": "", "routing_ok": False})`. The hook reads that file, not the config, so a leftover `tab: "mixed"` from a run that had the tab on would keep it stashing prompts for a mixer that no longer runs. With `tabs` live the runner's mixer owns the file and the flip loop must not write it.
 
-2. **Meta persistence**: in the default `run_harness`, before constructing the runner:
+2. **Meta persistence**: three points, all through the one `_persist_tabs(store, tandem_id, tabs)` helper (`set_meta` replaces the whole blob, so both keys always travel together).
+
+   a. In the default `run_harness`, before constructing the runner:
 
 ```python
             if tabs is not None:
                 with StateStore() as s:
-                    s.set_meta(session.tandem_id,
-                               {"tab": tabs.tab, "mixed_focus": tabs.focus})
+                    _persist_tabs(s, session.tandem_id, tabs)
 ```
+
+   b. In `_switch`, after a successful `ops.switch_session` and `tabs.settle(new_active)` — the store there is already open (point 4).
+
+   c. Amended: in the default `run_harness` **again after `r.run()` returns**, in the same `finally` that reads `warm_child` / `route_request`. A run can move the tab without ever flipping — entering the mixed tab from the harness that already holds its focus is a *bar* move, so `_switch` never runs and (a) is stale by exactly that move. Without (c) a bar move followed by a plain exit is lost and `tandem resume` lands back in the harness tab the user explicitly left. Best-effort (`try/except Exception: pass`): it sits in a `finally`, and a raising store there would turn a clean exit into a failed launch and send the ladder off to boot a harness nobody asked for. A crash mid-run losing one bar move is accepted.
 
 3. **`_flip_loop`** passes `tabs` down (new parameter, default None) and `_switch` consumes it:
 

@@ -73,6 +73,23 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
                 # read here and only here: the runner joins the mixer thread
                 # before returning, so nothing can still be writing it.
                 carry["route"] = r.route_request
+                if tabs is not None:
+                    # Again, because the run may have moved the tab without
+                    # ever flipping: entering the mixed tab from the harness
+                    # that already holds its focus is a *bar* move, so
+                    # `_switch` never runs and the pre-run write above is
+                    # stale by exactly that move. Persisting here is what
+                    # makes `tandem resume` land back in the tab the user
+                    # was actually looking at. Best-effort on purpose: this
+                    # sits in a finally, and a locked store raising here
+                    # would turn a clean exit into a failed launch and send
+                    # the ladder off to boot a harness nobody asked for. One
+                    # lost bar move is the cheaper failure.
+                    try:
+                        with StateStore() as s:
+                            _persist_tabs(s, session.tandem_id, tabs)
+                    except Exception:
+                        pass
             reports[:] = r.reports
             return code, r.flip_requested
 
@@ -80,7 +97,17 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
     # finally: no failure inside the loop may cost the user their session.
     code = 1
     try:
-        tabs = _tab_state(tandem_id)
+        try:
+            tabs = _tab_state(tandem_id)
+        except Exception:
+            # A session that cannot read its tab state degrades to the
+            # pre-mixed frame rather than dying. This open is the only one
+            # that happens before the loop, so an escape here would be a
+            # traceback where every other store failure in this function is a
+            # red one-liner — and a locked sqlite (a concurrent `tandem sub`
+            # holds its own) must never be the reason a session is lost. The
+            # loop's own store opens keep their existing error paths.
+            tabs = None
         code = _flip_loop(
             tandem_id, run_harness, _enter(tandem_id, run_harness), reports,
             carry, tabs=tabs,

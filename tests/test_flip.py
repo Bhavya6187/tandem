@@ -743,6 +743,32 @@ def test_the_ladder_neither_retargets_nor_reinjects(sess3, monkeypatch):
     assert injected == [req, None]
 
 
+def test_the_ladder_settles_the_tab_on_whoever_launched(sess3, monkeypatch):
+    """Every rung of the ladder is a real switch, so every rung settles: the
+    tab must end up pointing at the harness that actually came up, not at the
+    target that refused."""
+    _flipping_switch(monkeypatch)
+    tabs = TabState(sess3.participants, tab="mixed", focus="claude")
+    assert tabs.routed("codex") is True
+    settled = []
+    real_settle = tabs.settle
+    tabs.settle = lambda new: settled.append(new) or real_settle(new)
+
+    def run_harness(session):
+        if session.active == "codex":
+            raise OSError("won't start")
+        return 0, False
+
+    flip._switch(sess3.tandem_id, run_harness, 0, carry=_carry(), to="codex",
+                 route=RouteRequest("codex", "", "do it", "claude", "→ codex"),
+                 tabs=tabs)
+    assert settled == ["codex", "opencode"]   # once per successful switch
+    assert tabs.tab == "mixed" and tabs.focus == "opencode"
+    with StateStore() as store:
+        assert store.get_meta(sess3.tandem_id) == {"tab": "mixed",
+                                                   "mixed_focus": "opencode"}
+
+
 def test_ladder_exhaustion_leaves_the_routed_prompt_on_disk(sess3, monkeypatch):
     """Nothing would start: the route file is still there (`dispatched`), so
     the next frame start surfaces the prompt instead of losing it."""
@@ -825,6 +851,49 @@ def test_run_session_threads_the_tab_state_and_the_route(sess, monkeypatch):
     with StateStore() as store:
         assert store.get_meta(sess.tandem_id) == {"tab": "mixed",
                                                   "mixed_focus": "codex"}
+
+
+def test_a_bar_move_survives_the_session_exit(sess, monkeypatch):
+    """Entering the mixed tab is a *bar* move: no flip, so `_switch` never
+    runs and nothing settles. Only the post-run persist can carry it to the
+    next `tandem resume` — without it the user comes back to the harness tab
+    they explicitly left."""
+
+    class Runner(FakeInteractiveRunner):
+        def run(self):
+            if self.session.active == "codex":
+                # what the pump does on the press: codex is last in the cycle
+                # and the focus is already here, so only the tab changes
+                assert self.tabs.press("codex").kind == "bar"
+            return super().run()
+
+    _fake_runner_session(monkeypatch, sess, [([], True), ([], False)],
+                         runner=Runner)
+    with StateStore() as store:
+        assert store.get_meta(sess.tandem_id) == {"tab": "mixed",
+                                                  "mixed_focus": "codex"}
+
+
+def test_a_locked_store_at_startup_degrades_to_the_pre_mixed_frame(
+    sess, capsys, monkeypatch
+):
+    """A concurrent `tandem sub` holds its own store. Reading the tab state
+    must never be the reason a session dies: no tab cycle beats no session."""
+    real_store, calls = flip.StateStore, []
+
+    def guarded(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:            # `_tab_state`'s open, and only it
+            raise sqlite3.OperationalError("database is locked")
+        return real_store(*a, **kw)
+
+    monkeypatch.setattr(flip, "StateStore", guarded)
+    log = []
+    code = flip.run_session(sess.tandem_id, None, run_harness=fake_runner(log))
+    assert (code, log) == (0, ["claude"])
+    assert f"to continue this session: tandem resume {sess.tandem_id}" in (
+        capsys.readouterr().out
+    )
 
 
 def test_run_session_stamps_a_stale_frame_file_when_mixed_is_off(sess):
