@@ -5,8 +5,10 @@ import threading
 
 import pytest
 
-from tandem import flip, paths
+from tandem import flip, paths, routefile
+from tandem.routefile import RouteRequest
 from tandem.state import StateStore
+from tandem.tabs import TabState
 
 
 class FakeMem:
@@ -23,6 +25,20 @@ def sess(tmp_path, monkeypatch):
         return store.create_session(str(tmp_path / "proj"), "claude",
                                     ["claude", "codex"],
                                     {"claude": "c-id", "codex": "x-id"})
+
+
+@pytest.fixture
+def sess3(tmp_path, monkeypatch):
+    """`sess` widened to three participants: the tab cycle and the routed
+    switch both need somewhere to go that is not simply "the other one"."""
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    with StateStore() as store:
+        return store.create_session(str(tmp_path / "proj"), "claude",
+                                    ["claude", "codex", "opencode"],
+                                    {"claude": "c-id", "codex": "x-id",
+                                     "opencode": "o-id"})
 
 
 def fake_runner(log, codes=None):
@@ -73,7 +89,7 @@ def test_resume_hint_prints_even_when_the_loop_raises(sess, capsys, monkeypatch)
     """The hint is the only place the id is shown, so it must survive an
     unexpected exception escaping the loop."""
 
-    def boom(tandem_id, run_harness, first, reports, carry):
+    def boom(tandem_id, run_harness, first, reports, carry, tabs=None):
         raise RuntimeError("terminal went away")
 
     monkeypatch.setattr(flip, "_flip_loop", boom)
@@ -237,11 +253,15 @@ class FakeInteractiveRunner:
     script: list = []
     seen: list = []
 
-    def __init__(self, session, sink_factory=None, adopt_child=None):
+    def __init__(self, session, sink_factory=None, adopt_child=None,
+                 tabs=None, inject=None):
         self.session = session
         self.reports = []
         self.flip_requested = False
         self.adopt_child = adopt_child
+        self.tabs = tabs
+        self.inject = inject
+        self.route_request = None   # the real runner's routed-flip out-attr
         self.warm_child = None   # the real runner's standby-out attribute
 
     def run(self):
@@ -463,8 +483,9 @@ def _adopting_runner(adopted, standby):
     its first run — the flip loop must carry that into the next run."""
 
     class Runner(FakeInteractiveRunner):
-        def __init__(self, session, sink_factory=None, adopt_child=None):
-            super().__init__(session, sink_factory)
+        def __init__(self, session, sink_factory=None, adopt_child=None,
+                     **kw):
+            super().__init__(session, sink_factory, **kw)
             adopted.append(adopt_child)
 
         def run(self):
@@ -584,3 +605,245 @@ def test_switch_ladder_tries_next_unvisited_then_falls_back(tmp_path, monkeypatc
     # ladder: codex (next), opencode (next unvisited), back to claude
     assert attempts == ["codex", "opencode", "claude"]
     assert flipped is False
+
+
+# -- mixed tab: routed switch, tab persistence, inject carry ------------------
+
+
+def _carry():
+    return {"standby": None, "reapers": []}
+
+
+def test_switch_honors_target_override(sess3, monkeypatch):
+    """`to` beats the cycle: from claude, next_active is codex, but a tab
+    press (or a routed request) aimed at opencode lands on opencode."""
+    _flipping_switch(monkeypatch)
+    log = []
+    code, flipped = flip._switch(sess3.tandem_id, fake_runner(log), 0,
+                                 to="opencode")
+    assert log == ["opencode"]
+    assert (code, flipped) == (0, False)
+    with StateStore() as store:
+        assert store.get_session(sess3.tandem_id).active == "opencode"
+
+
+def test_switch_settles_tabs_and_persists_meta(sess3, monkeypatch):
+    """The flip landed, so the pending move is spent and the tab/focus it
+    settled into is what the next process must start in."""
+    _flipping_switch(monkeypatch)
+    tabs = TabState(sess3.participants, tab="mixed", focus="claude")
+    assert tabs.routed("codex") is True
+    flip._switch(sess3.tandem_id, fake_runner([]), 0, to="codex", tabs=tabs)
+    assert tabs.tab == "mixed" and tabs.focus == "codex"
+    assert tabs.pending_target() == ""       # the move was consumed
+    with StateStore() as store:
+        assert store.get_meta(sess3.tandem_id) == {"tab": "mixed",
+                                                   "mixed_focus": "codex"}
+
+
+def test_switch_without_tabs_writes_no_meta(sess, monkeypatch):
+    """The pre-mixed frame is untouched: no tab state, no meta blob."""
+    _flipping_switch(monkeypatch)
+    flip._switch(sess.tandem_id, fake_runner([]), 0)
+    with StateStore() as store:
+        assert store.get_meta(sess.tandem_id) == {}
+
+
+def _model_standby(model, size=10, side="codex", cwd=""):
+    from tandem.warm import LaunchRecipe
+
+    class Standby:
+        recipe = LaunchRecipe(side=side, argv=[side],
+                              sentinel=paths.tandem_home() / "s",
+                              hook_extra=[], transcript=None, fresh=False,
+                              cwd=cwd, model=model)
+        shadow_size = size
+
+        def alive(self):
+            return True
+
+    return Standby()
+
+
+def test_standby_stale_when_route_model_differs(sess):
+    """A standby warmed without the routed turn's model pin would launch the
+    wrong thing — reject it before the shadow-size compare even runs."""
+    assert flip._standby_fresh(_model_standby("", cwd=sess.cwd), "codex",
+                               sess, FakeMem(),
+                               route_model="gpt-5.3-codex") is False
+
+
+def test_standby_fresh_when_route_model_matches(sess, monkeypatch):
+    import tandem.warm as warm
+
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 10)
+    standby = _model_standby("gpt-5.3-codex", cwd=sess.cwd)
+    assert flip._standby_fresh(standby, "codex", sess, FakeMem(),
+                               route_model="gpt-5.3-codex") is True
+    # and an unpinned flip never asks about the model at all
+    assert flip._standby_fresh(_model_standby("", cwd=sess.cwd), "codex",
+                               sess, FakeMem()) is True
+
+
+def test_routed_switch_reaps_a_standby_pinned_to_another_model(sess, monkeypatch):
+    """End to end through the gate: the route's model reaches `_standby_fresh`
+    from the `_switch` call site, so the wrong-model child is killed rather
+    than adopted."""
+    import tandem.warm as warm
+
+    _flipping_switch(monkeypatch)
+    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 10)
+    stale = FakeStandby(side="codex", size=10)
+    stale.recipe.model = ""
+    carry = dict(_carry(), standby=stale)
+    req = RouteRequest("codex", "gpt-5.3-codex", "do it", "claude", "→ codex")
+    flip._switch(sess.tandem_id, fake_runner([]), 0, carry=carry,
+                 to="codex", route=req)
+    for t in carry["reapers"]:
+        t.join(timeout=10)
+    assert stale.killed and carry["standby"] is None
+
+
+def test_route_carry_reaches_next_run(sess, monkeypatch):
+    """`_switch` puts the route back into the carry before `_try_enter`, so
+    the default `run_harness` pops it as the next run's inject."""
+    _flipping_switch(monkeypatch)
+    seen = []
+
+    def run_harness(session):
+        seen.append(carry.pop("route", None))
+        return 0, False
+
+    carry = _carry()
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
+    flip._switch(sess.tandem_id, run_harness, 0, carry=carry,
+                 to="codex", route=req)
+    assert seen == [req]
+
+
+def test_the_ladder_neither_retargets_nor_reinjects(sess3, monkeypatch):
+    """A refused target must not be re-targeted, and the prompt meant for it
+    must not be typed into whoever answers instead — the injector's target
+    check is the second line of defence, this is the first."""
+    _flipping_switch(monkeypatch)
+    injected, attempts = [], []
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
+
+    def run_harness(session):
+        attempts.append(session.active)
+        injected.append(carry.pop("route", None))
+        if session.active == "codex":
+            raise OSError("won't start")
+        return 0, False
+
+    carry = _carry()
+    flip._switch(sess3.tandem_id, run_harness, 0, carry=carry, to="codex",
+                 route=req)
+    assert attempts == ["codex", "opencode"]
+    assert injected == [req, None]
+
+
+def test_ladder_exhaustion_leaves_the_routed_prompt_on_disk(sess3, monkeypatch):
+    """Nothing would start: the route file is still there (`dispatched`), so
+    the next frame start surfaces the prompt instead of losing it."""
+    _flipping_switch(monkeypatch)
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex",
+                       state="dispatched")
+    routefile.write_route(sess3.tandem_id, req)
+
+    def run_harness(session):
+        raise OSError("won't start")
+
+    code, flipped = flip._switch(sess3.tandem_id, run_harness, 0,
+                                 carry=_carry(), to="codex", route=req)
+    assert flipped is False
+    assert routefile.read_route(sess3.tandem_id) == req
+
+
+def test_flip_loop_prefers_the_press_over_a_stale_route(sess3, monkeypatch):
+    """The press owns the pending slot (`TabState.routed` is a claim), so a
+    stranded route request cannot retarget it. The route still rides along —
+    the injector's target check is what keeps the prompt off the wrong
+    harness."""
+    _flipping_switch(monkeypatch)
+    tabs = TabState(sess3.participants)
+    assert tabs.press("claude").target == "codex"     # the user's own press
+    stale = RouteRequest("opencode", "", "stale", "claude", "→ opencode")
+    carry = dict(_carry(), route=stale)
+    log = []
+    flip._flip_loop(sess3.tandem_id, fake_runner(log), (0, True), [], carry,
+                    tabs=tabs)
+    assert log == ["codex"]
+    assert carry["route"] is stale     # carried, for the injector to refuse
+
+
+def test_flip_loop_falls_back_to_the_routes_target(sess3, monkeypatch):
+    """With no pending move of its own (the mixer's claim was cleared, or the
+    tab cycle is off) the route names the target."""
+    _flipping_switch(monkeypatch)
+    req = RouteRequest("opencode", "", "do it", "claude", "→ opencode")
+    log = []
+    flip._flip_loop(sess3.tandem_id, fake_runner(log), (0, True), [],
+                    dict(_carry(), route=req))
+    assert log == ["opencode"]
+
+
+class _MixedRunner(FakeInteractiveRunner):
+    """FakeInteractiveRunner that routes on its first run, the way the mixer
+    thread does: claim the tab slot, then publish the request."""
+
+    route = None
+    seen_inject: list = []
+
+    def __init__(self, session, sink_factory=None, adopt_child=None,
+                 tabs=None, inject=None):
+        super().__init__(session, sink_factory, adopt_child, tabs, inject)
+        _MixedRunner.seen_inject.append(inject)
+
+    def run(self):
+        route = _MixedRunner.route
+        if route is not None and self.tabs is not None \
+                and self.tabs.routed(route.target):
+            self.route_request = route
+            _MixedRunner.route = None
+        return super().run()
+
+
+def test_run_session_threads_the_tab_state_and_the_route(sess, monkeypatch):
+    """The whole loop through `run_session`'s own closure: restore the tab
+    from meta, hand it and the route to the runner, persist what it settled
+    into."""
+    with StateStore() as store:
+        store.set_meta(sess.tandem_id, {"tab": "mixed",
+                                        "mixed_focus": "claude"})
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
+    _MixedRunner.route, _MixedRunner.seen_inject = req, []
+    seen = _fake_runner_session(monkeypatch, sess, [([], True), ([], False)],
+                                runner=_MixedRunner)
+    assert seen == ["claude", "codex"]
+    assert _MixedRunner.seen_inject == [None, req]   # delivered to its target
+    with StateStore() as store:
+        assert store.get_meta(sess.tandem_id) == {"tab": "mixed",
+                                                  "mixed_focus": "codex"}
+
+
+def test_run_session_stamps_a_stale_frame_file_when_mixed_is_off(sess):
+    """`[frame] mixed = false` with a leftover `tab: mixed` file on disk: the
+    hook reads the file, not the config, and would keep stashing prompts for
+    a mixer that no longer runs."""
+    routefile.write_frame_state(sess.tandem_id, {"tab": "mixed",
+                                                 "focus": "claude",
+                                                 "routing_ok": True})
+    (paths.tandem_home() / "config.toml").write_text("[frame]\nmixed = false\n")
+    flip.run_session(sess.tandem_id, None, run_harness=fake_runner([]))
+    assert routefile.read_frame_state(sess.tandem_id) == {
+        "tab": "harness", "focus": "", "routing_ok": False}
+
+
+def test_run_session_leaves_the_frame_file_to_the_mixer_when_mixed_is_on(sess):
+    """With the tab cycle live the runner's mixer owns that file; a second
+    writer in the flip loop would fight it."""
+    seeded = {"tab": "mixed", "focus": "claude", "routing_ok": True}
+    routefile.write_frame_state(sess.tandem_id, seeded)
+    flip.run_session(sess.tandem_id, None, run_harness=fake_runner([]))
+    assert routefile.read_frame_state(sess.tandem_id) == seeded

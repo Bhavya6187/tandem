@@ -1815,6 +1815,8 @@ git commit -m "feat: mixed-mode runner wiring (mixer, routed arm, injector)"
 
    The default `run_harness` closure passes `tabs=tabs` and `inject=carry.pop("route", None)` into `InteractiveRunner`, and after the run stores `carry["route"] = r.route_request`. Injected test runners never see tabs (they replace `run_harness` wholesale) — existing tests unchanged.
 
+   Amended: when the session exists but `tabs is None` (`[frame] mixed = false`), overwrite the frame file once at startup with `routefile.write_frame_state(tandem_id, {"tab": "harness", "focus": "", "routing_ok": False})`. The hook reads that file, not the config, so a leftover `tab: "mixed"` from a run that had the tab on would keep it stashing prompts for a mixer that no longer runs. With `tabs` live the runner's mixer owns the file and the flip loop must not write it.
+
 2. **Meta persistence**: in the default `run_harness`, before constructing the runner:
 
 ```python
@@ -1831,14 +1833,19 @@ git commit -m "feat: mixed-mode runner wiring (mixer, routed arm, injector)"
         _clear_screen()
         ...
         route = carry.pop("route", None) if carry else None
-        to = ""
-        if tabs is not None:
-            to = tabs.pending_target()
-        if route is not None:
-            to = route.target
+        to = tabs.pending_target() if tabs is not None else ""
+        to = to or (route.target if route is not None else "")
         code, flip = _switch(tandem_id, run_harness, code, carry=carry,
                              to=to, route=route, tabs=tabs)
 ```
+
+   The pending slot wins, not the route (amended): `TabState.routed` is a
+   *claim*, so in the normal routed flow the mixer already owns the slot and
+   the two agree. They differ only when a stale or stranded `route_request`
+   coexists with a fresh user press — and then the press must win. The route
+   still rides the carry into the next run, where `_deliver_inject`'s target
+   check turns it into `inject_failed` + the preserved-prompt note instead of
+   a prompt typed into a harness the user chose for something else.
 
 4. **`_switch`** grows `to: str = ""`, `route=None`, `tabs=None`:
    - Target selection: `target = to or session.next_active(old)`; the visited-ladder loop is unchanged (it advances past refusals; a refused routed target falls back through the cycle exactly like a refused Ctrl-] target — the injector's target check from Task 10 keeps the prompt from landing on the wrong harness).

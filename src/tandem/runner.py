@@ -734,7 +734,19 @@ class InteractiveRunner:
         # adopted child (the recipe it actually booted under), at launch time
         # otherwise: rebuilding for an adopted child could disagree with what
         # is already running.
-        recipe = self.adopt_child.recipe if adopting else build_launch(session, active)
+        #
+        # A routed turn's model is pinned here and nowhere else: the pin is
+        # argv, so the only moment it can be applied is the launch. Only for
+        # the harness the route actually named — a ladder that landed
+        # somewhere else must launch that harness the way it would have
+        # launched anyway (the injector keeps the prompt instead of typing
+        # it in).
+        recipe = (self.adopt_child.recipe if adopting
+                  else build_launch(session, active,
+                                    model=(self.inject.model
+                                           if self.inject is not None
+                                           and self.inject.target == active
+                                           else "")))
         _flip_debug(f"run-start side={active} adopting={adopting}")
         transcript = recipe.transcript
         sentinel = recipe.sentinel
@@ -904,6 +916,14 @@ class InteractiveRunner:
         # mention on the way out. A note printed as a sync error sends people
         # hunting a failure that never happened.
         notes: list[str] = []
+        if (self.inject is not None and self.inject.model
+                and self.inject.target == active and not recipe.model):
+            # `recipe.model` is what was launched, never what was asked for:
+            # an adapter with no launch-time model flag returns no argv and
+            # the pin silently evaporates. Say so — the turn is about to run
+            # on a model the user did not pick.
+            notes.append(f"{active} cannot pin a model at launch —"
+                         " running its default")
 
         def on_wait_cancelled() -> None:
             # monitor thread, after an armed wait was toggled off. The

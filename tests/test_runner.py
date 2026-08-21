@@ -1216,14 +1216,14 @@ def test_a_slow_recipe_build_does_not_delay_the_termination_ladder(
     build_done = threading.Event()
     real_build = runner_mod.build_launch
 
-    def slow_build(session, side):
+    def slow_build(session, side, model=""):
         if side != "codex":
-            return real_build(session, side)   # the active side's own launch
+            return real_build(session, side, model)  # the active side's launch
         order.append("build-start")
         release_build.wait(timeout=1)
         order.append("build-done")
         build_done.set()
-        return real_build(session, side)
+        return real_build(session, side, model)
 
     def terminate(self, soft, **kwargs):
         order.append("ladder")
@@ -2209,3 +2209,54 @@ def test_tabs_none_leaves_the_frame_and_the_files_pre_mixed(env_factory,
     assert not any(t.name == "tandem-mixer" and t.is_alive()
                    for t in threading.enumerate())
     assert routefile.read_frame_state(env.session.tandem_id) is None
+
+
+def _argv_and_reports(env, monkeypatch, **kw):
+    """One run with the pty stubbed out; returns (argv, runner)."""
+    calls = {}
+    monkeypatch.setattr(runner, "TranscriptWatcher", _QuietWatcher)
+    monkeypatch.setattr(
+        runner, "run_in_pty",
+        lambda argv, cwd=None, **kwargs: calls.update(argv=argv) or 0,
+    )
+    r = runner.InteractiveRunner(env.session, _null_sink, **kw)
+    assert r.run() == 0
+    return calls["argv"], r
+
+
+def test_routed_inject_pins_the_model_at_launch(env_factory, monkeypatch):
+    """The runner builds the launch, so a routed turn's model has to reach
+    `build_launch` from the inject the flip loop carried in."""
+    env = env_factory(active="claude")
+    req = RouteRequest("claude", "haiku", "do it", "codex", "→ claude",
+                       state="dispatched")
+    argv, r = _argv_and_reports(env, monkeypatch, inject=req)
+    assert argv[argv.index("--model") + 1] == "haiku"
+    assert not any("cannot pin a model" in line for line in r.reports)
+
+
+def test_inject_for_another_target_pins_nothing(env_factory, monkeypatch):
+    """The ladder landed somewhere the route never asked for: launch that
+    harness the way it would have launched anyway (the injector then keeps
+    the prompt instead of typing it in here)."""
+    env = env_factory(active="claude")
+    req = RouteRequest("codex", "gpt-5.3-codex", "do it", "claude", "→ codex",
+                       state="dispatched")
+    argv, _ = _argv_and_reports(env, monkeypatch, inject=req)
+    assert "--model" not in argv
+
+
+def test_a_model_the_harness_cannot_pin_is_reported(env_factory, monkeypatch):
+    """`build_launch` records what was launched, never the intent — so an
+    adapter with no launch-time model flag yields recipe.model == "" and the
+    user is told the turn is running the harness's default."""
+    from tandem.harness.claude_code import ClaudeCodeAdapter
+
+    env = env_factory(active="claude")
+    monkeypatch.setattr(ClaudeCodeAdapter, "model_argv", lambda self, m: [])
+    req = RouteRequest("claude", "haiku", "do it", "codex", "→ claude",
+                       state="dispatched")
+    argv, r = _argv_and_reports(env, monkeypatch, inject=req)
+    assert "--model" not in argv
+    assert any("claude cannot pin a model at launch — running its default"
+               in line for line in r.reports)

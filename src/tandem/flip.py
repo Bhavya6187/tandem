@@ -13,9 +13,11 @@ import threading
 
 import click
 
-from . import ops
+from . import ops, routefile
+from .config import load_frame_config
 from .harness import get_adapter
 from .state import StateStore
+from .tabs import TabState
 
 
 def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
@@ -34,6 +36,11 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
     # standbys the gate rejected — the flip does not wait for them, this
     # function's finally does.
     carry: dict = {"standby": None, "reapers": []}
+    # The tab cycle, built once below and carried across every run in this
+    # process. None is the pre-mixed frame; the closure reads it at call
+    # time, so it is assigned inside the try (a store that will not open must
+    # still reach the resume hint).
+    tabs = None
     if run_harness is None:
 
         def run_harness(session):
@@ -45,8 +52,16 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
                 # would leave the hidden harness with nothing to reap it.
                 _kill(adopt)
                 adopt = None
+            if tabs is not None:
+                # Every flip is a fresh process in the same terminal, so the
+                # tab the user is in only survives through the store. Written
+                # before the harness takes over the terminal: from here on
+                # this process is not coming back until the run ends.
+                with StateStore() as s:
+                    _persist_tabs(s, session.tandem_id, tabs)
             r = InteractiveRunner(session, sink_factory=sink_factory,
-                                  adopt_child=adopt)
+                                  adopt_child=adopt, tabs=tabs,
+                                  inject=carry.pop("route", None))
             try:
                 code = r.run()
             finally:
@@ -54,6 +69,10 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
                 # its kept child back: the carry is the only reference left,
                 # and this function's own finally is what reaps it.
                 carry["standby"] = r.warm_child
+                # Where the run's mixer wants to go, if anywhere. Safe to
+                # read here and only here: the runner joins the mixer thread
+                # before returning, so nothing can still be writing it.
+                carry["route"] = r.route_request
             reports[:] = r.reports
             return code, r.flip_requested
 
@@ -61,9 +80,10 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
     # finally: no failure inside the loop may cost the user their session.
     code = 1
     try:
+        tabs = _tab_state(tandem_id)
         code = _flip_loop(
             tandem_id, run_harness, _enter(tandem_id, run_harness), reports,
-            carry,
+            carry, tabs=tabs,
         )
     finally:
         # Hint first: state bookkeeping must not be able to swallow it.
@@ -88,6 +108,40 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
             for thread in carry.get("reapers", ()):
                 thread.join(timeout=10)
     return code
+
+
+def _tab_state(tandem_id: str) -> TabState | None:
+    """This session's tab cycle, or None when the mixed tab is off.
+
+    Built once per process and restored from session meta, because a flip is
+    a fresh run of this function in the same terminal: without the meta blob
+    every flip would drop the user back into the harness tab.
+
+    The `mixed = false` branch is not a plain "return None". The prompt hook
+    reads the *frame file*, not the config, and a file left by an earlier run
+    that had the tab on still says `tab: "mixed"` — so the hook would keep
+    stashing prompts for a mixer that no longer runs. Stamping it back to the
+    harness tab once at startup is what keeps that from swallowing turns.
+    (With the tab on, the runner's mixer owns that file and this must not
+    write it: two writers, one file.)"""
+    with StateStore() as store:
+        session = store.get_session(tandem_id)
+        meta = store.get_meta(tandem_id) if session is not None else {}
+    if session is None:
+        return None
+    if not load_frame_config().mixed:
+        routefile.write_frame_state(
+            tandem_id, {"tab": "harness", "focus": "", "routing_ok": False})
+        return None
+    return TabState(session.participants, tab=meta.get("tab", "harness"),
+                    focus=meta.get("mixed_focus", ""))
+
+
+def _persist_tabs(store: StateStore, tandem_id: str, tabs: TabState) -> None:
+    """The tab cycle's durable half. `set_meta` replaces the whole blob, so
+    both keys always travel together — writing one alone would drop the
+    other."""
+    store.set_meta(tandem_id, {"tab": tabs.tab, "mixed_focus": tabs.focus})
 
 
 def _kill(standby) -> None:
@@ -133,7 +187,7 @@ def _clear_screen() -> None:
 
 def _flip_loop(
     tandem_id: str, run_harness, first: tuple[int, bool], reports: list[str],
-    carry: dict | None = None,
+    carry: dict | None = None, tabs: TabState | None = None,
 ) -> int:
     """Keep flipping (Ctrl-]) until a session ends without requesting one.
     No stop between flips — this is the frame's tab feel. A failed flip
@@ -146,7 +200,8 @@ def _flip_loop(
     not cost the user a sync-failure warning.
 
     `carry` is the pre-warmed standby's ride from one run to the next; None
-    for callers with no warmup (injected test runners)."""
+    for callers with no warmup (injected test runners). `tabs` is the tab
+    cycle, None when the mixed tab is off."""
     code, flip = first
     while flip:
         _clear_screen()
@@ -154,7 +209,19 @@ def _flip_loop(
             for line in reports:
                 click.echo(line)
             reports.clear()   # this session's news, reported once
-        code, flip = _switch(tandem_id, run_harness, code, carry=carry)
+        route = carry.pop("route", None) if carry else None
+        # The pending slot is the user's to own — `TabState.routed` is a
+        # claim, not an assignment — so it outranks the route request. In the
+        # normal routed flow the two say the same thing: the mixer only built
+        # a request after claiming the slot for it. They differ only when a
+        # stale or stranded request meets a fresh press, and then the press
+        # wins: the route still rides along, and the injector's target check
+        # turns it into a kept-not-delivered note instead of a prompt typed
+        # into a harness the user chose for something else.
+        to = tabs.pending_target() if tabs is not None else ""
+        to = to or (route.target if route is not None else "")
+        code, flip = _switch(tandem_id, run_harness, code, carry=carry,
+                             to=to, route=route, tabs=tabs)
     return code
 
 
@@ -180,17 +247,27 @@ def _report_switch(old: str, new_active: str, problems, mem) -> None:
         )
 
 
-def _standby_fresh(standby, new_active: str, session, mem) -> bool:
+def _standby_fresh(standby, new_active: str, session, mem,
+                   route_model: str = "") -> bool:
     """Attach-time freshness: the standby is only usable if nothing
-    material changed since it was spawned. Alive + right side + shadow
-    byte size equals the spawn snapshot + memory sync did nothing.
+    material changed since it was spawned. Alive + right side + the model
+    the incoming turn asked for + shadow byte size equals the spawn
+    snapshot + memory sync did nothing.
     Validation problems deliberately do NOT gate: a live standby already
     resumed successfully, which is stronger evidence than the validator;
-    they are still reported."""
+    they are still reported.
+
+    `route_model` is the routed turn's pin, "" for an ordinary flip. It is
+    compared against what the standby was actually *launched* with
+    (`recipe.model` records the launch, never the intent), so a child warmed
+    for the same side but the wrong model is stale: it is already running,
+    and no pin can be applied after the fact."""
     if standby is None or not standby.alive():
         return False
     if standby.recipe.side != new_active:
         return False
+    if route_model and standby.recipe.model != route_model:
+        return False   # warmed without the pinned model: wrong launch
     if mem.actions:
         return False
     from . import warm
@@ -200,7 +277,9 @@ def _standby_fresh(standby, new_active: str, session, mem) -> bool:
 
 def _switch(
     tandem_id: str, run_harness, code: int, visited: set[str] | None = None,
-    carry: dict | None = None,
+    carry: dict | None = None, to: str = "",
+    route: routefile.RouteRequest | None = None,
+    tabs: TabState | None = None,
 ) -> tuple[int, bool]:
     """Flip to the next harness in cycle order and re-enter it. Returns the
     exit code to carry forward (unchanged if the flip itself failed, 1 if
@@ -227,7 +306,19 @@ def _switch(
     next run will actually launch. A stale one is killed here and nowhere
     else — the runner silently ignores an adoptee it cannot use, so a wrong
     side that survived this gate would leak — but killed on a reaper thread,
-    since the ladder's own timeouts would otherwise be charged to the flip."""
+    since the ladder's own timeouts would otherwise be charged to the flip.
+
+    `to` names the harness to land on instead of the next one in cycle order
+    — a tab press that skips ahead, or a routed turn's target. `route` is
+    that turn's request: it decides the model the standby gate demands, and
+    rides the carry into the next run as its inject. `tabs` is the tab cycle,
+    settled here (and persisted) once the flip has actually landed.
+
+    The ladder is deliberately blind to all three. A target that refuses to
+    launch falls back through the cycle exactly as a Ctrl-] target does, and
+    the recursion carries neither `to` (never re-target a refusal) nor
+    `route` (never type a prompt into whoever answers instead) — the route
+    survives on disk and the next frame start surfaces it."""
     with StateStore() as store:
         session = store.get_session(tandem_id)
         if session is None:
@@ -240,7 +331,7 @@ def _switch(
             return code, False
         old = session.active
         visited = visited or set()
-        target = session.next_active(old)
+        target = to or session.next_active(old)
         while target in visited and target != old:
             target = session.next_active(target)
         if target in visited:
@@ -254,17 +345,29 @@ def _switch(
                 f"switch failed: {type(exc).__name__}: {exc}", fg="red", err=True
             )
             return code, False
+        if tabs is not None:
+            # The flip landed, so the pending move is spent: the tab and
+            # focus it settles into are what the next run must start in, and
+            # the store is the only thing that carries them there.
+            tabs.settle(new_active)
+            _persist_tabs(store, tandem_id, tabs)
     _report_switch(old, new_active, problems, mem)
     if carry is not None:
         standby = carry.get("standby")
         if standby is not None:
             from .runner import _flip_debug
 
-            fresh = _standby_fresh(standby, new_active, session, mem)
+            fresh = _standby_fresh(
+                standby, new_active, session, mem,
+                route_model=route.model if route is not None else "")
             _flip_debug(f"standby-gate side={new_active} fresh={fresh}")
             if not fresh:
                 carry["standby"] = None
                 _reap(standby, carry)   # off-thread: the flip must not wait
+        # The next run's inject, popped by the default `run_harness`. Written
+        # even when None: a ladder rung that inherited a leftover would type
+        # the prompt into a harness the route never named.
+        carry["route"] = route
     code, flip, launched = _try_enter(tandem_id, run_harness)
     if launched:
         return code, flip
@@ -285,7 +388,8 @@ def _switch(
         click.secho("no harness would start — staying where we were.",
                     fg="red", err=True)
         return code, False
-    return _switch(tandem_id, run_harness, code, visited=visited, carry=carry)
+    return _switch(tandem_id, run_harness, code, visited=visited, carry=carry,
+                   tabs=tabs)
 
 
 def _try_enter(tandem_id: str, run_harness) -> tuple[int, bool, bool]:
