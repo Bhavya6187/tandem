@@ -194,3 +194,20 @@ def test_frame_rate_limits_garbage_falls_back_to_default(tmp_path, monkeypatch):
     # string must read as the default, not as "on"
     _write_config(tmp_path, monkeypatch, '[frame]\nrate_limits = "off"\n')
     assert load_frame_config().rate_limits is True
+
+
+def test_frame_mixed_defaults_true(tmp_path, monkeypatch):
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+    assert load_frame_config().mixed is True
+
+
+def test_frame_mixed_off(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, "[frame]\nmixed = false\n")
+    assert load_frame_config().mixed is False
+
+
+def test_frame_mixed_garbage_falls_back_to_default(tmp_path, monkeypatch):
+    # the mixed tab joins the flip cycle; only a real bool may drop it, so a
+    # stray string reads as the default rather than as "off"
+    _write_config(tmp_path, monkeypatch, '[frame]\nmixed = "nope"\n')
+    assert load_frame_config().mixed is True
