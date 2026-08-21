@@ -48,8 +48,8 @@ class LaunchRecipe:
 def build_launch(session: PairedSession, side: str, model: str = "") -> LaunchRecipe:
     """The argv/sentinel/transcript for launching `side` of this session.
     Extracted from InteractiveRunner.run() so the warm fire and the runner
-    build launches identically; argv order is interactive + model pin +
-    user [args] + hook extras (tests pin the order).
+    build launches identically; argv order is interactive + user [args] +
+    model pin + hook extras (tests pin the order).
 
     `model` is a best-effort pin: a harness that cannot pin one at launch
     returns no argv for it, and the recipe records "" — what was actually
@@ -67,9 +67,11 @@ def build_launch(session: PairedSession, side: str, model: str = "") -> LaunchRe
     sentinel = paths.tandem_home() / "tmp" / f"{session.tandem_id}-{side}.turn"
     sentinel.parent.mkdir(parents=True, exist_ok=True)
     argv = adapter.interactive_argv(sid, fresh)
+    argv += load_harness_args(side)
+    # After the user's [args], not before: an explicit per-turn route pin
+    # outranks a static config entry, and both CLIs take the last flag.
     if model:
         argv += adapter.model_argv(model)
-    argv += load_harness_args(side)
     hook_extra = adapter.hook_argv_extra(sentinel)
     argv += hook_extra
     return LaunchRecipe(

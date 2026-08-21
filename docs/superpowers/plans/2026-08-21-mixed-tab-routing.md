@@ -808,13 +808,13 @@ Expected: new tests FAIL (`AttributeError: model_argv` / `TypeError: build_launc
 ```python
 def build_launch(session: PairedSession, side: str, model: str = "") -> LaunchRecipe:
 ```
-after `argv = adapter.interactive_argv(sid, fresh)` insert:
+after `argv += load_harness_args(side)` — i.e. *after* the user's `[harness] args` and before `hook_argv_extra`, making the order interactive + user [args] + model pin + hook extras — insert:
 
 ```python
     if model:
         argv += adapter.model_argv(model)
 ```
-and pass `model=model if model and adapter.model_argv(model) else ""` into the `LaunchRecipe(...)` constructor (recipe.model records what was actually pinned, so the standby freshness gate in Task 10 compares real launch state, not intent).
+The pin goes last of the two because an explicit per-turn route pin (`@codex:gpt-5.3`) is more specific intent than a static `[harness] args` entry, and both CLIs take the last occurrence of a flag: placed earlier, a user's `args = ["--model", …]` would silently defeat the route. Pass `model=model if model and adapter.model_argv(model) else ""` into the `LaunchRecipe(...)` constructor (recipe.model records what was actually pinned, so the standby freshness gate in Task 10 compares real launch state, not intent).
 
 - [ ] **Step 4: Run to verify pass**: `uv run pytest tests/test_warm.py -q`
 

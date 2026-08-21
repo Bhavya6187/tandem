@@ -246,3 +246,18 @@ def test_build_launch_appends_model_argv(env_factory):
     assert r.argv[i + 1] == "haiku"
     plain = build_launch(env.session, "claude")
     assert plain.model == "" and "--model" not in plain.argv
+
+
+def test_build_launch_model_pin_outranks_user_args(env_factory):
+    # An explicit per-turn route pin (@claude:haiku) is more specific intent
+    # than a static [claude] args entry, and both CLIs take the LAST flag —
+    # so the pin has to land after the user's args, or config silently wins.
+    env = env_factory(active="claude")
+    (paths.tandem_home() / "config.toml").write_text(
+        '[claude]\nargs = ["--model", "other"]\n'
+    )
+    r = build_launch(env.session, "claude", model="haiku")
+    last = len(r.argv) - 1 - r.argv[::-1].index("--model")
+    assert r.argv[last + 1] == "haiku"
+    # ...and still ahead of the hook extras, which stay the tail of argv
+    assert r.hook_extra and r.argv[-len(r.hook_extra):] == r.hook_extra
