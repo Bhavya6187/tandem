@@ -30,8 +30,11 @@ flip, compatibility ranges, and where your data lives. (Back to the
   from your shell, targeting the directory's most recently used session.
 - **The frame: flip without leaving.** Ctrl-] (configurable, consumed at
   the PTY layer, ignored inside bracketed paste) flips the screen to the
-  next harness in the cycle: pressed mid-turn it arms and fires at the
-  turn boundary (press again to cancel — the bar shows the armed state),
+  next harness in the cycle — and then to one more stop, the mixed tab,
+  which shows the harness it is focused on and adds `@target` prompt
+  routing (`[frame] mixed = false` drops it back to the harnesses alone;
+  see the README). Pressed mid-turn it arms and fires at the turn boundary
+  (press again to cancel — the bar shows the armed state),
   then tandem exits the fronted CLI gracefully (quit keystrokes, then
   SIGTERM, then a bounded SIGKILL), lets the incremental sync settle,
   rotates roles, and resumes the next side — with no stop in between. If

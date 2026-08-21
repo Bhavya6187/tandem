@@ -80,9 +80,21 @@ prompt:
 
 Any unrecognized `@token` is literal prompt text and passes through
 untouched — `@src/foo.py …` still works as a claude file mention inside the
-mixed tab. If a routed model differs from the target harness's current
-model, tandem injects the harness's own `/model` command before the prompt
-(see verification items).
+mixed tab.
+
+**Amended during implementation (model pinning).** This spec planned to
+inject the target harness's own in-session `/model` command ahead of the
+prompt. The shipped mechanism is stronger and needs no per-harness command
+syntax: a routed flip relaunches the target anyway, so the pin is applied as
+**launch argv** (`adapter.model_argv(model)`, appended after the user's
+`[harness] args` so an explicit per-turn pin outranks a static config entry)
+and the launch recipe records what was actually launched rather than what
+was asked for. Two consequences the `/model` design did not have. A harness
+with no launch-time model flag cannot be pinned at all — `recipe.model`
+comes back empty and the run says so on exit instead of silently answering
+on the wrong model — and the pin is not per-turn: it lasts for that harness
+process, i.e. until the next relaunch. Verification item 3 (in-session
+`/model` syntax per harness) is therefore moot for v1.
 
 ## Dispatch pipeline
 
@@ -104,10 +116,10 @@ For one routed turn, focus harness X, target Y:
    machinery X→Y — drain X, sync shadows, fast-forward Y's cursor
    (echo-suppression invariant), fire-at-flip warm pipelining. Same code
    path as Ctrl-]; routing adds no new flip logic.
-5. **Inject.** Once Y is live: if a model was specified and differs from Y's
-   current model, write Y's `/model <name>` command first, then write the
-   prompt body + Enter to Y's pty. Y runs the turn natively; the existing
-   sync layer propagates it to the shadows. Focus becomes Y.
+5. **Inject.** Once Y is live: write the prompt body + Enter to Y's pty. Y
+   runs the turn natively; the existing sync layer propagates it to the
+   shadows. Focus becomes Y. (A specified model is not injected here — it
+   rode step 4's relaunch as argv; see the grammar section's amendment.)
 
 New code is limited to: the hook's prefix branch, the route-request file
 format, and the frame's route-request → flip + inject state machine.

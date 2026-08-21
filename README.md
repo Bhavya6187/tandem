@@ -85,7 +85,7 @@ Three forms are recognized, and only as the prompt's first token:
 | Form | Example | What it does |
 | --- | --- | --- |
 | `@<cli>` | `@claude`, `@codex`, `@opencode` | Runs the turn there, on the model that CLI is already set to |
-| `@<model>` | `@opus`, `@haiku`, `@gpt-5.6-luna` | Picks the CLI that owns the model and pins the model for that turn |
+| `@<model>` | `@opus`, `@haiku`, `@gpt-5.6-luna` | Picks the CLI that owns the model and starts it on that model |
 | `@<cli>:<model>` | `@codex:gpt-5.6-luna`, `@opencode:anthropic/claude-sonnet-5` | The explicit form, for names the short ones can't reach |
 
 Claude models are named by family alias (`opus`, `sonnet`, `haiku`, `fable`)
@@ -113,6 +113,12 @@ syncs back to the other CLIs as usual, so the next turn can go anywhere. A
 routed flip always starts the target fresh, so it costs a full start-up
 rather than the pipelined one behind a plain **Ctrl-]**.
 
+The model rides that launch, so it is not a one-turn setting: the CLI stays
+on it for as long as that process lives — until you flip away and back, or
+route to it again naming something else. A CLI that can't take a model on
+its command line can't be pinned at all, and tandem says so on exit rather
+than answering on a model you didn't pick.
+
 The tab bar carries the tab you are in. In the harness tabs the mixed tab
 waits at the end of the row as an idle `mixed ○` slot. Inside it, that slot
 is the active one — it holds the focus CLI's name and stats, and the harness
@@ -136,9 +142,10 @@ so the prefix is never swallowed without warning:
 `tandem doctor` reports which CLIs are set up. Routing *to* a CLI always
 works — only routing *from* one needs the hook.
 
-If a routed prompt can't be delivered — the target never got ready, or the
-flip landed elsewhere — tandem keeps it and says so on exit, quoting it back
-so you can re-type it in the target. Nothing is dropped silently.
+If a routed prompt doesn't make it — the target never got ready, the flip
+landed elsewhere, or you cancelled the flip it was riding — tandem says so
+on exit and quotes the prompt back in full, so you can re-type it where you
+meant it to go. Nothing is dropped silently.
 
 The mixed tab remembers the CLI it last showed. The first time you enter it,
 it adopts the one you came from, and `tandem resume` restores both the tab

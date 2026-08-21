@@ -80,7 +80,7 @@ windows (percent used), so you can see which subscription has room
 before you flip:
 
 ```
- claude ● 144k ctx · 7.6M↑ 312k↓ · 5h 4% 7d 41% │ codex ○ 7d 12% │ opencode ○   ^] flips
+ claude ● 144k ctx · 7.6M↑ 312k↓ · 5h 4% 7d 41% │ codex ○ 7d 12% │ opencode ○ │ mixed ○   ^] flips
 ```
 
 ## 🔒 Local, private, no lock-in.
