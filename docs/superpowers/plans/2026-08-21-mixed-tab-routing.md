@@ -1546,7 +1546,7 @@ This is the largest task. Read `InteractiveRunner._run` end to end before editin
 
    The monitor's `wait_until_safe` cancel path must also clear TabState's pending move: pass `on_cancelled=tabs.cancelled` — implement by extending the `cancelled=lambda: ...` check no further; instead, in `FlipMonitor._run`, after `if not ok:` add a callback hook `self.on_wait_cancelled` (a plain attribute like `on_flip_decided`, default None, called inside try/except-pass). The runner assigns `monitor.on_wait_cancelled = tabs.cancelled` when tabs is not None.
 
-2. **Mixer thread.** Started right after `monitor.start()` when `tabs is not None`, stopped in the `finally` (set its own stop event before `monitor.stop()`), daemon, name `tandem-mixer`:
+2. **Mixer thread.** Started right after `monitor.start()` when `tabs is not None`, stopped in the `finally` (set its own stop event before `monitor.stop()`, then `join(timeout=2)` after it — a tick still in flight would otherwise arm state on a run that has already exited; `mixer_stop.wait` returns the moment the event is set, so the join costs only the in-flight tick), daemon, name `tandem-mixer`:
 
 ```python
         def mixer_thread() -> None:
@@ -1615,7 +1615,17 @@ This is the largest task. Read `InteractiveRunner._run` end to end before editin
             deadline = time.time() + 30
             ready = False
             while time.time() < deadline and not stop.is_set():
-                if hasattr(adapter, "session_status") and active_sid:
+                # claude BY NAME, not by `hasattr(adapter, "session_status")`:
+                # opencode has that method and it answers off the transcript
+                # sqlite (unknown sid → "waiting"; a resumed session's last
+                # row → "waiting"), which says nothing about whether the TUI
+                # has drawn and can take a paste. Believing it either writes
+                # before the child is attached (every routed opencode turn
+                # fails) or pastes into a TUI that is not listening and then
+                # clears the route file, destroying the prompt. The hasattr
+                # idiom stays correct for the FLIP gate in `_run`, where a
+                # stale "waiting" only flips a beat early.
+                if active == "claude" and active_sid:
                     try:
                         if adapter.session_status(active_sid) == "waiting":
                             ready = True
@@ -1624,8 +1634,8 @@ This is the largest task. Read `InteractiveRunner._run` end to end before editin
                         pass
                     time.sleep(0.3)
                 else:
-                    # no status registry (codex/opencode): fixed settle
-                    # delay from spawn — verified in the live gate
+                    # no usable readiness signal (codex/opencode): fixed
+                    # settle delay from spawn — verified in the live gate
                     time.sleep(2.5)
                     ready = True
                     break

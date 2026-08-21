@@ -664,10 +664,20 @@ class InteractiveRunner:
         Daemon is the containment — a wedged write can cost the injection,
         never tandem's exit — and nothing else waits on this thread.
 
-        Readiness has two shapes. A harness with a session registry (claude)
-        is asked directly and the prompt goes in the moment it says
-        "waiting". One without (codex, opencode) gets a fixed settle delay
-        from spawn, which is all the signal there is.
+        Readiness has two shapes, and the split is claude-or-not rather than
+        has-a-probe-or-not. Claude keeps a per-live-session registry whose
+        "waiting" really does mean an idle composer, so it is asked directly
+        and the prompt goes in the moment it answers. Everyone else takes a
+        fixed settle delay from spawn: opencode *has* a `session_status`,
+        but it reads the transcript sqlite — an unknown session id and a
+        resumed session's last row both answer "waiting" — which says
+        nothing about whether the TUI has drawn and can take a paste.
+        Trusting it would either fail every routed opencode turn (write
+        before attach) or, worse, land the paste in a TUI that is not
+        listening and then clear the route file, destroying the prompt. (The
+        `hasattr(adapter, "session_status")` idiom stays right for the flip
+        gate in `_run`, where a stale "waiting" only means flipping a beat
+        early — a safe answer there, not here.)
 
         Failure never destroys the prompt: the route file stays on disk and
         `inject_failed` turns it into an exit note, so the user can see what
@@ -681,7 +691,9 @@ class InteractiveRunner:
         deadline = time.time() + 30
         ready = False
         while time.time() < deadline and not stop.is_set():
-            if hasattr(adapter, "session_status") and active_sid:
+            # claude only, by name: see the docstring — opencode's probe
+            # answers "waiting" off transcript state and would be believed
+            if active == "claude" and active_sid:
                 try:
                     if adapter.session_status(active_sid) == "waiting":
                         ready = True
@@ -690,7 +702,7 @@ class InteractiveRunner:
                     pass    # a raising probe is not an answer; keep asking
                 time.sleep(0.3)
             else:
-                # no status registry (codex/opencode): fixed settle
+                # no usable readiness signal (codex/opencode): fixed settle
                 # delay from spawn — verified in the live gate
                 time.sleep(2.5)
                 ready = True
@@ -1032,9 +1044,11 @@ class InteractiveRunner:
             threading.Thread(target=injector_thread, name="tandem-inject",
                              daemon=True).start()
         monitor.start()   # before the try: stop() on an unstarted thread raises
+        mixer: threading.Thread | None = None
         if tabs is not None:
-            threading.Thread(target=mixer_thread, name="tandem-mixer",
-                             daemon=True).start()
+            mixer = threading.Thread(target=mixer_thread, name="tandem-mixer",
+                                     daemon=True)
+            mixer.start()
         try:
             # A release that returns None means the discard reader still owns
             # the fd, so there is nothing safe to hand over: run_in_pty spawns
@@ -1062,6 +1076,15 @@ class InteractiveRunner:
             # and `how` are assigned as the ladder finishes, so a read before
             # the join races the flip thread.
             monitor.stop()
+            if mixer is not None:
+                # The mixer must be *finished*, not merely told to stop:
+                # a tick still in flight could arm state on a run that has
+                # already exited — set route_request after the flip decision
+                # is read below, refill tabs.pending, or rewrite the frame
+                # file the next run is about to own. `mixer_stop.wait`
+                # returns the moment the event is set, so this costs at most
+                # the in-flight tick's file ops.
+                mixer.join(timeout=2)
             thread.join(timeout=10)
             self.flip_requested = monitor.flip_requested
             # after flip_requested settles: only a flip keeps the child.

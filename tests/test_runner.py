@@ -1855,6 +1855,39 @@ def test_deliver_inject_waits_for_a_waiting_status(env_factory, monkeypatch):
     assert r.inject_failed is False
 
 
+def test_deliver_inject_never_believes_opencodes_status(tmp_path, monkeypatch):
+    """opencode HAS a `session_status`, and it is the wrong question: it
+    reads the transcript sqlite (unknown sid and a resumed session's last
+    row both answer "waiting"), which says nothing about whether the TUI has
+    drawn. Believing it would either write before the child is attached or
+    paste into a TUI that is not listening and then delete the route file.
+    So the gate is claude-by-name and opencode takes the fixed settle."""
+    from conftest import Env3
+    from tandem.harness.opencode import OpencodeAdapter
+    from tandem.ptyrun import PtyControl
+
+    env = Env3(tmp_path, monkeypatch)
+    adapter = OpencodeAdapter()
+    assert hasattr(adapter, "session_status")     # the trap this guards
+    asked = []
+    monkeypatch.setattr(OpencodeAdapter, "session_status",
+                        lambda self, sid: asked.append(sid) or "waiting")
+    slept = []
+    monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
+    req = RouteRequest("opencode", "", "do it", "claude", "→ opencode",
+                       state="dispatched")
+    routefile.write_route(env.session.tandem_id, req)
+    control, child = PtyControl(), _InjectChild()
+    control.attach(child)
+    r = runner.InteractiveRunner(env.session, sink_factory=None, inject=req)
+    r._deliver_inject("opencode", env.session.native_id("opencode"), adapter,
+                      control, threading.Event())
+    assert asked == []                    # the probe is never consulted
+    assert slept[0] == 2.5                # the fixed settle from spawn
+    assert child.written == b"\x1b[200~do it\x1b[201~\r"
+    assert r.inject_failed is False
+
+
 def test_deliver_inject_wrong_target_keeps_file(env_factory):
     from tandem.ptyrun import PtyControl
 
@@ -1979,6 +2012,10 @@ def test_mixer_publishes_the_frame_state(env_factory, monkeypatch):
     runner.InteractiveRunner(env.session, _null_sink, tabs=tabs).run()
     assert routefile.read_frame_state(env.session.tandem_id) == {
         "tab": "mixed", "focus": "claude", "routing_ok": True}
+    # and the thread is finished, not merely told to stop: a tick landing
+    # after run() could arm a flip nobody is left to take
+    assert not any(t.name == "tandem-mixer" and t.is_alive()
+                   for t in threading.enumerate())
 
 
 def test_mixer_startup_surfaces_and_clears_a_leftover_dispatch(env_factory,
@@ -2040,8 +2077,11 @@ def test_mixer_startup_leaves_the_route_this_run_is_delivering(env_factory,
 
     monkeypatch.setattr(runner, "TranscriptWatcher", _QuietWatcher)
     monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
-    # no injector is started here (the thread is not what is under test); the
-    # startup sweep must still keep its hands off the file it would deliver
+    # `inject` does start a real injector thread — it sleeps out its 2.5s
+    # settle past the end of this test and its write then fails (nothing is
+    # attached to the faked pty), which is harmless: a failed write never
+    # touches the file. What is under test is the mixer's startup sweep,
+    # which must keep its hands off the route this run is there to deliver.
     r = runner.InteractiveRunner(env.session, _null_sink, tabs=tabs, inject=req)
     r.run()
     assert routefile.read_route(env.session.tandem_id) is not None
