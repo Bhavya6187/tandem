@@ -115,6 +115,50 @@ def test_terminate_survives_reap_race_mid_ladder():
     assert c.terminate([b"\x04"], soft_timeout=0.2, term_timeout=0.2) == "soft"
 
 
+def test_control_write_delivers_to_attached_child():
+    c = PtyControl()
+    child = _StubChild()
+    c.attach(child)
+    assert c.write(b"hello") is True
+    assert child.writes == [b"hello"]
+
+
+def test_control_write_without_child_is_false():
+    # and without waiting for an attach: the caller owns its own readiness
+    # gate, so write must not stall the thread it is called on
+    c = PtyControl()
+    started = time.time()
+    assert c.write(b"x") is False
+    assert time.time() - started < 0.5
+
+
+def test_control_write_dead_child_is_false():
+    c = PtyControl()
+    child = _StubChild()
+    child.kill_externally()
+    c.attach(child)
+    assert c.write(b"x") is False
+    assert child.writes == []
+
+
+def test_control_write_unqueryable_child_is_false():
+    # same reap race terminate() survives: a child we can no longer ask about
+    # is a child that is gone, not an exception out of write()
+    c = PtyControl()
+    c.attach(_ReapedChild())
+    assert c.write(b"x") is False
+
+
+def test_control_write_swallows_raise():
+    class _BadWriteChild(_StubChild):
+        def write(self, data):
+            raise OSError("gone")
+
+    c = PtyControl()
+    c.attach(_BadWriteChild())
+    assert c.write(b"x") is False
+
+
 def test_child_dims_reserves_bottom_row_when_bar_on():
     assert _child_dims(40, 120, bar_on=True) == (39, 120)
     assert _child_dims(40, 120, bar_on=False) == (40, 120)

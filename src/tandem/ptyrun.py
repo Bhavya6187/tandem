@@ -96,6 +96,21 @@ class PtyControl:
         self._child = child
         self._attached.set()
 
+    def write(self, data: bytes) -> bool:
+        """Best-effort write to the attached child from any thread — the
+        injector's road into a routed target. No attach wait: a caller with
+        nothing attached yet has its own readiness gate, and blocking here
+        would put an arbitrary stall on that thread. False for every
+        failure; the caller owns retry/report."""
+        child = self._child
+        if child is None or not _is_alive(child):
+            return False
+        try:
+            child.write(data)
+        except Exception:
+            return False
+        return True
+
     def terminate(
         self,
         soft: list[bytes],
