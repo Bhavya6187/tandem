@@ -65,6 +65,36 @@ def test_routed_sets_pending_and_settle_moves_focus():
     assert t.tab == "mixed" and t.focus == "codex"
 
 
+def test_routed_declines_when_a_press_owns_the_pending_slot():
+    """The pump records a press before it arms the monitor, so a mixer tick
+    can land on an unarmed monitor with a press already pending. The claim
+    must lose there — overwriting would retarget the user's flip and double-
+    toggle the monitor."""
+    t = TabState(PARTS)
+    t.press("claude")                       # user armed a flip to codex
+    v = t.version
+    assert t.routed("opencode") is False
+    assert t.pending_target() == "codex"    # untouched
+    assert t.version == v                   # nothing visible changed
+
+
+def test_press_cancels_a_pending_that_came_from_routed():
+    t = TabState(PARTS, tab="mixed", focus="claude")
+    assert t.routed("codex") is True
+    m = t.press("claude")
+    assert m.kind == "cancel"
+    assert t.pending_target() == ""
+    assert t.tab == "mixed" and t.focus == "claude"
+
+
+def test_routed_from_the_harness_tab_stays_in_the_harness_tab():
+    t = TabState(PARTS, tab="harness")
+    assert t.routed("codex") is True
+    assert t.pending.tab == "harness"
+    t.settle("codex")
+    assert t.tab == "harness" and t.focus == ""
+
+
 def test_cancelled_clears_pending():
     t = TabState(PARTS, tab="mixed", focus="claude")
     t.routed("codex")

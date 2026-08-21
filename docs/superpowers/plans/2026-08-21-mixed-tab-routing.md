@@ -842,7 +842,7 @@ git commit -m "feat: launch-time model pinning and prompt-hook capability per ad
   - `TabState(participants: list[str], tab: str = "harness", focus: str = "")` with:
     - `.tab: str`, `.focus: str`, `.version: int` (bumped on every visible change; the mixer thread persists on version change)
     - `.press(active: str) -> TabMove` — one Ctrl-] press; applies bar moves immediately, records flip moves as pending, returns a cancel move when one was pending.
-    - `.routed(target: str) -> None` — records a routed flip as pending (mixed tab stays mixed).
+    - `.routed(target: str) -> bool` — *claims* the pending slot for a routed flip, keeping the current tab; returns False when a user press already owns it (the caller must then leave the route request pending and retry, never overwrite — see Task 10's route-pickup branch).
     - `.pending_target() -> str` — the pending flip's target, `""` when none (caller falls back to `session.next_active`).
     - `.settle(new_active: str) -> None` — commit the pending move after the flip landed; in the mixed tab, focus follows the new active.
     - `.cancelled() -> None` — clear pending (monitor wait was cancelled).
@@ -1041,9 +1041,14 @@ class TabState:
         self.version += 1
         return move
 
-    def routed(self, target: str) -> None:
-        self.pending = TabMove("flip", MIXED, target, target=target)
+    def routed(self, target: str) -> bool:
+        if self.pending is not None:
+            return False   # a user press already owns the pending slot; the
+                           # caller retries next tick — never overwrite, never
+                           # double-toggle the monitor
+        self.pending = TabMove("flip", self.tab, target, target=target)
         self.version += 1
+        return True
 
     def pending_target(self) -> str:
         p = self.pending
@@ -1546,10 +1551,16 @@ This is the largest task. Read `InteractiveRunner._run` end to end before editin
                         if req.target == active or req.target not in \
                                 session.participants:
                             routefile.clear_route(session.tandem_id)
-                        else:
+                        elif tabs.routed(req.target):
+                            # the claim gates everything below it: a False
+                            # claim means a user press owns the pending slot
+                            # (recorded before the pump arms the monitor, so
+                            # the guards above can't see it), and the route
+                            # request stays pending for the next tick rather
+                            # than retargeting the press and double-toggling
+                            # the monitor
                             routefile.mark_dispatched(session.tandem_id, req)
                             self.route_request = req
-                            tabs.routed(req.target)
                             monitor.flip_pressed()
                 mixer_stop.wait(0.25)
 ```
@@ -1723,7 +1734,7 @@ def test_deliver_inject_wrong_target_keeps_file(tmp_path, monkeypatch):
 (`_pickup_route` and `_deliver_inject` signatures per the extraction note
 below; `threading` and `StateStore` imports at the top of the test file.)
 
-Extraction contract that makes this testable WITHOUT a pty: the mixer loop's route-pickup branch becomes `InteractiveRunner._pickup_route(active: str, monitor) -> None` (behavior point 2's inner `if` block verbatim — reads/marks the route file, sets `self.route_request`, calls `tabs.routed`, arms `monitor.flip_pressed`), and the injector's readiness+write step becomes `InteractiveRunner._deliver_inject(active: str, active_sid, adapter, control, stop) -> None` (behavior point 5's body from the target check onward, using `self.session.tandem_id` for the route-file calls). The thread bodies are then one-liners around these methods.
+Extraction contract that makes this testable WITHOUT a pty: the mixer loop's route-pickup branch becomes `InteractiveRunner._pickup_route(active: str, monitor) -> None` (behavior point 2's inner `if` block verbatim — reads the route file, validates the target, claims the pending slot with `tabs.routed` and only on a successful claim marks the file dispatched, sets `self.route_request` and arms `monitor.flip_pressed`), and the injector's readiness+write step becomes `InteractiveRunner._deliver_inject(active: str, active_sid, adapter, control, stop) -> None` (behavior point 5's body from the target check onward, using `self.session.tandem_id` for the route-file calls). The thread bodies are then one-liners around these methods.
 
 - [ ] **Step 2: Run to verify failure**: `uv run pytest tests/test_runner.py -q`
 

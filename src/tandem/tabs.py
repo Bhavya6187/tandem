@@ -78,9 +78,32 @@ class TabState:
         self.version += 1
         return move
 
-    def routed(self, target: str) -> None:
-        self.pending = TabMove("flip", MIXED, target, target=target)
+    def routed(self, target: str) -> bool:
+        """Claim the pending slot for a routed flip; False when it's taken.
+
+        A claim, not an assignment, because the two writers arrive out of
+        step: `press` records the user's pending move on the pump thread
+        and the glue arms the monitor a beat *later*, so a mixer tick
+        landing in that window sees an unarmed monitor. Overwriting there
+        would retarget the user's flip and then arm a monitor the pump is
+        about to arm again — a double toggle that leaves the monitor
+        disarmed with the route file stuck "dispatched". Returning False
+        instead leaves the route request pending for the next tick.
+
+        The check-then-set is a few bytecodes wide, and `press` must stay
+        lock-free, so the residual race is accepted rather than locked
+        away: its worst case is the route request surviving until the next
+        Ctrl-] lands the routed flip.
+
+        The pending move keeps the *current* tab. Routing only happens in
+        the mixed tab, but a stray call from the harness tab must not drag
+        the user into mixed when the flip settles.
+        """
+        if self.pending is not None:
+            return False   # a user press owns the slot; retry next tick
+        self.pending = TabMove("flip", self.tab, target, target=target)
         self.version += 1
+        return True
 
     def pending_target(self) -> str:
         p = self.pending
