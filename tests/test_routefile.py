@@ -79,8 +79,20 @@ def test_write_failure_is_quiet(home):
     assert routefile.read_route("abc123") is None
 
 
-def test_unserializable_frame_state_is_quiet():
+def test_unserializable_frame_state_is_quiet(home):
     # the snapshot comes from the mixer thread; a bad value must degrade to
     # "no frame state" (which the hook reads as "not the mixed tab")
     routefile.write_frame_state("abc123", {"tab": object()})  # must not raise
     assert routefile.read_frame_state("abc123") is None
+    # serialization happens before the write, so a bad snapshot leaves
+    # nothing on disk at all — not even a scratch file
+    assert not (home / "tmp").exists()
+
+
+def test_write_leaves_no_scratch_file(home):
+    # nothing sweeps $TANDEM_HOME/tmp, so every write must clean up after
+    # itself — a stray scratch file would live there forever
+    routefile.write_route("abc123", REQ)
+    routefile.write_frame_state("abc123", {"tab": "mixed"})
+    assert sorted(p.name for p in (home / "tmp").iterdir()) == [
+        "abc123-frame.json", "abc123-route.json"]

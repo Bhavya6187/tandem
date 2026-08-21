@@ -11,21 +11,24 @@ and the tandem frame that owns the session.
   the stash is what makes the prompt unlosable); the frame flips it to
   `dispatched` at pickup so its own next run cannot re-arm on it; the
   injector deletes it once the prompt has landed in the target. A
-  `dispatched` file that outlives ROUTE_TTL is a routed prompt that never
-  landed — the runner surfaces it instead of silently dropping it.
+  `dispatched` file still on disk at the next frame start is a routed prompt
+  that never landed; the frame surfaces it there — but only while it is
+  within ROUTE_TTL, since that is the only window any reader here can see.
+  An older leftover is invisible to `read_route` and is cleared silently at
+  frame start rather than replayed into a stale session.
 
-Best-effort like pinstash: write-then-rename so a concurrent read never
-sees a torn entry, and every failure degrades to "no route" rather than
-raising into a hook or the frame."""
+Best-effort like pinstash: writes go through `util.write_file_atomic`
+(fsync + rename in the destination dir) so a concurrent read never sees a
+torn entry, and every failure degrades to "no route" rather than raising
+into a hook or the frame."""
 
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import asdict, dataclass
 
-from . import paths
+from . import paths, util
 
 ROUTE_TTL = 600
 
@@ -40,12 +43,6 @@ class RouteRequest:
     state: str = "pending"
 
 
-def _tmp_dir():
-    d = paths.tandem_home() / "tmp"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
 def _route_path(tandem_id: str):
     return paths.tandem_home() / "tmp" / f"{tandem_id}-route.json"
 
@@ -56,15 +53,11 @@ def _frame_path(tandem_id: str):
 
 def _write_json(path, obj: dict) -> None:
     try:
-        _tmp_dir()
-        # per-pid scratch name: hook and frame both write the route file, and
-        # a shared scratch name lets one truncate what the other is about to
-        # rename into place — a torn file reads as "no route", i.e. a lost
-        # prompt. Distinct names make the loser of a race a stale write, not
-        # a corrupt one.
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(obj))
-        os.replace(tmp, path)
+        # serialize first, so a bad snapshot leaves no file and no scratch
+        # file behind; write_file_atomic then does mkdir + fsync + rename
+        # under a random scratch name, which is what keeps the hook and the
+        # frame's mixer thread from clobbering each other mid-write
+        util.write_file_atomic(path, json.dumps(obj))
     # TypeError/ValueError: an unserializable snapshot must not raise into
     # the mixer thread that writes it — a missing file already means "not
     # the mixed tab", which is the safe default on the reading side too
