@@ -695,7 +695,19 @@ def hook_prompt_cmd() -> None:
     or not the mixed tab, no recognized prefix, or the target is the focus
     harness itself. The frame file's focus field names the harness the user
     is typing in; `session.active` may lag it by a beat mid-flip, so the
-    frame file is the authority here."""
+    frame file is the authority here.
+
+    The hook also has to prove the prompt was typed in THIS session: the
+    plugin is installed user-wide, so a second claude window opened in the
+    same directory runs this same hook against the same paired session — and
+    routing there would block that window's prompt only to inject it into the
+    tandem session's harness, in a terminal the user is not looking at. So
+    routing requires the payload's `session_id` to be exactly the focus
+    harness's native id. Every doubt fails OPEN to the native turn: no
+    session_id in the payload, a non-string one, no native id recorded for
+    the focus harness yet, or any mismatch — a prompt that runs natively in
+    the window it was typed in is always recoverable; one that vanishes into
+    another window is not."""
     try:
         from . import promptroute, routefile
 
@@ -712,6 +724,10 @@ def hook_prompt_cmd() -> None:
         if not frame or frame.get("tab") != "mixed":
             sys.exit(0)
         focus = frame.get("focus") or session.active
+        native = session.native_id(focus)
+        sid = payload.get("session_id")
+        if not native or not isinstance(sid, str) or sid != native:
+            sys.exit(0)   # another window, or an unidentifiable one
         got = promptroute.route_prompt(prompt, focus, session.participants)
         if got is None:
             sys.exit(0)
@@ -719,7 +735,16 @@ def hook_prompt_cmd() -> None:
         routefile.write_route(session.tandem_id, routefile.RouteRequest(
             target=decision.harness, model=decision.model, prompt=body,
             source=focus, reason=decision.reason))
-        if routefile.read_route(session.tandem_id) is None:
+        req = routefile.read_route(session.tandem_id)
+        # THIS request has to be the one on disk, not merely some request: a
+        # leftover from an earlier prompt is still inside the TTL, so a bare
+        # existence check would let it vouch for a write that failed on a
+        # disk fault — and the block would then destroy the typed prompt.
+        # `state` is deliberately not compared: the frame can pick the
+        # request up and flip it to "dispatched" between the write and this
+        # read, and demanding "pending" would turn a landed stash into an
+        # allow — the prompt would run here AND there.
+        if req is None or req.prompt != body or req.target != decision.harness:
             sys.exit(0)   # stash didn't land: allow the native turn
         click.echo(json.dumps({
             "decision": "block",

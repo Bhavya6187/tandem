@@ -1,6 +1,7 @@
 """The mixed tab's @-prefix grammar: what routes, and what passes through."""
 
 import json
+from dataclasses import replace
 
 from tandem import promptroute
 from tandem.promptroute import RouteDecision, parse_prefix, route_prompt
@@ -122,6 +123,14 @@ class TestCli:
         return click.testing.CliRunner().invoke(
             cli.main, ["hook-prompt"], input=json.dumps(payload))
 
+    def _typed(self, env, prompt, focus="claude", **extra):
+        """A prompt typed in the focus harness's own window: the hook only
+        routes when the payload's session_id is that harness's native id."""
+        payload = {"cwd": env.cwd, "prompt": prompt,
+                   "session_id": env.session.native_id(focus)}
+        payload.update(extra)
+        return self._run(payload)
+
     def _mixed(self, env, focus="claude"):
         from tandem import routefile
         routefile.write_frame_state(env.session.tandem_id,
@@ -130,20 +139,21 @@ class TestCli:
 
     def test_silent_without_session(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
-        r = self._run({"cwd": str(tmp_path), "prompt": "@codex hi there"})
+        r = self._run({"cwd": str(tmp_path), "prompt": "@codex hi there",
+                       "session_id": "whatever"})
         assert r.exit_code == 0 and r.output == ""
 
     def test_silent_outside_the_mixed_tab(self, env_factory):
         # paired, routable prompt, but no frame state: not the mixed tab
         env = env_factory(active="claude")
-        r = self._run({"cwd": env.cwd, "prompt": "@codex hi there"})
+        r = self._typed(env, "@codex hi there")
         assert r.exit_code == 0 and r.output == ""
 
     def test_blocks_and_stashes_in_the_mixed_tab(self, env_factory):
         from tandem import routefile
         env = env_factory(active="claude")
         self._mixed(env)
-        r = self._run({"cwd": env.cwd, "prompt": "@codex fix the test"})
+        r = self._typed(env, "@codex fix the test")
         assert r.exit_code == 0
         decision = json.loads(r.output)
         assert decision["decision"] == "block"
@@ -154,13 +164,28 @@ class TestCli:
         assert req.prompt == "fix the test" and req.state == "pending"
         assert req.source == "claude"
 
+    def test_stashes_the_resolved_model_pin(self, env_factory):
+        # the model half of the decision has to survive the CLI layer: the
+        # relaunch pins it on the target's argv, so a dropped pin silently
+        # runs the prompt on the wrong model
+        from tandem import routefile
+        env = env_factory(active="claude")
+        self._mixed(env, focus="codex")
+        r = self._typed(env, "@haiku summarize the diff", focus="codex")
+        assert r.exit_code == 0
+        assert "haiku" in json.loads(r.output)["reason"]
+        req = routefile.read_route(env.session.tandem_id)
+        assert req is not None and req.target == "claude"
+        assert req.model == "haiku" and req.source == "codex"
+        assert req.prompt == "summarize the diff"
+
     def test_frame_focus_beats_session_active(self, env_factory):
         # mid-flip the DB's `active` lags the frame; the frame file is the
         # authority, so @codex from a codex-focused tab must NOT route
         from tandem import routefile
         env = env_factory(active="claude")
         self._mixed(env, focus="codex")
-        r = self._run({"cwd": env.cwd, "prompt": "@codex keep going"})
+        r = self._typed(env, "@codex keep going", focus="codex")
         assert r.exit_code == 0 and r.output == ""
         assert routefile.read_route(env.session.tandem_id) is None
 
@@ -168,9 +193,45 @@ class TestCli:
         from tandem import routefile
         env = env_factory(active="claude")
         self._mixed(env)
-        r = self._run({"cwd": env.cwd, "prompt": "@claude hi there"})
+        r = self._typed(env, "@claude hi there")
         assert r.exit_code == 0 and r.output == ""
         assert routefile.read_route(env.session.tandem_id) is None
+
+    def test_foreign_window_is_silent(self, env_factory):
+        # a second claude window in the same directory runs this same hook
+        # against this same paired session: blocking there would inject the
+        # prompt into a terminal the user is not looking at
+        from tandem import routefile
+        env = env_factory(active="claude")
+        self._mixed(env)
+        r = self._typed(env, "@codex fix the test",
+                        session_id="22222222-2222-4222-8222-222222222222")
+        assert r.exit_code == 0 and r.output == ""
+        assert routefile.read_route(env.session.tandem_id) is None
+
+    def test_payload_without_session_id_is_silent(self, env_factory):
+        from tandem import routefile
+        env = env_factory(active="claude")
+        self._mixed(env)
+        r = self._run({"cwd": env.cwd, "prompt": "@codex fix the test"})
+        assert r.exit_code == 0 and r.output == ""
+        assert routefile.read_route(env.session.tandem_id) is None
+
+    def test_unrecorded_native_id_is_silent(self, env_factory):
+        # a harness whose minted id tandem has not captured yet: there is
+        # nothing to identify the window by, so doubt allows the native turn
+        from tandem import routefile
+        env = env_factory(active="claude")
+        blind = env.store.create_session(
+            env.cwd, "claude", ["claude", "codex"],
+            {"claude": None, "codex": "019faca1-0000-7000-8000-000000000002"})
+        routefile.write_frame_state(blind.tandem_id,
+                                    {"tab": "mixed", "focus": "claude",
+                                     "routing_ok": True})
+        r = self._run({"cwd": env.cwd, "prompt": "@codex fix the test",
+                       "session_id": "11111111-1111-4111-8111-111111111111"})
+        assert r.exit_code == 0 and r.output == ""
+        assert routefile.read_route(blind.tandem_id) is None
 
     def test_unstashable_route_allows_the_native_turn(self, env_factory,
                                                       monkeypatch):
@@ -180,13 +241,50 @@ class TestCli:
         env = env_factory(active="claude")
         self._mixed(env)
         monkeypatch.setattr(routefile, "write_route", lambda *a, **kw: None)
-        r = self._run({"cwd": env.cwd, "prompt": "@codex fix the test"})
+        r = self._typed(env, "@codex fix the test")
         assert r.exit_code == 0 and r.output == ""
+
+    def test_a_stale_route_file_cannot_vouch_for_a_failed_stash(
+            self, env_factory, monkeypatch):
+        # an earlier request still inside the TTL is exactly what makes a
+        # bare "some route file exists" check dangerous: it would certify a
+        # write that never landed, and the block would destroy this prompt
+        from tandem import routefile
+        env = env_factory(active="claude")
+        self._mixed(env)
+        routefile.write_route(env.session.tandem_id, routefile.RouteRequest(
+            target="codex", model="", prompt="an older prompt",
+            source="claude", reason="→ codex"))
+        monkeypatch.setattr(routefile, "write_route", lambda *a, **kw: None)
+        r = self._typed(env, "@codex fix the test")
+        assert r.exit_code == 0 and r.output == ""
+        assert routefile.read_route(env.session.tandem_id).prompt \
+            == "an older prompt"
+
+    def test_a_stash_picked_up_mid_hook_still_blocks(self, env_factory,
+                                                     monkeypatch):
+        # the frame can flip the request to "dispatched" between the write
+        # and the verifying read; treating that as a failed stash would run
+        # the prompt natively AND on the target — worse than either
+        from tandem import routefile
+        env = env_factory(active="claude")
+        self._mixed(env)
+        real_write = routefile.write_route
+
+        def write_then_pickup(tandem_id, req):
+            real_write(tandem_id, req)
+            # what mark_dispatched does, spelled through real_write so the
+            # patch below cannot recurse into itself
+            real_write(tandem_id, replace(req, state="dispatched"))
+
+        monkeypatch.setattr(routefile, "write_route", write_then_pickup)
+        r = self._typed(env, "@codex fix the test")
+        assert json.loads(r.output)["decision"] == "block"
 
     def test_empty_prompt_is_silent(self, env_factory):
         env = env_factory(active="claude")
         self._mixed(env)
-        r = self._run({"cwd": env.cwd, "prompt": "   "})
+        r = self._typed(env, "   ")
         assert r.exit_code == 0 and r.output == ""
 
     def test_any_crash_exits_zero_silent(self, env_factory, monkeypatch):
@@ -194,7 +292,7 @@ class TestCli:
         self._mixed(env)
         monkeypatch.setattr(promptroute, "route_prompt",
                             lambda *a, **kw: 1 / 0)
-        r = self._run({"cwd": env.cwd, "prompt": "@codex fix the test"})
+        r = self._typed(env, "@codex fix the test")
         assert r.exit_code == 0 and r.output == ""
 
     def test_garbage_stdin_exits_zero_silent(self, tmp_path, monkeypatch):
