@@ -84,6 +84,7 @@ class CodexAdapter(HarnessAdapter):
     display_name = "Codex CLI"
     binary = "codex"
     install_hint = "npm install -g @openai/codex"
+    prompt_hook_capable = True
 
     # -- environment ---------------------------------------------------------
 
@@ -217,6 +218,9 @@ class CodexAdapter(HarnessAdapter):
 
     def oneoff_argv(self, session_id: str, prompt: str) -> list[str]:
         return [self.binary, "exec", "--skip-git-repo-check", "resume", session_id, prompt]
+
+    def model_argv(self, model: str) -> list[str]:
+        return ["-m", model]
 
     def hook_argv_extra(self, sentinel: Path) -> list[str]:
         # A -c notify=... override would silently replace a notify handler

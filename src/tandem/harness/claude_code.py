@@ -127,6 +127,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
     display_name = "Claude Code"
     binary = "claude"
     install_hint = "npm install -g @anthropic-ai/claude-code"
+    prompt_hook_capable = True
 
     # -- environment ---------------------------------------------------------
 
@@ -218,6 +219,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
     def oneoff_argv(self, session_id: str, prompt: str) -> list[str]:
         return [self.binary, "--resume", session_id, "-p", prompt]
+
+    def model_argv(self, model: str) -> list[str]:
+        return ["--model", model]
 
     def hook_argv_extra(self, sentinel: Path) -> list[str]:
         # Per-invocation settings JSON; Stop fires at each completed turn.

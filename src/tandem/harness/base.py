@@ -163,6 +163,18 @@ class HarnessAdapter(ABC):
         SIGTERM rung backstops a recipe the CLI stops honoring)."""
         return []
 
+    # Does this harness load tandem's plugin and run its UserPromptSubmit
+    # hook? Decides whether the mixed tab can route *from* it (targets need
+    # no hook — injection is a plain pty write). opencode stays False until
+    # the live gate proves otherwise (spec verification item 2).
+    prompt_hook_capable: bool = False
+
+    def model_argv(self, model: str) -> list[str]:
+        """argv tail that pins `model` for one interactive launch, or []
+        when this harness cannot pin a model at launch (the routed flip then
+        degrades to harness-only with a bar notice)."""
+        return []
+
     # -- transcript parsing / rendering (the converter halves) ---------------
 
     @abstractmethod

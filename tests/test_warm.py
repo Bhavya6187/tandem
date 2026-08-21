@@ -5,6 +5,7 @@ import os
 import time
 
 from tandem import paths
+from tandem.harness import get_adapter
 from tandem.warm import (
     WarmChild,
     _shadow_size,
@@ -221,3 +222,27 @@ def test_spawn_hidden_floors_tiny_windows(env_factory):
         assert dimensions == (1, 1)
         return _FakePty()
     spawn_hidden(_recipe(env), (1, 1), 0, spawn=fake_spawn).release()
+
+
+def test_model_argv_per_adapter():
+    assert get_adapter("claude").model_argv("haiku") == ["--model", "haiku"]
+    assert get_adapter("codex").model_argv("gpt-5.3-codex") == [
+        "-m", "gpt-5.3-codex"]
+    assert get_adapter("opencode").model_argv(
+        "anthropic/claude-sonnet-5") == ["--model", "anthropic/claude-sonnet-5"]
+
+
+def test_prompt_hook_capability_flags():
+    assert get_adapter("claude").prompt_hook_capable is True
+    assert get_adapter("codex").prompt_hook_capable is True
+    assert get_adapter("opencode").prompt_hook_capable is False
+
+
+def test_build_launch_appends_model_argv(env_factory):
+    env = env_factory(active="claude")
+    r = build_launch(env.session, "claude", model="haiku")
+    assert r.model == "haiku"
+    i = r.argv.index("--model")
+    assert r.argv[i + 1] == "haiku"
+    plain = build_launch(env.session, "claude")
+    assert plain.model == "" and "--model" not in plain.argv

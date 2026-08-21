@@ -41,13 +41,20 @@ class LaunchRecipe:
                               # the expected path; codex fresh: None)
     fresh: bool
     cwd: str
+    model: str = ""           # model actually pinned at launch ("" = none);
+                              # the standby freshness gate compares against it
 
 
-def build_launch(session: PairedSession, side: str) -> LaunchRecipe:
+def build_launch(session: PairedSession, side: str, model: str = "") -> LaunchRecipe:
     """The argv/sentinel/transcript for launching `side` of this session.
     Extracted from InteractiveRunner.run() so the warm fire and the runner
-    build launches identically; argv order is interactive + user [args] +
-    hook extras (tests pin the order)."""
+    build launches identically; argv order is interactive + model pin +
+    user [args] + hook extras (tests pin the order).
+
+    `model` is a best-effort pin: a harness that cannot pin one at launch
+    returns no argv for it, and the recipe records "" — what was actually
+    launched, never the intent — so a later freshness gate comparing
+    recipe.model against a requested pin sees launch state, not a wish."""
     adapter = get_adapter(side)
     sid = session.native_id(side)
     transcript: Path | None = None
@@ -60,12 +67,15 @@ def build_launch(session: PairedSession, side: str) -> LaunchRecipe:
     sentinel = paths.tandem_home() / "tmp" / f"{session.tandem_id}-{side}.turn"
     sentinel.parent.mkdir(parents=True, exist_ok=True)
     argv = adapter.interactive_argv(sid, fresh)
+    if model:
+        argv += adapter.model_argv(model)
     argv += load_harness_args(side)
     hook_extra = adapter.hook_argv_extra(sentinel)
     argv += hook_extra
     return LaunchRecipe(
         side=side, argv=argv, sentinel=sentinel, hook_extra=hook_extra,
         transcript=transcript, fresh=fresh, cwd=session.cwd,
+        model=model if model and adapter.model_argv(model) else "",
     )
 
 

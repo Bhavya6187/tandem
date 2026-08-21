@@ -678,6 +678,12 @@ class OpencodeAdapter(HarnessAdapter):
     def oneoff_argv(self, session_id: str, prompt: str) -> list[str]:
         return [self.binary, "run", "-s", session_id, prompt]
 
+    def model_argv(self, model: str) -> list[str]:
+        # opencode wants provider-qualified names (`anthropic/claude-…`);
+        # the @-grammar's explicit form (@opencode:provider/model) is the
+        # only road here, and the name travels verbatim.
+        return ["--model", model]
+
     def hook_argv_extra(self, sentinel: Path) -> list[str]:
         # No per-invocation hook flag exists; the tailer's fs-watch on the
         # -wal file is the wake-up signal (watch_paths).
