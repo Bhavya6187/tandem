@@ -259,5 +259,24 @@ def test_build_launch_model_pin_outranks_user_args(env_factory):
     r = build_launch(env.session, "claude", model="haiku")
     last = len(r.argv) - 1 - r.argv[::-1].index("--model")
     assert r.argv[last + 1] == "haiku"
+    # the user's args are still passed (the pin overrides them, never drops
+    # them) — otherwise "last --model wins" would pass vacuously
+    assert "other" in r.argv
     # ...and still ahead of the hook extras, which stay the tail of argv
     assert r.hook_extra and r.argv[-len(r.hook_extra):] == r.hook_extra
+
+
+def test_build_launch_degrades_when_adapter_cannot_pin(tmp_path, monkeypatch):
+    # An adapter that cannot pin a model at launch returns no argv for it,
+    # and the recipe must then record "" — what was actually launched, not
+    # what was asked for. Task 11's standby-freshness gate compares
+    # recipe.model against a requested pin, so a recipe claiming a model it
+    # never launched would make a stale child look fresh. FakeOpencodeAdapter
+    # inherits the base model_argv -> [], which is exactly that case.
+    from conftest import Env3
+
+    env = Env3(tmp_path, monkeypatch)
+    r = build_launch(env.session, "opencode", model="anthropic/claude-sonnet-5")
+    assert r.model == ""
+    assert "--model" not in r.argv and "-m" not in r.argv
+    assert "anthropic/claude-sonnet-5" not in r.argv
