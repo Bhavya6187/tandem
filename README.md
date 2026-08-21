@@ -55,7 +55,7 @@ slot also carries the model's live context and the session's input↑ /
 output↓ token totals:
 
 ```text
- claude ● 144k ctx · 7.6M↑ 312k↓ · 5h 4% 7d 41% │ codex ○ 7d 12% │ opencode ○   ^] flips
+ claude ● 144k ctx · 7.6M↑ 312k↓ · 5h 4% 7d 41% │ codex ○ 7d 12% │ opencode ○ │ mixed ○   ^] flips
 ```
 
 The figures come from the same account endpoints that `claude`'s `/usage`
@@ -113,22 +113,24 @@ syncs back to the other CLIs as usual, so the next turn can go anywhere. A
 routed flip always starts the target fresh, so it costs a full start-up
 rather than the pipelined one behind a plain **Ctrl-]**.
 
-The tab bar carries the tab you are in. In a harness tab an idle `mixed ○`
-slot sits at the end of the row; in the mixed tab that slot is the active
-one and holds the focus CLI's name and stats:
+The tab bar carries the tab you are in. In the harness tabs the mixed tab
+waits at the end of the row as an idle `mixed ○` slot. Inside it, that slot
+is the active one — it holds the focus CLI's name and stats, and the harness
+slots go quiet, keeping only the rate limits that decide where to route next:
 
 ```text
- claude ● 144k ctx · 7.6M↑ 312k↓ · 5h 4% │ codex ○ 7d 12% │ mixed ○   ^] flips
- claude ○ │ codex ○ 7d 12% │ mixed ● claude · 144k ctx · 7.6M↑ 312k↓ · 5h 4%   ^] flips
+ claude ○ │ codex ○ 7d 12% │ opencode ○ │ mixed ● claude · 144k ctx · 7.6M↑ 312k↓ · 5h 4% 7d 41%   ^] flips
 ```
 
 Intercepting a prompt needs tandem's prompt hook inside the CLI you type
 into. Claude Code and Codex (0.145+) have one, and `tandem plugin install`
-registers tandem with both; opencode has none. When the focused CLI can't
-intercept, the bar says so instead of eating your prefix as literal text:
+registers tandem with both; opencode has none. Where tandem can't intercept,
+it does not pretend to: the prompt runs in the focus CLI as it always would,
+`@codex` and all, as literal text the model reads. The bar says so up front,
+so the prefix is never swallowed without warning:
 
 ```text
- opencode ○ │ claude ○ │ codex ○ │ mixed ● opencode (no @-routing)   ^] flips
+ opencode ○ │ claude ○ 5h 4% 7d 41% │ codex ○ 7d 12% │ mixed ● opencode (no @-routing)   ^] flips
 ```
 
 `tandem doctor` reports which CLIs are set up. Routing *to* a CLI always

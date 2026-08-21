@@ -97,10 +97,12 @@ fourth session: it shows one harness's native UI, and the turns you
 prefix are dispatched to another. Moving in or out of it is instant when
 the harness on screen stays the same — only a move that changes which
 harness runs pays a flip. Routing *from* claude or codex also needs
-tandem's plugin registered there (`tandem plugin install`); a focus that
+tandem's plugin registered there (`tandem plugin install`). A focus that
 cannot intercept prompts — opencode always, claude or codex without the
-plugin — says `(no @-routing)` on the bar rather than swallowing the
-prefix, and `tandem doctor` names which harnesses are set up.
+plugin — runs every prompt natively, `@codex` prefix included, as literal
+text; the bar's `(no @-routing)` is the warning that this is what will
+happen, not a guard against it. `tandem doctor` names which harnesses are
+set up.
 
 An unparseable value falls back to the default rather than failing the
 launch. If a terminal can't sustain the bar, tandem drops it for the rest
