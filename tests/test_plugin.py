@@ -80,6 +80,17 @@ def test_hooks_register_hook_route():
     assert cmds == ["tandem hook-route || true"]
 
 
+def test_hooks_register_hook_prompt():
+    """The mixed tab's @-routing seam. Unmatched (every prompt is a
+    candidate), and `|| true` for the same reason as hook-route — here a
+    non-zero exit from a stale tandem would block the typed prompt."""
+    h = json.loads((PLUGIN / "hooks" / "hooks.json").read_text())
+    entries = h["hooks"]["UserPromptSubmit"]
+    assert "matcher" not in entries[0]
+    cmds = [hk["command"] for hk in entries[0]["hooks"]]
+    assert cmds == ["tandem hook-prompt || true"]
+
+
 def test_hook_rewrite_target_matches_the_plugin_scoped_agent_id():
     """Claude resolves a plugin's agents as `<plugin-name>:<agent-name>` and
     rejects the bare name (live, 2.1.220: "Agent type 'codex-worker' not

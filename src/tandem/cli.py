@@ -677,6 +677,61 @@ def hook_route_cmd() -> None:
     sys.exit(0)
 
 
+@main.command(name="hook-prompt")
+def hook_prompt_cmd() -> None:
+    """UserPromptSubmit hook: @-route mixed-tab prompts to another harness.
+
+    Reads hook JSON on stdin; prints a block decision or nothing. ALWAYS
+    exits 0 — like hook-route, every failure must degrade to the native
+    turn, and the plugin registers it as `tandem hook-prompt || true` so
+    click's own exit-2 usage path (version skew) cannot block a prompt.
+
+    Ordering is the unlosable-prompt invariant (spec: Dispatch pipeline):
+    the route request is durably stashed BEFORE the block decision prints.
+    A stash that fails silently allows the turn instead — a prompt that
+    runs on the wrong harness beats a prompt that vanishes.
+
+    Silent (allow) whenever: no paired session for the cwd, no frame state
+    or not the mixed tab, no recognized prefix, or the target is the focus
+    harness itself. The frame file's focus field names the harness the user
+    is typing in; `session.active` may lag it by a beat mid-flip, so the
+    frame file is the authority here."""
+    try:
+        from . import promptroute, routefile
+
+        payload = json.loads(sys.stdin.read() or "{}")
+        prompt = payload.get("prompt")
+        cwd = payload.get("cwd") or _cwd()
+        if not isinstance(prompt, str) or not prompt.strip():
+            sys.exit(0)
+        with StateStore() as store:
+            session = store.latest_session_for_cwd(cwd)
+        if session is None:
+            sys.exit(0)
+        frame = routefile.read_frame_state(session.tandem_id)
+        if not frame or frame.get("tab") != "mixed":
+            sys.exit(0)
+        focus = frame.get("focus") or session.active
+        got = promptroute.route_prompt(prompt, focus, session.participants)
+        if got is None:
+            sys.exit(0)
+        decision, body = got
+        routefile.write_route(session.tandem_id, routefile.RouteRequest(
+            target=decision.harness, model=decision.model, prompt=body,
+            source=focus, reason=decision.reason))
+        if routefile.read_route(session.tandem_id) is None:
+            sys.exit(0)   # stash didn't land: allow the native turn
+        click.echo(json.dumps({
+            "decision": "block",
+            "reason": f"tandem: {decision.reason} — running there",
+        }))
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+    sys.exit(0)
+
+
 @main.command()
 @click.option(
     "--live",

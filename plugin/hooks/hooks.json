@@ -7,6 +7,13 @@
           {"type": "command", "command": "tandem hook-route || true"}
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {"type": "command", "command": "tandem hook-prompt || true"}
+        ]
+      }
     ]
   }
 }
