@@ -14,6 +14,12 @@ import re
 PASTE_BEGIN = b"\x1b[200~"
 PASTE_END = b"\x1b[201~"
 
+# The tab id `TabState.snapshot()` reports for the mixed tab, spelled out
+# here rather than imported: frame has no tandem imports by design (see the
+# module docstring), and one shared string literal is a cheaper coupling
+# than making the bar depend on the tab machinery.
+MIXED_TAB = "mixed"
+
 _MOUSE_RE = re.compile(rb"\x1b\[<(\d{1,4});(\d{1,4});(\d{1,4})([Mm])")
 # a trailing fragment that could still become a paste marker or mouse event
 _PARTIAL_RE = re.compile(rb"\x1b(\[(<(\d{0,4}(;\d{0,4}){0,2};?)?|2(0[01]?)?)?)?\Z")
@@ -242,7 +248,8 @@ class StatusBar:
         self.cols = cols
 
     def line(self, armed: bool, usage: str = "",
-             limits: dict[str, str] | None = None) -> str:
+             limits: dict[str, str] | None = None,
+             mode: dict | None = None) -> str:
         # padded and truncated by character count, so every glyph here must be
         # one terminal cell wide: a two-cell glyph (any with East_Asian_Width
         # W/F, e.g. ⏳ U+23F3) makes the painted row cols+1 cells and wraps off
@@ -257,21 +264,54 @@ class StatusBar:
         # `limits` is per-slot account rate-limit text for any harness.
         parts = [pt for pt in usage.split(" · ") if pt] if usage else []
         limits = limits or {}
+        # `mode` is TabState.snapshot(): tab / focus / routing_ok. None means
+        # a caller that predates the mixed tab, and renders exactly as before
+        # — the mixed slot only exists once someone publishes tab state.
+        show_mixed = mode is not None
+        mixed_mode = show_mixed and mode.get("tab") == MIXED_TAB
 
         def compose(stats: list[str], with_limits: bool) -> str:
             def slot(name: str, glyph: str, extra: list[str]) -> str:
                 lim = limits.get(name, "") if with_limits else ""
                 bits = [*extra] + ([lim] if lim else [])
                 return f"{name} {glyph}" + (f" {' · '.join(bits)}" if bits else "")
-            slots = [slot(self.active, "●", stats)]
-            slots += [slot(o, "○", []) for o in self.others]
+            if mixed_mode:
+                # active-first, same as the harness-tab rendering: the bar's
+                # slot order has always been per-run construction order, and
+                # inventing a different order for one tab would make slots
+                # jump when entering and leaving mixed. Every harness slot
+                # goes idle and drops its stats — in the mixed tab none of
+                # them is what the keyboard is talking to. Their rate limits
+                # stay (they are what decides where to route next), except
+                # the active one's: that is the focus's own, and it rides the
+                # mixed slot below rather than being printed on the row twice.
+                slots = [f"{self.active} ○"]
+                slots += [slot(o, "○", []) for o in self.others]
+                focus = mode.get("focus") or self.active
+                # `routing_ok` False means @-mentions cannot be routed from
+                # this focus, and a silently swallowed @-mention is worse than
+                # any cosmetic loss — so the hint rides the focus name itself,
+                # where no elision tier can drop it separately.
+                hint = "" if mode.get("routing_ok", True) else " (no @-routing)"
+                mixed_bits = [focus + hint, *stats]
+                lim = limits.get(self.active, "") if with_limits else ""
+                if lim:
+                    mixed_bits.append(lim)
+                slots.append("mixed ● " + " · ".join(mixed_bits))
+            else:
+                slots = [slot(self.active, "●", stats)]
+                slots += [slot(o, "○", []) for o in self.others]
+                if show_mixed:
+                    slots.append("mixed ○")   # the tab the flip cycles into
             return f" {' │ '.join(slots)}   {self.key_label} flips"
 
         # Elision order when the row is too narrow: the ↑↓ totals first, the
         # rate limits second, the ctx figure third — the numbers that decide a
         # flip outlive the ones that only describe the session — and the key
         # hint last of all: it is the keybind's only advertisement, and the
-        # slot names are what it cycles.
+        # slot names are what it cycles. The same tiers cover the mixed tab:
+        # its stats and limits are these same values, moved onto the mixed
+        # slot, so the focus name (and its no-routing hint) survives them all.
         tiers = [
             (parts, True),
             (parts[:1], True),
@@ -287,12 +327,13 @@ class StatusBar:
         return text[: self.cols].ljust(self.cols)
 
     def paint(self, armed: bool, usage: str = "",
-              limits: dict[str, str] | None = None) -> bytes:
+              limits: dict[str, str] | None = None,
+              mode: dict | None = None) -> bytes:
         return (
             b"\x1b7"
             + f"\x1b[{self.rows};1H".encode()
             + b"\x1b[7m"
-            + self.line(armed, usage, limits).encode()
+            + self.line(armed, usage, limits, mode).encode()
             + b"\x1b[0m\x1b8"
         )
 

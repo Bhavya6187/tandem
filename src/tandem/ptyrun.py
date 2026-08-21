@@ -157,6 +157,10 @@ class FrameIO:
     # per-slot account rate-limit text (harness id → "5h 4% 7d 4%"), any
     # slot; published the same way by the rate-limit poller thread
     limits: Callable[[], dict[str, str]] | None = None
+    # the tab-state snapshot for the bar's mixed slot (None = pre-mixed
+    # rendering); published by TabState via plain attribute reads, so the
+    # callable is cheap and safe on the pump thread
+    mode: Callable[[], dict] | None = None
     # the pump's word on whether a bar is actually drawn: True once at
     # setup when it is, False when it never is (no tty, too few rows) or
     # when it drops. Anything that only exists to feed the bar (the
@@ -261,7 +265,8 @@ def run_in_pty(
         region = b"" if (g is not None and g.child_owns_region) else b.region()
         usage = frame.usage() if frame.usage is not None else ""
         limits = frame.limits() if frame.limits is not None else None
-        _write_all(out_fd, region + b.paint(frame.armed(), usage, limits))
+        mode_now = frame.mode() if frame.mode is not None else None
+        _write_all(out_fd, region + b.paint(frame.armed(), usage, limits, mode_now))
 
     def drop_bar(reason: str) -> None:
         """Terminal state: the guard's drop verdict is not latched, so the
@@ -381,6 +386,9 @@ def run_in_pty(
         last_limits = (
             frame.limits() if bar is not None and frame.limits is not None else None
         )
+        last_mode = (
+            frame.mode() if bar is not None and frame.mode is not None else None
+        )
         last_stdin = time.monotonic()
         stdin_open = True
         # _is_alive, not isalive(): a PtyControl on another thread polls
@@ -457,6 +465,15 @@ def run_in_pty(
                 limits_now = frame.limits()
                 if limits_now is not last_limits and limits_now != last_limits:
                     last_limits = limits_now
+                    paint()
+            if bar is not None and frame.mode is not None:
+                # A tab change is invisible to the pump otherwise: entering or
+                # leaving the mixed tab moves no bytes and resizes nothing.
+                # snapshot() builds a fresh dict per call, so unlike `limits`
+                # there is no identity shortcut — equality is the whole check.
+                mode_now = frame.mode()
+                if mode_now != last_mode:
+                    last_mode = mode_now
                     paint()
     finally:
         # SIGWINCH goes back first: its handler is the one that paints, and

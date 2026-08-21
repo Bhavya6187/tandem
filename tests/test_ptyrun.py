@@ -495,6 +495,33 @@ def test_limits_change_repaints_the_bar(monkeypatch):
     assert pump.run(drive) == 0
 
 
+def test_mode_change_repaints_the_bar(monkeypatch):
+    """Entering the mixed tab changes only the tab state — no child output,
+    no resize — so the pump's tick is the only thing that can redraw the bar
+    into its mixed rendering."""
+    mode = {"now": {"tab": "harness", "focus": "", "routing_ok": True}}
+    frame = FrameIO(
+        flip_byte=0x1D, on_flip=lambda: None, armed=lambda: False,
+        active="claude", others=["codex"], mode=lambda: mode["now"],
+    )
+    pump = _Pump(monkeypatch, frame=frame)
+
+    def seen(text: str) -> bool:
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            if any(text.encode() in w for w in pump.writes):
+                return True
+            time.sleep(0.02)
+        return False
+
+    def drive():
+        assert seen("mixed ○")      # harness tab: the idle mixed slot
+        mode["now"] = {"tab": "mixed", "focus": "claude", "routing_ok": True}
+        assert seen("mixed ● claude")
+
+    assert pump.run(drive) == 0
+
+
 def test_pump_reports_the_bar_on_and_then_off_around_a_drop(monkeypatch):
     """The runner gates its rate-limit polls on the bar actually being drawn,
     which only the pump knows: it reports on at setup and off at a drop."""

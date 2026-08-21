@@ -651,3 +651,93 @@ def test_bar_line_armed_state_ignores_limits():
 def test_bar_paint_carries_limits():
     bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     assert "7d 12%".encode() in bar.paint(armed=False, limits={"codex": "7d 12%"})
+
+
+# -- the mixed tab's own slot -------------------------------------------------
+
+
+def test_bar_harness_tab_shows_idle_mixed_slot():
+    bar = StatusBar(30, 120, "claude", ["codex"])
+    line = bar.line(False, mode={"tab": "harness", "focus": "",
+                                 "routing_ok": True})
+    assert "claude ●" in line and "mixed ○" in line
+
+
+def test_bar_mixed_tab_marks_mixed_active_with_focus():
+    bar = StatusBar(30, 120, "codex", ["claude", "opencode"])
+    line = bar.line(False, usage="12% ctx",
+                    mode={"tab": "mixed", "focus": "codex",
+                          "routing_ok": True})
+    assert "mixed ● codex" in line and "12% ctx" in line
+    assert "codex ○" in line and "codex ●" not in line.replace(
+        "mixed ● codex", "")
+
+
+def test_bar_mixed_tab_no_routing_hint():
+    bar = StatusBar(30, 120, "opencode", ["claude", "codex"])
+    line = bar.line(False, mode={"tab": "mixed", "focus": "opencode",
+                                 "routing_ok": False})
+    assert "mixed ● opencode (no @-routing)" in line
+
+
+def test_bar_without_mode_is_unchanged():
+    bar = StatusBar(30, 120, "claude", ["codex"])
+    assert "mixed" not in bar.line(False)
+
+
+def test_bar_mixed_narrow_elides_stats_keeps_focus():
+    # cols=60 is the first width the fully-elided three-harness mixed line
+    # (59 chars) fits at: the stats tier goes, the focus slot stays.
+    bar = StatusBar(30, 60, "codex", ["claude", "opencode"])
+    line = bar.line(False, usage="12% ctx · 7.6M↑ 312k↓",
+                    mode={"tab": "mixed", "focus": "codex",
+                          "routing_ok": True})
+    assert "mixed ● codex" in line and "312k" not in line
+
+
+def test_bar_mixed_tab_carries_the_active_slots_limits():
+    # the focus IS the active harness, so its stats and account limits belong
+    # on the mixed slot — and only there, not printed twice. Every other
+    # harness keeps its limits: they are what decides where to route next.
+    bar = StatusBar(30, 120, "codex", ["claude"])
+    line = bar.line(False, usage="12% ctx",
+                    limits={"codex": "5h 4%", "claude": "7d 12%"},
+                    mode={"tab": "mixed", "focus": "codex",
+                          "routing_ok": True})
+    assert " codex ○ │ claude ○ 7d 12% │ mixed ● codex · 12% ctx · 5h 4%" in line
+    assert line.count("5h 4%") == 1
+
+
+def test_bar_mixed_hint_survives_full_elision():
+    # the hint is what stops @-mentions being silently swallowed, so it
+    # outranks every cosmetic bit: at the narrowest tier it is still there
+    stripped = (" opencode ○ │ claude ○ │ codex ○ │ "
+                "mixed ● opencode (no @-routing)   ^] flips")
+    bar = StatusBar(30, len(stripped), "opencode", ["claude", "codex"])
+    line = bar.line(False, usage="12% ctx · 7.6M↑ 312k↓",
+                    limits={"opencode": "5h 4%"},
+                    mode={"tab": "mixed", "focus": "opencode",
+                          "routing_ok": False})
+    assert "312k" not in line and "5h 4%" not in line
+    assert line == stripped
+
+
+def test_bar_mixed_armed_state_ignores_mode():
+    bar = StatusBar(30, 120, "claude", ["codex"])
+    assert bar.line(True, mode={"tab": "mixed", "focus": "claude",
+                                "routing_ok": True}) == bar.line(True)
+
+
+def test_bar_paint_carries_mode():
+    bar = StatusBar(30, 120, "claude", ["codex"])
+    assert b"mixed \xe2\x97\x8f claude" in bar.paint(
+        False, mode={"tab": "mixed", "focus": "claude", "routing_ok": True})
+
+
+def test_bar_mixed_line_is_exactly_cols_wide_and_single_cell():
+    bar = StatusBar(30, 80, "codex", ["claude", "opencode"])
+    line = bar.line(False, usage="12% ctx",
+                    mode={"tab": "mixed", "focus": "codex",
+                          "routing_ok": False})
+    assert len(line) == 80
+    assert [c for c in line if east_asian_width(c) in "WF"] == []
