@@ -1,11 +1,13 @@
-"""Install the tandem Claude Code plugin through claude's own CLI.
+"""Install the tandem plugin through each harness's own CLI.
 
-Detection reads claude's installed-plugin registry (read-only; claude
-stays the sole writer of its own state). Install shells out to
-`claude plugin …` — verified idempotent on claude 2.1.220: re-adding the
-marketplace and re-installing the plugin both exit 0 with an "already"
-notice. The one-time offer lives here too so both entry points (bare
-`tandem` and `tandem plugin install`) share a single routine.
+Detection reads the harness's own registry (read-only; each CLI stays the
+sole writer of its own state). Install shells out to `claude plugin …` —
+verified idempotent on claude 2.1.220: re-adding the marketplace and
+re-installing the plugin both exit 0 with an "already" notice — and then
+mirrors the same two steps onto codex, which since 0.145 loads
+claude-format plugin trees. The one-time offer lives here too so both
+entry points (bare `tandem` and `tandem plugin install`) share a single
+routine.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import click
@@ -21,7 +24,9 @@ import click
 from . import paths
 
 MARKETPLACE_REPO = "Bhavya6187/tandem"
-PLUGIN_ID = "tandem@tandem"
+PLUGIN_NAME = "tandem"
+# <plugin>@<marketplace>; both halves happen to be "tandem"
+PLUGIN_ID = f"{PLUGIN_NAME}@tandem"
 
 
 def is_plugin_installed() -> bool:
@@ -51,6 +56,49 @@ def is_plugin_installed() -> bool:
         return True
 
 
+def is_plugin_installed_codex() -> bool:
+    """True when codex's own config records a tandem@tandem plugin.
+
+    Codex keeps installed plugins in its `config.toml` `[plugins]` table,
+    keyed the same `<plugin>@<marketplace>` way claude keys its registry.
+    The ambiguity rule mirrors is_plugin_installed(): a missing file or an
+    absent entry is definitively False (a codex that has never installed a
+    plugin has no table, and that user must get the nudge), while anything
+    unreadable or unparseable is True — the caller only decides whether to
+    warn, and doubt must stay silent.
+    """
+    try:
+        with open(paths.codex_home() / "config.toml", "rb") as f:
+            cfg = tomllib.load(f)
+    except FileNotFoundError:
+        return False
+    # ValueError covers tomllib's TOMLDecodeError; OSError covers a
+    # config.toml that is a directory or is unreadable.
+    except (OSError, ValueError):
+        return True
+    plugins = cfg.get("plugins")
+    if plugins is None:
+        return False           # no plugin has ever been installed here
+    if not isinstance(plugins, dict):
+        return True            # a shape tandem does not understand: doubt
+    return any(k.startswith(PLUGIN_NAME + "@") for k in plugins)
+
+
+def hook_available(harness_id: str) -> bool:
+    """Can @-routing intercept a prompt typed into this harness right now?
+
+    The static half of the question ("does this CLI have a prompt hook at
+    all") lives on the adapter as `prompt_hook_capable`; this is the
+    dynamic half — is tandem's plugin actually registered there. Both must
+    hold, or an `@codex …` prefix is just literal prompt text.
+    """
+    if harness_id == "claude":
+        return is_plugin_installed()
+    if harness_id == "codex":
+        return is_plugin_installed_codex()
+    return False
+
+
 MANUAL_COMMANDS = (
     "    claude plugin marketplace add Bhavya6187/tandem\n"
     "    claude plugin install tandem@tandem"
@@ -58,7 +106,7 @@ MANUAL_COMMANDS = (
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess | None:
-    """Echo-and-run one claude command; None when it cannot run at all."""
+    """Echo-and-run one CLI command; None when it cannot run at all."""
     click.echo("  $ " + " ".join(cmd))
     try:
         return subprocess.run(cmd, capture_output=True, text=True,
@@ -97,6 +145,43 @@ def install_plugin() -> bool:
     click.echo(
         "Plugin installed. It takes effect in new Claude sessions "
         "(running sessions are unaffected)."
+    )
+    install_plugin_codex()
+    return True
+
+
+def install_plugin_codex() -> bool:
+    """Register the same plugin tree with codex, best-effort.
+
+    Codex >= 0.145 loads claude-format plugins; `.codex-plugin/plugin.json`
+    is the metadata it reads. Only @-routing *from* codex in the mixed tab
+    needs this — routing *to* codex, subagents and sync all work without
+    it — so every failure here is a yellow note naming what the user loses,
+    never an error, and a machine with no codex at all says nothing.
+    """
+    if shutil.which("codex") is None:
+        return False
+    add = _run(["codex", "plugin", "marketplace", "add", MARKETPLACE_REPO])
+    if add is not None and add.returncode != 0:
+        # advisory, exactly like the claude add: if it genuinely mattered
+        # the install right below fails and reports
+        detail = (add.stderr or add.stdout).strip()
+        if detail:
+            click.secho(f"  codex marketplace add failed: {detail}",
+                        fg="yellow", err=True)
+    ins = _run(["codex", "plugin", "install", PLUGIN_ID])
+    if ins is None or ins.returncode != 0:
+        detail = "" if ins is None else (ins.stderr or ins.stdout).strip()
+        if detail:
+            click.secho(f"  {detail}", fg="yellow", err=True)
+        click.secho(
+            "  codex plugin install did not succeed — @-routing from codex "
+            "in the mixed tab will be unavailable (routing to codex still "
+            "works). Retry later with: tandem plugin install",
+            fg="yellow", err=True)
+        return False
+    click.echo(
+        "Codex plugin installed. It takes effect in new codex sessions."
     )
     return True
 

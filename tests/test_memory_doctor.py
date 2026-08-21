@@ -160,6 +160,48 @@ class TestDoctor:
         report = run_doctor(env.store, env.session)
         assert not any("status bar" in c.message for c in report.checks)
 
+    def test_warns_when_a_participants_prompt_hook_is_not_installed(
+            self, env_factory):
+        # tmp homes: neither harness has the plugin registered, so neither
+        # can route an @-mention typed into it. A warn, not a fail — the
+        # pairing works, one direction of the mixed tab does not.
+        env = env_factory()
+        report = run_doctor(env.store, env.session)
+        warns = [c.message for c in report.checks if c.status == "warn"]
+        assert any("mixed-tab routing: claude plugin not installed" in m
+                   and "tandem plugin install" in m for m in warns)
+        assert any("mixed-tab routing: codex plugin not installed" in m
+                   for m in warns)
+        assert not report.failed
+
+    def test_ok_when_both_prompt_hooks_are_installed(self, env_factory):
+        from tandem import paths
+
+        env = env_factory()
+        reg = paths.claude_installed_plugins_path()
+        reg.parent.mkdir(parents=True, exist_ok=True)
+        reg.write_text(json.dumps(
+            {"version": 2, "plugins": {"tandem@tandem": [{"scope": "user"}]}}))
+        (paths.codex_home() / "config.toml").write_text(
+            '[plugins."tandem@tandem"]\nenabled = true\n')
+        report = run_doctor(env.store, env.session)
+        oks = [c.message for c in report.checks if c.status == "ok"]
+        assert "mixed-tab routing: claude hook installed" in oks
+        assert "mixed-tab routing: codex hook installed" in oks
+        assert not any("mixed-tab routing" in c.message
+                       for c in report.checks if c.status == "warn")
+
+    def test_no_routing_line_for_a_harness_without_a_prompt_hook(
+            self, tmp_path, monkeypatch):
+        # opencode has no UserPromptSubmit hook: a "plugin not installed"
+        # warning there would name a remedy that changes nothing.
+        from conftest import Env3
+
+        env = Env3(tmp_path, monkeypatch)
+        report = run_doctor(env.store, env.session)
+        assert not any("mixed-tab routing: opencode" in c.message
+                       for c in report.checks)
+
 
 def test_doctor_iterates_participants(tmp_path, monkeypatch):
     from conftest import Env3

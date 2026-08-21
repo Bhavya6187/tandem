@@ -70,6 +70,19 @@ def test_plugin_version_matches_pyproject_version():
     assert plugin["version"] == pyproject["project"]["version"]
 
 
+def test_codex_plugin_manifest_mirrors_claude():
+    """One plugin tree, two manifests: codex (>=0.145) loads a
+    claude-format plugin and reads its metadata from `.codex-plugin/`.
+    Name and version are the same artifact seen twice — an equality
+    assertion, not a literal, so the release bump cannot leave the codex
+    twin behind (a stale version means `plugin marketplace update` skips
+    it and @-routing *from* codex silently keeps running old hooks)."""
+    claude = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text())
+    codex = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())
+    assert codex["name"] == claude["name"] == "tandem"
+    assert codex["version"] == claude["version"]
+
+
 def test_hooks_register_hook_route():
     h = json.loads((PLUGIN / "hooks" / "hooks.json").read_text())
     entries = h["hooks"]["PreToolUse"]

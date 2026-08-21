@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Callable, Protocol
 
-from . import paths, routefile
+from . import paths, plugin_setup, routefile
 from .config import load_frame_config
 from .events import SessionContext
 from .harness import get_adapter
@@ -872,8 +872,15 @@ class InteractiveRunner:
         # One reading for the whole run: whether a prompt typed into this
         # harness can be routed at all. The bar says so through `mode` and
         # the frame file says so to the hook, and they must never disagree —
-        # so it is read once here, not re-derived per caller.
-        routing_ok = adapter.prompt_hook_capable
+        # so it is read once here, not re-derived per caller. Both halves
+        # must hold: the CLI needs a prompt hook, and tandem's plugin has to
+        # be registered there to use it. A run started before `tandem plugin
+        # install` therefore shows `(no @-routing)` instead of silently
+        # eating `@codex …` prefixes as literal prompt text. Reading it once
+        # also means installing mid-run does not change the answer under the
+        # user — the hook only reaches new sessions anyway.
+        routing_ok = (adapter.prompt_hook_capable
+                      and plugin_setup.hook_available(active))
         tabs = self.tabs
 
         def on_flip() -> None:

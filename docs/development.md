@@ -19,10 +19,11 @@ The suite is hermetic — no harness binaries needed — except
 `opencode` binary against a throwaway database (`OPENCODE_DB`) and skips
 itself when the binary is absent. Two guards worth knowing about:
 `plugin/.claude-plugin/plugin.json`'s `version` must match
-`pyproject.toml` (a drift test fails otherwise — see the
-[plugin README](../plugin/README.md) for why), and CI installs with
-`uv sync --locked`, so a version bump needs `uv lock` in the same
-commit.
+`pyproject.toml` — and `plugin/.codex-plugin/plugin.json` (the same tree's
+codex manifest) must match both — so a release bumps all three (a drift
+test fails otherwise — see the [plugin README](../plugin/README.md) for
+why); and CI installs with `uv sync --locked`, so a version bump needs
+`uv lock` in the same commit.
 
 ## Layout
 

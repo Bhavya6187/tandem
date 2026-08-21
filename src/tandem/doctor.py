@@ -154,6 +154,7 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
         )
 
     _subagent_checks(report, session)
+    _routing_checks(report, session)
 
     if live:
         _live_resume_checks(report, session, transcripts)
@@ -213,6 +214,30 @@ def _subagent_checks(report: DoctorReport, session) -> None:
             )
     except OSError:
         pass
+
+
+def _routing_checks(report: DoctorReport, session) -> None:
+    """Can a prompt typed into each participant be @-routed? The mixed tab
+    intercepts prompts through a plugin hook, so a participant whose CLI
+    has one but has never had the plugin registered eats `@codex …` as
+    literal text — a silent, confusing half-failure worth naming here. Only
+    hook-capable harnesses get a line: on the others there is no remedy to
+    offer, so a warning would only send the user chasing nothing."""
+    if session is None:
+        return
+    from . import plugin_setup
+    from .harness import get_adapter
+
+    for hid in session.participants:
+        if not get_adapter(hid).prompt_hook_capable:
+            continue
+        if plugin_setup.hook_available(hid):
+            report.ok(f"mixed-tab routing: {hid} hook installed")
+        else:
+            report.warn(
+                f"mixed-tab routing: {hid} plugin not installed — "
+                "@-routing from it is unavailable (tandem plugin install)"
+            )
 
 
 def _live_resume_checks(report: DoctorReport, session, transcripts) -> None:

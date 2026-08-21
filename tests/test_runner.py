@@ -1965,7 +1965,21 @@ def test_runner_notes_an_undelivered_routed_prompt(env_factory, monkeypatch):
     assert routefile.read_route(env.session.tandem_id) is not None
 
 
-def test_frame_gets_the_tab_snapshot_and_the_press_glue(env_factory, monkeypatch):
+@pytest.fixture
+def plugin_installed(monkeypatch):
+    """`routing_ok` is the adapter's static capability AND the plugin being
+    registered on disk; under `env_factory`'s tmp homes no registry exists,
+    so the honest reading is "not installed". Tests about the tab plumbing
+    pin the on-disk half True — only the two detectors are stubbed, so the
+    real `hook_available` dispatch still runs in the runner."""
+    from tandem import plugin_setup
+
+    monkeypatch.setattr(plugin_setup, "is_plugin_installed", lambda: True)
+    monkeypatch.setattr(plugin_setup, "is_plugin_installed_codex", lambda: True)
+
+
+def test_frame_gets_the_tab_snapshot_and_the_press_glue(env_factory, monkeypatch,
+                                                        plugin_installed):
     env = env_factory(active="claude")
     tabs = TabState(env.session.participants, tab="mixed", focus="claude")
     seen = {}
@@ -1998,7 +2012,8 @@ def test_a_flip_move_still_arms_the_monitor(env_factory, monkeypatch):
     assert tabs.pending_target() == "codex"
 
 
-def test_mixer_publishes_the_frame_state(env_factory, monkeypatch):
+def test_mixer_publishes_the_frame_state(env_factory, monkeypatch,
+                                         plugin_installed):
     env = env_factory(active="claude")
     tabs = TabState(env.session.participants, tab="mixed", focus="claude")
 
@@ -2016,6 +2031,28 @@ def test_mixer_publishes_the_frame_state(env_factory, monkeypatch):
     # after run() could arm a flip nobody is left to take
     assert not any(t.name == "tandem-mixer" and t.is_alive()
                    for t in threading.enumerate())
+
+
+def test_frame_state_says_routing_is_off_without_the_plugin(env_factory,
+                                                            monkeypatch):
+    """A run started before `tandem plugin install` must say so. The hook
+    is what turns `@codex …` into a route, so with no plugin registered the
+    bar shows `(no @-routing)` and the frame file tells the same story —
+    better than silently eating the prefix as literal prompt text."""
+    env = env_factory(active="claude")      # tmp homes: no plugin registry
+    tabs = TabState(env.session.participants, tab="mixed", focus="claude")
+
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
+        assert _wait_for(
+            lambda: routefile.read_frame_state(env.session.tandem_id) is not None)
+        assert frame.mode()["routing_ok"] is False
+        return 0
+
+    monkeypatch.setattr(runner, "TranscriptWatcher", _QuietWatcher)
+    monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
+    runner.InteractiveRunner(env.session, _null_sink, tabs=tabs).run()
+    assert routefile.read_frame_state(env.session.tandem_id) == {
+        "tab": "mixed", "focus": "claude", "routing_ok": False}
 
 
 def test_mixer_startup_surfaces_and_clears_a_leftover_dispatch(env_factory,

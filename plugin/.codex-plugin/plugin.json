@@ -1,0 +1,6 @@
+{
+  "name": "tandem",
+  "description": "Mixed-tab @-routing and subagent reroute hooks for tandem sessions.",
+  "version": "0.5.0",
+  "author": {"name": "tandem"}
+}

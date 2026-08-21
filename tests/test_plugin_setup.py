@@ -94,12 +94,17 @@ def recorded_runs(monkeypatch):
 
 ADD_CMD = ("claude", "plugin", "marketplace", "add", "Bhavya6187/tandem")
 INSTALL_CMD = ("claude", "plugin", "install", "tandem@tandem")
+CODEX_ADD_CMD = ("codex", "plugin", "marketplace", "add", "Bhavya6187/tandem")
+CODEX_INSTALL_CMD = ("codex", "plugin", "install", "tandem@tandem")
 
 
 def test_install_runs_add_then_install(claude_on_path, recorded_runs, capsys):
+    # `claude_on_path` answers every `which`, so codex looks installed too:
+    # a successful claude install registers the same tree with codex.
     calls, _ = recorded_runs
     assert plugin_setup.install_plugin() is True
-    assert [tuple(c) for c in calls] == [ADD_CMD, INSTALL_CMD]
+    assert [tuple(c) for c in calls] == [
+        ADD_CMD, INSTALL_CMD, CODEX_ADD_CMD, CODEX_INSTALL_CMD]
     out = capsys.readouterr().out
     assert "new Claude sessions" in out
 
@@ -109,14 +114,18 @@ def test_add_failure_is_nonfatal_when_install_succeeds(
     calls, results = recorded_runs
     results[ADD_CMD] = FakeProc(returncode=1, stderr="some marketplace noise")
     assert plugin_setup.install_plugin() is True
-    assert [tuple(c) for c in calls] == [ADD_CMD, INSTALL_CMD]
+    assert [tuple(c) for c in calls] == [
+        ADD_CMD, INSTALL_CMD, CODEX_ADD_CMD, CODEX_INSTALL_CMD]
 
 
 def test_install_failure_prints_manual_commands(
         claude_on_path, recorded_runs, capsys):
-    _, results = recorded_runs
+    calls, results = recorded_runs
     results[INSTALL_CMD] = FakeProc(returncode=1, stderr="boom")
     assert plugin_setup.install_plugin() is False
+    # the codex mirror rides on the claude success path only: there is no
+    # point registering a tree claude itself refused
+    assert not any(c[0] == "codex" for c in calls)
     err = capsys.readouterr().err
     assert "claude plugin marketplace add Bhavya6187/tandem" in err
     assert "claude plugin install tandem@tandem" in err
@@ -129,6 +138,121 @@ def test_missing_claude_binary_fails_without_running_anything(
     assert plugin_setup.install_plugin() is False
     assert calls == []
     assert "claude plugin install tandem@tandem" in capsys.readouterr().err
+
+
+# -- codex registration ------------------------------------------------------
+
+@pytest.fixture
+def codex_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    home = tmp_path / ".codex"
+    home.mkdir(parents=True, exist_ok=True)
+    return home
+
+
+def test_missing_codex_config_means_not_installed(codex_home):
+    assert plugin_setup.is_plugin_installed_codex() is False
+
+
+def test_codex_plugins_entry_means_installed(codex_home):
+    (codex_home / "config.toml").write_text(
+        '[plugins."tandem@tandem"]\nenabled = true\n')
+    assert plugin_setup.is_plugin_installed_codex() is True
+
+
+def test_codex_absent_entry_means_not_installed(codex_home):
+    (codex_home / "config.toml").write_text(
+        '[plugins."other@mkt"]\nenabled = true\n')
+    assert plugin_setup.is_plugin_installed_codex() is False
+
+
+def test_codex_config_without_plugins_table_means_not_installed(codex_home):
+    (codex_home / "config.toml").write_text('model = "gpt-5"\n')
+    assert plugin_setup.is_plugin_installed_codex() is False
+
+
+def test_unparseable_codex_config_reads_as_installed(codex_home):
+    # Same ambiguity rule as claude's registry: doubt must not nag.
+    (codex_home / "config.toml").write_text("not [ toml")
+    assert plugin_setup.is_plugin_installed_codex() is True
+
+
+def test_unexpected_codex_plugins_shape_reads_as_installed(codex_home):
+    # A non-table `plugins` is a config tandem does not understand, not
+    # proof of absence.
+    (codex_home / "config.toml").write_text('plugins = "moved-elsewhere"\n')
+    assert plugin_setup.is_plugin_installed_codex() is True
+
+
+def test_unreadable_codex_config_reads_as_installed(codex_home):
+    # a directory where the file should be: OSError, i.e. ambiguous
+    (codex_home / "config.toml").mkdir()
+    assert plugin_setup.is_plugin_installed_codex() is True
+
+
+@pytest.fixture
+def codex_on_path(monkeypatch):
+    monkeypatch.setattr(plugin_setup.shutil, "which",
+                        lambda name: "/usr/local/bin/" + name)
+
+
+def test_install_plugin_codex_runs_both_commands(
+        codex_on_path, recorded_runs, capsys):
+    calls, _ = recorded_runs
+    assert plugin_setup.install_plugin_codex() is True
+    assert [tuple(c) for c in calls] == [CODEX_ADD_CMD, CODEX_INSTALL_CMD]
+    assert "new codex sessions" in capsys.readouterr().out
+
+
+def test_install_plugin_codex_missing_binary_is_false(
+        recorded_runs, monkeypatch, capsys):
+    calls, _ = recorded_runs
+    monkeypatch.setattr(plugin_setup.shutil, "which", lambda name: None)
+    assert plugin_setup.install_plugin_codex() is False
+    assert calls == []
+    # no codex, nothing to say: a machine without codex is a normal machine
+    assert capsys.readouterr().err == ""
+
+
+def test_codex_add_failure_is_nonfatal_when_install_succeeds(
+        codex_on_path, recorded_runs):
+    calls, results = recorded_runs
+    results[CODEX_ADD_CMD] = FakeProc(returncode=1, stderr="marketplace noise")
+    assert plugin_setup.install_plugin_codex() is True
+    assert [tuple(c) for c in calls] == [CODEX_ADD_CMD, CODEX_INSTALL_CMD]
+
+
+def test_codex_install_failure_is_a_yellow_note_naming_the_consequence(
+        codex_on_path, recorded_runs, capsys):
+    _, results = recorded_runs
+    results[CODEX_INSTALL_CMD] = FakeProc(returncode=1, stderr="boom")
+    assert plugin_setup.install_plugin_codex() is False
+    err = capsys.readouterr().err
+    assert "@-routing from codex" in err
+    assert "error" not in err.lower()
+
+
+# -- hook availability -------------------------------------------------------
+
+def test_hook_available_dispatches_per_harness(homes, monkeypatch):
+    seen = []
+    monkeypatch.setattr(plugin_setup, "is_plugin_installed",
+                        lambda: seen.append("claude") or True)
+    monkeypatch.setattr(plugin_setup, "is_plugin_installed_codex",
+                        lambda: seen.append("codex") or False)
+    assert plugin_setup.hook_available("claude") is True
+    assert plugin_setup.hook_available("codex") is False
+    assert seen == ["claude", "codex"]
+
+
+def test_hook_available_is_false_for_an_unknown_harness(homes, monkeypatch):
+    # opencode has no prompt hook at all: nothing to detect, and no
+    # detection call to make
+    monkeypatch.setattr(plugin_setup, "is_plugin_installed",
+                        lambda: pytest.fail("probed claude for opencode"))
+    monkeypatch.setattr(plugin_setup, "is_plugin_installed_codex",
+                        lambda: pytest.fail("probed codex for opencode"))
+    assert plugin_setup.hook_available("opencode") is False
 
 
 # -- offer -------------------------------------------------------------------

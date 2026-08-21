@@ -811,12 +811,12 @@ def sync() -> None:
 
 @main.group()
 def plugin() -> None:
-    """Manage tandem's Claude Code plugin."""
+    """Manage tandem's hook plugin (claude, mirrored onto codex)."""
 
 
 @plugin.command(name="install")
 def plugin_install_cmd() -> None:
-    """Install the plugin via claude (marketplace add + plugin install)."""
+    """Install the plugin via claude, then mirror it onto codex."""
     from .plugin_setup import install_plugin
 
     sys.exit(0 if install_plugin() else 1)
