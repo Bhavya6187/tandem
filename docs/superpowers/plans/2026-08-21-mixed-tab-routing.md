@@ -225,8 +225,18 @@ def _resolve_codex(name: str) -> str | None:
 
 
 def _bare_model(name: str, participants: list[str]) -> RouteDecision | None:
+    """The claude/codex model a bare `@name` asks for, or None.
+
+    The claude arm is gated on a path-free raw token because a file mention
+    must never be eaten: `@CLAUDE.md`, `@.claude/settings.json` and
+    `@claude/agents/foo.md` all normalize to something starting "claude", and
+    routing one would block a typed prompt to run `claude --model CLAUDE.md`.
+    No claude model name carries a '/' or a '.', so full slugs
+    (`claude-sonnet-5`) still route; a dotted spelling like `@claude-3.5`
+    falls back to passthrough, which is the cheap failure of the two."""
     n = re.sub(r"[^a-z0-9]", "", name.lower())
-    if "claude" in participants and (
+    path_free = "/" not in name and "." not in name
+    if "claude" in participants and path_free and (
             n in CLAUDE_MODEL_ALIASES or n.startswith("claude")):
         return RouteDecision("claude", name, _reason("claude", name))
     if "codex" in participants:

@@ -71,6 +71,24 @@ def test_bare_claude_alias_routes_to_claude():
     assert body == "summarize the diff"
 
 
+def test_claude_file_mentions_pass_through(monkeypatch):
+    # the killer case: every one of these normalizes to a "claude" prefix,
+    # and routing one would run `claude --model CLAUDE.md` on a typed prompt
+    monkeypatch.setattr(promptroute.modelcat, "load_catalog",
+                        lambda: [{"slug": "gpt-5.3-codex", "visibility": "show"}])
+    for prompt in ("@CLAUDE.md summarize this",
+                   "@.claude/settings.json what does this do",
+                   "@claude/agents/foo.md explain"):
+        assert parse_prefix(prompt, PARTS) is None, prompt
+
+
+def test_full_claude_slug_still_routes():
+    d, body = parse_prefix("@claude-sonnet-5 rewrite it", PARTS)
+    assert d == RouteDecision(harness="claude", model="claude-sonnet-5",
+                              reason="→ claude · claude-sonnet-5")
+    assert body == "rewrite it"
+
+
 def test_bare_codex_model_needs_catalog(monkeypatch):
     monkeypatch.setattr(promptroute.modelcat, "load_catalog", lambda: None)
     assert parse_prefix("@gpt-5.3-codex go", PARTS) is None
