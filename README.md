@@ -68,6 +68,84 @@ network calls — set `rate_limits = false` under `[frame]` in
 [Configuration](https://github.com/Bhavya6187/tandem/blob/main/docs/configuration.md)
 for the status bar's other settings.
 
+## The mixed tab
+
+**Ctrl-]** cycles through your CLIs and then one more stop: **mixed**. The
+mixed tab shows a real CLI — whichever one it is focused on — and adds one
+thing. A prompt that starts with an `@target` runs that turn somewhere else:
+
+```text
+@codex rewrite this migration to be idempotent
+@haiku what does this regex do?
+@codex:gpt-5.6-luna review the diff for races
+```
+
+Three forms are recognized, and only as the prompt's first token:
+
+| Form | Example | What it does |
+| --- | --- | --- |
+| `@<cli>` | `@claude`, `@codex`, `@opencode` | Runs the turn there, on the model that CLI is already set to |
+| `@<model>` | `@opus`, `@haiku`, `@gpt-5.6-luna` | Picks the CLI that owns the model and pins the model for that turn |
+| `@<cli>:<model>` | `@codex:gpt-5.6-luna`, `@opencode:anthropic/claude-sonnet-5` | The explicit form, for names the short ones can't reach |
+
+Claude models are named by family alias (`opus`, `sonnet`, `haiku`, `fable`)
+or by full slug (`claude-sonnet-5`). Codex model names resolve against the
+catalog Codex keeps in `~/.codex/models_cache.json`, so `@gpt-5.6-luna` and
+its display name both work. opencode wants provider-qualified names, which
+only the explicit form can carry.
+
+Staying put is free: a prompt with no prefix — or one naming the CLI you are
+already in — runs right there, natively. An `@token` that names nothing
+routable is left alone, so `@src/foo.py` and `@CLAUDE.md` are still file
+mentions. The other tabs are unchanged: `@` means nothing to tandem outside
+the mixed tab.
+
+A routed turn does not run where you typed it. That CLI answers with one
+line naming where it went instead:
+
+```text
+tandem: → codex · gpt-5.6-luna — running there
+```
+
+tandem then flips to Codex — relaunching it with that model pinned — pastes
+the prompt into its composer, and the turn runs there natively. The reply
+syncs back to the other CLIs as usual, so the next turn can go anywhere. A
+routed flip always starts the target fresh, so it costs a full start-up
+rather than the pipelined one behind a plain **Ctrl-]**.
+
+The tab bar carries the tab you are in. In a harness tab an idle `mixed ○`
+slot sits at the end of the row; in the mixed tab that slot is the active
+one and holds the focus CLI's name and stats:
+
+```text
+ claude ● 144k ctx · 7.6M↑ 312k↓ · 5h 4% │ codex ○ 7d 12% │ mixed ○   ^] flips
+ claude ○ │ codex ○ 7d 12% │ mixed ● claude · 144k ctx · 7.6M↑ 312k↓ · 5h 4%   ^] flips
+```
+
+Intercepting a prompt needs tandem's prompt hook inside the CLI you type
+into. Claude Code and Codex (0.145+) have one, and `tandem plugin install`
+registers tandem with both; opencode has none. When the focused CLI can't
+intercept, the bar says so instead of eating your prefix as literal text:
+
+```text
+ opencode ○ │ claude ○ │ codex ○ │ mixed ● opencode (no @-routing)   ^] flips
+```
+
+`tandem doctor` reports which CLIs are set up. Routing *to* a CLI always
+works — only routing *from* one needs the hook.
+
+If a routed prompt can't be delivered — the target never got ready, or the
+flip landed elsewhere — tandem keeps it and says so on exit, quoting it back
+so you can re-type it in the target. Nothing is dropped silently.
+
+The mixed tab remembers the CLI it last showed. The first time you enter it,
+it adopts the one you came from, and `tandem resume` restores both the tab
+and its focus. Choosing the target is manual today; a router that proposes
+one is the next step, and the `@` prefix stays the way to overrule it.
+
+Don't want the fourth stop? Set `mixed = false` under `[frame]` in
+`~/.tandem/config.toml` and **Ctrl-]** cycles through your CLIs only.
+
 ## Why tandem?
 
 - **Keep going when a model hits its limit.** The tab bar shows each
@@ -75,6 +153,9 @@ for the status bar's other settings.
   same files and conversation history.
 - **Bring different models to the same problem.** Ask another CLI for a
   second opinion without copying a wall of context between terminals.
+- **Send a single turn to the CLI that suits it.** In the mixed tab,
+  `@codex …` or `@haiku …` runs that one turn there and syncs the reply
+  back — same session, same files, same history.
 - **Keep the native tools you already use.** Claude Code, Codex, and
   opencode retain their own interfaces, commands, keybindings, and MCP
   servers.
@@ -118,7 +199,7 @@ locations.
 | Command | What it does |
 | --- | --- |
 | `tandem` | Start a new session |
-| `Ctrl-]` | Continue in the next CLI |
+| `Ctrl-]` | Continue in the next CLI, then in the mixed tab |
 | `tandem resume [id]` | Resume the latest or a specific session in this directory |
 | `tandem sessions [-n N]` | List recent sessions across directories |
 | `tandem run --on codex "…"` | Send one contextual prompt to another CLI (`claude`, `codex`, or `opencode`) |
@@ -130,7 +211,8 @@ locations.
 - [GPT subagents](https://github.com/Bhavya6187/tandem/blob/main/docs/subagents.md) —
   plugin setup, worker models, routing, and sandboxing
 - [Configuration](https://github.com/Bhavya6187/tandem/blob/main/docs/configuration.md) —
-  participants, startup arguments, the switch key, and the status bar
+  participants, startup arguments, the switch key, the status bar, and the
+  mixed tab
 - [How tandem works](https://github.com/Bhavya6187/tandem/blob/main/docs/how-it-works.md) —
   synchronization, switching, compatibility, and local data
 - [Developing tandem](https://github.com/Bhavya6187/tandem/blob/main/docs/development.md) —

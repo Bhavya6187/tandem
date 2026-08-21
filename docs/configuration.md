@@ -67,13 +67,13 @@ swallow the settings tandem appends after it and break turn tracking.
 Malformed values (a non-list, empty or non-string elements) are
 silently ignored rather than failing the launch.
 
-## [frame] — the flip key, the tab bar, and warm flips
+## [frame] — the flip key, the tab bar, warm flips, and the mixed tab
 
 The frame is tandem's own surface inside a running session: one reserved
 keybind that flips to the next harness in the cycle, the one-line tab
 bar on the bottom terminal row (participants, flip key, the active
-model's live token stats, and each account's rate-limit windows), and
-the pipelined boot behind the flip.
+model's live token stats, and each account's rate-limit windows), the
+pipelined boot behind the flip, and the mixed tab the cycle ends on.
 
 ```toml
 [frame]
@@ -81,6 +81,7 @@ flip_key = "ctrl-]"
 bar = true
 warm = true          # boot the incoming harness while the outgoing one shuts down
 rate_limits = true   # poll each account's usage windows for the bar
+mixed = true         # the mixed tab joins the flip cycle
 ```
 
 | key | default | meaning |
@@ -89,6 +90,17 @@ rate_limits = true   # poll each account's usage windows for the bar
 | `bar` | `true` | The one-line tab bar on the bottom terminal row, including the active slot's token stats. `false` hides it; the flip still works. |
 | `warm` | `true` | Overlap the two halves of a flip: the incoming harness starts booting the moment the flip fires (a mid-turn press waits for the turn boundary first), while the outgoing one is still shutting down. `false` gives fully serial flips — the boot only begins once the old harness is gone. Flips *into* opencode are always serial (its TUI must open after the last turn has landed in its database). |
 | `rate_limits` | `true` | Show each participant's account rate limits on its slot (`5h 4% 7d 41%` — percent *used* per window). Polled every 60 s and after each response from the same account endpoints `claude`'s `/usage` and `codex`'s `/status` call, with the credentials those CLIs already keep; these are tandem's only outbound network calls. `false` makes none of them; the figures also stay blank for API-key logins or when a fetch fails. |
+| `mixed` | `true` | The mixed tab — the stop the flip cycle adds after the last harness, where a prompt starting `@codex`, `@haiku` or `@codex:gpt-5.6-luna` runs that one turn in the named harness (the [README](../README.md#the-mixed-tab) has the grammar). `false` leaves the cycle holding your harnesses only, and an `@` prefix is then ordinary prompt text everywhere. |
+
+The mixed tab is a view over the harnesses tandem already runs, not a
+fourth session: it shows one harness's native UI, and the turns you
+prefix are dispatched to another. Moving in or out of it is instant when
+the harness on screen stays the same — only a move that changes which
+harness runs pays a flip. Routing *from* claude or codex also needs
+tandem's plugin registered there (`tandem plugin install`); a focus that
+cannot intercept prompts — opencode always, claude or codex without the
+plugin — says `(no @-routing)` on the bar rather than swallowing the
+prefix, and `tandem doctor` names which harnesses are set up.
 
 An unparseable value falls back to the default rather than failing the
 launch. If a terminal can't sustain the bar, tandem drops it for the rest
