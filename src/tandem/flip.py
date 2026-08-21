@@ -129,6 +129,22 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
     finally:
         # Hint first: state bookkeeping must not be able to swallow it.
         click.echo(f"to continue this session: tandem resume {tandem_id}")
+        # The session is over, so no mixer owns that file any more — and a
+        # file left saying `mixed` is a trap the user can walk into without
+        # tandem at all. The hook's identity gate only asks that the prompt
+        # came from the focus harness's native session id, which is exactly
+        # what `claude -r <same id>` outside tandem hands it: it would read a
+        # live-looking frame, block the prompt and stash it for a frame that
+        # no longer exists. Stamping the tab off closes it. Same shape as the
+        # two startup stamps (`_tab_state`'s mixed-off branch and the
+        # degraded-read guard above), and best-effort by the same
+        # construction — `routefile._write_json` swallows its own errors, so
+        # this cannot raise into a finally that still has a standby to reap.
+        # Accepted residual: a SIGKILL'd frame never runs this, so the trap
+        # survives a hard kill. Nothing in-process can cover that; the next
+        # `tandem` / `tandem resume` in the directory re-stamps the file.
+        routefile.write_frame_state(
+            tandem_id, {"tab": "harness", "focus": "", "routing_ok": False})
         # Nested so the reap survives a raising store — a locked sqlite (a
         # concurrent `tandem sub` holds its own) must not be the reason a
         # hidden harness outlives the session with nothing left to reap it.

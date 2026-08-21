@@ -654,7 +654,8 @@ class InteractiveRunner:
             monitor.flip_pressed()
 
     def _deliver_inject(self, active: str, active_sid: str | None, adapter,
-                        control: PtyControl, stop: threading.Event) -> None:
+                        control: PtyControl, stop: threading.Event,
+                        monitor) -> None:
         """Type this run's routed prompt into its harness once the harness is
         ready to take one, then drop the route file.
 
@@ -679,15 +680,36 @@ class InteractiveRunner:
         gate in `_run`, where a stale "waiting" only means flipping a beat
         early — a safe answer there, not here.)
 
+        Two liveness questions, not one. `stop` says the run is over, but it
+        is set in `_run`'s finally — *after* `run_in_pty` returns, which is
+        after the quit ladder has already killed the child. The ladder itself
+        runs while the harness is still alive and draining input, so `stop`
+        alone would let a paste land in a harness that is on its way out and
+        then clear the route file believing it delivered. `monitor` answers
+        the other half (`flip_requested` = the ladder is running or about to,
+        `armed()` = a press is waiting on the turn boundary), and it is asked
+        twice: once before the paste, and again before the clear, since a
+        flip can fire in between. It is passed in rather than read off self
+        because it is `_run`'s local — one monitor per run, and an attribute
+        would outlive the run it belongs to.
+
         Failure never destroys the prompt: the route file stays on disk and
         `inject_failed` turns it into an exit note, so the user can see what
-        was meant to land and re-type it."""
+        was meant to land and re-type it. The guards fail in that direction on
+        purpose — the worst case is a delivered prompt that also earns a
+        "kept" note, which costs a duplicate line, not a turn."""
         req = self.inject
         if req is None:
             return
         if req.target != active:
             self.inject_failed = True   # ladder landed elsewhere; keep
             return                      # the file for the user to see
+
+        def flipping() -> bool:
+            # plain reads of a flag and an Event, in the monitor's own
+            # lock-free contract: never blocks this thread, never raises
+            return bool(monitor.flip_requested) or bool(monitor.armed())
+
         deadline = time.time() + 30
         ready = False
         while time.time() < deadline and not stop.is_set():
@@ -707,7 +729,7 @@ class InteractiveRunner:
                 time.sleep(2.5)
                 ready = True
                 break
-        if not ready or stop.is_set():
+        if not ready or stop.is_set() or flipping():
             self.inject_failed = True
             return
         body = req.prompt.encode()
@@ -716,10 +738,21 @@ class InteractiveRunner:
         if ok:
             time.sleep(0.15)   # let the composer ingest the paste
             ok = control.write(b"\r")
-        if ok:
-            routefile.clear_route(self.session.tandem_id)
-        else:
+        if not ok or flipping():
             self.inject_failed = True
+            return
+        # Clear only what this delivery actually delivered. The hook writes
+        # durably and never waits for the frame, so a second routed prompt
+        # can have overwritten the slot while this paste was in flight — and
+        # an unconditional unlink would delete a prompt that never ran. Same
+        # prompt+target identity check the hook uses to prove its own stash
+        # landed; `state` is deliberately not compared (this run marked it
+        # dispatched, the file may say either). A `None` read is the file
+        # already gone or aged past the TTL — ours either way, so it goes.
+        cur = routefile.read_route(self.session.tandem_id)
+        if cur is None or (cur.prompt == req.prompt
+                           and cur.target == req.target):
+            routefile.clear_route(self.session.tandem_id)
 
     def _run(self, adopting: bool) -> int:
         session = self.session
@@ -944,9 +977,12 @@ class InteractiveRunner:
                 self.route_request = None
                 routefile.clear_route(session.tandem_id)
                 # list.append is atomic; the reporting read happens after
-                # this thread is joined in the finally below
+                # this thread is joined in the finally below. Quoted whole,
+                # like every other route note: the file is gone by the time
+                # this prints, so the note IS the prompt — a long exit line
+                # beats a prompt the user cannot get back.
                 notes.append("routed turn cancelled — the prompt was "
-                             f"discarded: {req.prompt[:60]!r}")
+                             f"discarded: {req.prompt!r}")
 
         if tabs is not None:
             # plain assignment, like on_flip_decided: the monitor thread has
@@ -956,20 +992,26 @@ class InteractiveRunner:
         def mixer_thread() -> None:
             last_version = -1
             # A leftover route from a crashed run must not replay a stale
-            # prompt: a `dispatched` leftover means a routed prompt never
-            # landed and is surfaced through notes at exit; either way the
-            # file goes. The clear is unconditional because `read_route`
-            # answers None for anything past its TTL whatever the file says
-            # — keying the clear off what it returned would strand such a
-            # file on disk forever. Not while this run is the one delivering
-            # it: that file is the injector's, and only the injector clears
-            # it.
+            # prompt, so the file goes — but never silently, whatever state
+            # it is in. `dispatched` means a routed prompt never landed;
+            # `pending` means one was never even picked up, which a user can
+            # reach without crashing anything (route while a flip is already
+            # armed: the mixer refuses the claim, the flip proceeds, and this
+            # sweep is what eats the request). Both are a typed prompt about
+            # to be deleted, and the note is the only copy the user gets.
+            # The clear stays unconditional because `read_route` answers None
+            # for anything past its TTL whatever the file says — keying the
+            # clear off what it returned would strand such a file on disk
+            # forever. Not while this run is the one delivering it: that file
+            # is the injector's, and only the injector clears it.
             if self.inject is None:
                 left = routefile.read_route(session.tandem_id)
-                if left is not None and left.state == "dispatched":
+                if left is not None:
+                    what = ("never delivered" if left.state == "dispatched"
+                            else "never picked up")
                     notes.append(
-                        "a routed prompt was never delivered and was kept: "
-                        f"{left.prompt[:60]!r} (target {left.target})")
+                        f"a routed prompt was {what} and was kept: "
+                        f"{left.prompt!r} (target {left.target})")
                 routefile.clear_route(session.tandem_id)
             while not mixer_stop.is_set():
                 # version is the whole change feed: every TabState mutation
@@ -985,7 +1027,8 @@ class InteractiveRunner:
                 mixer_stop.wait(0.25)
 
         def injector_thread() -> None:
-            self._deliver_inject(active, active_sid, adapter, control, stop)
+            self._deliver_inject(active, active_sid, adapter, control, stop,
+                                 monitor)
 
         def tail_thread() -> None:
             # Own store/connection: sqlite handles are thread-bound, and the
@@ -1145,7 +1188,7 @@ class InteractiveRunner:
             # lost — the user just has to put it in by hand
             notes.append(
                 "routed prompt was not delivered — it is preserved; re-type"
-                f" it in {self.inject.target} ({self.inject.prompt[:60]!r})"
+                f" it in {self.inject.target} ({self.inject.prompt!r})"
             )
         self.reports = [f"tandem: sync error: {err}" for err in errors]
         self.reports += [f"tandem: {note}" for note in notes]

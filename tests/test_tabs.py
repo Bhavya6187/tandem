@@ -1,8 +1,17 @@
 """Tab state machine: which presses are bar-only and which are real flips."""
 
-from tandem.tabs import TabMove, TabState
+from tandem.frame import MIXED_TAB
+from tandem.tabs import MIXED, TabMove, TabState
 
 PARTS = ["claude", "codex", "opencode"]
+
+
+def test_the_bar_reads_the_same_mixed_marker_this_module_writes():
+    """`snapshot()["tab"]` is written here and read by the bar (and by the
+    prompt hook). The two constants are declared in different modules, so a
+    rename on either side would silently stop the bar showing the mixed slot
+    as active — with nothing else failing."""
+    assert MIXED_TAB == MIXED
 
 
 def test_harness_cycle_presses_flip_to_next():

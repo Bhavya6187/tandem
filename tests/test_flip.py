@@ -936,9 +936,44 @@ def test_run_session_stamps_a_stale_frame_file_when_mixed_is_off(sess):
 
 
 def test_run_session_leaves_the_frame_file_to_the_mixer_when_mixed_is_on(sess):
-    """With the tab cycle live the runner's mixer owns that file; a second
-    writer in the flip loop would fight it."""
+    """With the tab cycle live the runner's mixer owns that file *while a run
+    is up*; a second writer in the flip loop would fight it. Only the exit
+    stamp writes it from here, and only once every mixer is gone."""
     seeded = {"tab": "mixed", "focus": "claude", "routing_ok": True}
     routefile.write_frame_state(sess.tandem_id, seeded)
+    seen = []
+
+    def run_harness(session):
+        seen.append(routefile.read_frame_state(sess.tandem_id))
+        return 0
+
+    flip.run_session(sess.tandem_id, None, run_harness=run_harness)
+    assert seen == [seeded]        # untouched for as long as the run owns it
+
+
+def test_run_session_stamps_the_frame_file_on_exit(sess):
+    """Exiting from the mixed tab leaves the frame file saying `mixed`, and
+    the hook's identity gate does not care that tandem is gone: resuming the
+    same native session outside tandem (`claude -r`, same session id) makes
+    it block and stash prompts with no frame alive to pick them up."""
+    routefile.write_frame_state(sess.tandem_id, {"tab": "mixed",
+                                                 "focus": "claude",
+                                                 "routing_ok": True})
     flip.run_session(sess.tandem_id, None, run_harness=fake_runner([]))
-    assert routefile.read_frame_state(sess.tandem_id) == seeded
+    assert routefile.read_frame_state(sess.tandem_id) == {
+        "tab": "harness", "focus": "", "routing_ok": False}
+
+
+def test_the_exit_stamp_lands_after_a_flip_too(sess, monkeypatch):
+    """Not only on the one-run path: a session that flipped its way to the
+    mixed tab is exactly the one that leaves a `mixed` file behind."""
+    _flipping_switch(monkeypatch)
+    routefile.write_frame_state(sess.tandem_id, {"tab": "mixed",
+                                                 "focus": "claude",
+                                                 "routing_ok": True})
+    log = []
+    flip.run_session(sess.tandem_id, None,
+                     run_harness=fake_runner(log, codes=[(0, True), (0, False)]))
+    assert log == ["claude", "codex"]
+    assert routefile.read_frame_state(sess.tandem_id) == {
+        "tab": "harness", "focus": "", "routing_ok": False}
