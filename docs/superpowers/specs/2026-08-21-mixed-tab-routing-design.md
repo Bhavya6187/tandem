@@ -124,6 +124,17 @@ For one routed turn, focus harness X, target Y:
 New code is limited to: the hook's prefix branch, the route-request file
 format, and the frame's route-request → flip + inject state machine.
 
+**Protocol v2 (post-review simplification).** The route request is
+immutable and carries an `id`; the *filename* is its state, not a field.
+The hook writes `<id>-route.json` (pending); the frame claims it with one
+atomic rename to `<id>-route.claimed.json`; delivery releases it by id.
+There is no TTL — the next frame start sweeps both slots and reports what
+they held at any age, since an expiring read was the one path that could
+delete a typed prompt silently. The id is also how the hook proves its own
+stash landed (a leftover with the same text cannot vouch for it), and how
+delivery avoids releasing a second prompt that arrived mid-paste. On the
+frame side the whole lifecycle lives in one object, `routing.RouteCoordinator`.
+
 ## Router seam (built in v1, exercised by v2)
 
 ```
