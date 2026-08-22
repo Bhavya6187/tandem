@@ -770,12 +770,12 @@ def test_the_ladder_settles_the_tab_on_whoever_launched(sess3, monkeypatch):
 
 
 def test_ladder_exhaustion_leaves_the_routed_prompt_on_disk(sess3, monkeypatch):
-    """Nothing would start: the route file is still there (`dispatched`), so
-    the next frame start surfaces the prompt instead of losing it."""
+    """Nothing would start: the request is still in the frame's own slot,
+    so the next frame start surfaces the prompt instead of losing it."""
     _flipping_switch(monkeypatch)
-    req = RouteRequest("codex", "", "do it", "claude", "→ codex",
-                       state="dispatched")
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
     routefile.write_route(sess3.tandem_id, req)
+    assert routefile.claim(sess3.tandem_id, req.id) is True   # as the mixer did
 
     def run_harness(session):
         raise OSError("won't start")
@@ -783,7 +783,7 @@ def test_ladder_exhaustion_leaves_the_routed_prompt_on_disk(sess3, monkeypatch):
     code, flipped = flip._switch(sess3.tandem_id, run_harness, 0,
                                  carry=_carry(), to="codex", route=req)
     assert flipped is False
-    assert routefile.read_route(sess3.tandem_id) == req
+    assert routefile.read_claimed(sess3.tandem_id) == req
 
 
 def test_flip_loop_prefers_the_press_over_a_stale_route(sess3, monkeypatch):

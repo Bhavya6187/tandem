@@ -613,23 +613,23 @@ class InteractiveRunner:
         """One mixer tick's worth of route pickup: turn a pending route
         request into an armed flip toward its target.
 
-        Runs on the `tandem-mixer` thread — the only thread that touches the
-        route file while a run is up, which is what keeps the file's
-        pending → dispatched transition single-writer on this side (the hook
-        process owns the other side, and writes are atomic renames).
+        Runs on the `tandem-mixer` thread — the only thread on this side
+        that takes route requests, so the pending → claimed rename is
+        single-writer here (the hook process owns the other side, and
+        writes are atomic renames).
 
-        The order is claim-first and load-bearing. `tabs.routed` is a claim,
-        not an assignment: a user press records its pending move on the pump
-        thread and arms the monitor a beat later, so a tick landing inside
-        that window sees an unarmed monitor over a slot that is already
-        taken. Dispatching before claiming would burn the request on a flip
-        that goes somewhere else. On a refused claim nothing is written and
+        Two claims, in this order, and it is load-bearing. `tabs.routed` is
+        a claim, not an assignment: a user press records its pending move on
+        the pump thread and arms the monitor a beat later, so a tick landing
+        inside that window sees an unarmed monitor over a slot that is
+        already taken. Taking the request before the slot would burn it on a
+        flip that goes somewhere else. On a refused claim nothing moves and
         the request stays pending for the next tick.
 
         Everything from the claim to `flip_pressed` is exposed the same way:
-        the file write between them is not instant, and a press landing in
-        there wins the monitor. `on_wait_cancelled` is the recovery — it
-        clears both the request and the file when the arm is toggled off."""
+        the rename between them is not instant, and a press landing in there
+        wins the monitor. `on_wait_cancelled` is the recovery — it releases
+        both the request and the file when the arm is toggled off."""
         tabs = self.tabs
         if tabs is None or tabs.tab != MIXED:
             return
@@ -638,16 +638,18 @@ class InteractiveRunner:
         if monitor.armed() or monitor.flip_requested:
             return               # a flip is already in flight; not ours to take
         tandem_id = self.session.tandem_id
-        req = routefile.read_route(tandem_id)
-        if req is None or req.state != "pending":
+        req = routefile.read_pending(tandem_id)
+        if req is None:
             return
         if req.target == active or req.target not in self.session.participants:
             # nowhere to go: routing to the harness the user is already in is
             # the hook's job to prevent, and a target that left the session
             # cannot be launched. Drop it rather than arm a flip to nowhere.
-            routefile.clear_route(tandem_id)
+            routefile.release(tandem_id, req.id)
         elif tabs.routed(req.target):
-            routefile.mark_dispatched(tandem_id, req)
+            if not routefile.claim(tandem_id, req.id):
+                tabs.cancelled()   # a second prompt overwrote the slot in
+                return             # between: give the tab move back
             # plain attribute assignment, GIL-atomic: read by fire_warm on the
             # monitor thread and by the flip loop after run() returns
             self.route_request = req
@@ -741,18 +743,7 @@ class InteractiveRunner:
         if not ok or flipping():
             self.inject_failed = True
             return
-        # Clear only what this delivery actually delivered. The hook writes
-        # durably and never waits for the frame, so a second routed prompt
-        # can have overwritten the slot while this paste was in flight — and
-        # an unconditional unlink would delete a prompt that never ran. Same
-        # prompt+target identity check the hook uses to prove its own stash
-        # landed; `state` is deliberately not compared (this run marked it
-        # dispatched, the file may say either). A `None` read is the file
-        # already gone or aged past the TTL — ours either way, so it goes.
-        cur = routefile.read_route(self.session.tandem_id)
-        if cur is None or (cur.prompt == req.prompt
-                           and cur.target == req.target):
-            routefile.clear_route(self.session.tandem_id)
+        routefile.release(self.session.tandem_id, req.id)
 
     def _run(self, adopting: bool) -> int:
         session = self.session
@@ -969,13 +960,13 @@ class InteractiveRunner:
             # monitor thread, after an armed wait was toggled off. The
             # pending tab move is gone either way; a routed arm riding on it
             # has to be undone here too, including the route file — it is
-            # already "dispatched", and left alone it would be surfaced at
-            # the next frame start as a prompt that never landed.
+            # already claimed, and left alone it would be surfaced at the
+            # next frame start as a prompt that never landed.
             tabs.cancelled()
             req = self.route_request
             if req is not None:
                 self.route_request = None
-                routefile.clear_route(session.tandem_id)
+                routefile.release(session.tandem_id, req.id)
                 # list.append is atomic; the reporting read happens after
                 # this thread is joined in the finally below. Quoted whole,
                 # like every other route note: the file is gone by the time
@@ -991,28 +982,24 @@ class InteractiveRunner:
 
         def mixer_thread() -> None:
             last_version = -1
-            # A leftover route from a crashed run must not replay a stale
-            # prompt, so the file goes — but never silently, whatever state
-            # it is in. `dispatched` means a routed prompt never landed;
-            # `pending` means one was never even picked up, which a user can
-            # reach without crashing anything (route while a flip is already
-            # armed: the mixer refuses the claim, the flip proceeds, and this
-            # sweep is what eats the request). Both are a typed prompt about
-            # to be deleted, and the note is the only copy the user gets.
-            # The clear stays unconditional because `read_route` answers None
-            # for anything past its TTL whatever the file says — keying the
-            # clear off what it returned would strand such a file on disk
-            # forever. Not while this run is the one delivering it: that file
-            # is the injector's, and only the injector clears it.
+            # A leftover route from an earlier run must not replay a stale
+            # prompt into this one, so both files go — but never silently.
+            # A claimed one never landed; a pending one was never even
+            # picked up, which a user can reach without crashing anything
+            # (route while a flip is already armed: the mixer refuses the
+            # claim, the flip proceeds, and this sweep is what eats the
+            # request). Either way it is a typed prompt about to be deleted,
+            # and the note is the only copy the user gets. Not while this
+            # run is the one delivering it: that request is the injector's,
+            # and only the injector releases it.
             if self.inject is None:
-                left = routefile.read_route(session.tandem_id)
-                if left is not None:
-                    what = ("never delivered" if left.state == "dispatched"
-                            else "never picked up")
-                    notes.append(
-                        f"a routed prompt was {what} and was kept: "
-                        f"{left.prompt!r} (target {left.target})")
-                routefile.clear_route(session.tandem_id)
+                pending, claimed = routefile.sweep(session.tandem_id)
+                for left, what in ((pending, "never picked up"),
+                                   (claimed, "never delivered")):
+                    if left is not None:
+                        notes.append(
+                            f"a routed prompt was {what} and was kept: "
+                            f"{left.prompt!r} (target {left.target})")
             while not mixer_stop.is_set():
                 # version is the whole change feed: every TabState mutation
                 # bumps it, so one integer compare per tick keeps the frame

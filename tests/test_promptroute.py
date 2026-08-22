@@ -1,7 +1,6 @@
 """The mixed tab's @-prefix grammar: what routes, and what passes through."""
 
 import json
-from dataclasses import replace
 
 from tandem import promptroute
 from tandem.promptroute import RouteDecision, parse_prefix, route_prompt
@@ -159,10 +158,9 @@ class TestCli:
         assert decision["decision"] == "block"
         assert "codex" in decision["reason"]
         assert decision["reason"].endswith("running there")
-        req = routefile.read_route(env.session.tandem_id)
+        req = routefile.read_pending(env.session.tandem_id)
         assert req is not None and req.target == "codex"
-        assert req.prompt == "fix the test" and req.state == "pending"
-        assert req.source == "claude"
+        assert req.prompt == "fix the test" and req.source == "claude"
 
     def test_stashes_the_resolved_model_pin(self, env_factory):
         # the model half of the decision has to survive the CLI layer: the
@@ -174,7 +172,7 @@ class TestCli:
         r = self._typed(env, "@haiku summarize the diff", focus="codex")
         assert r.exit_code == 0
         assert "haiku" in json.loads(r.output)["reason"]
-        req = routefile.read_route(env.session.tandem_id)
+        req = routefile.read_pending(env.session.tandem_id)
         assert req is not None and req.target == "claude"
         assert req.model == "haiku" and req.source == "codex"
         assert req.prompt == "summarize the diff"
@@ -187,7 +185,7 @@ class TestCli:
         self._mixed(env, focus="codex")
         r = self._typed(env, "@codex keep going", focus="codex")
         assert r.exit_code == 0 and r.output == ""
-        assert routefile.read_route(env.session.tandem_id) is None
+        assert routefile.read_pending(env.session.tandem_id) is None
 
     def test_stay_on_focus_is_silent(self, env_factory):
         from tandem import routefile
@@ -195,7 +193,7 @@ class TestCli:
         self._mixed(env)
         r = self._typed(env, "@claude hi there")
         assert r.exit_code == 0 and r.output == ""
-        assert routefile.read_route(env.session.tandem_id) is None
+        assert routefile.read_pending(env.session.tandem_id) is None
 
     def test_foreign_window_is_silent(self, env_factory):
         # a second claude window in the same directory runs this same hook
@@ -207,7 +205,7 @@ class TestCli:
         r = self._typed(env, "@codex fix the test",
                         session_id="22222222-2222-4222-8222-222222222222")
         assert r.exit_code == 0 and r.output == ""
-        assert routefile.read_route(env.session.tandem_id) is None
+        assert routefile.read_pending(env.session.tandem_id) is None
 
     def test_payload_without_session_id_is_silent(self, env_factory):
         from tandem import routefile
@@ -215,7 +213,7 @@ class TestCli:
         self._mixed(env)
         r = self._run({"cwd": env.cwd, "prompt": "@codex fix the test"})
         assert r.exit_code == 0 and r.output == ""
-        assert routefile.read_route(env.session.tandem_id) is None
+        assert routefile.read_pending(env.session.tandem_id) is None
 
     def test_unrecorded_native_id_is_silent(self, env_factory):
         # a harness whose minted id tandem has not captured yet: there is
@@ -231,7 +229,7 @@ class TestCli:
         r = self._run({"cwd": env.cwd, "prompt": "@codex fix the test",
                        "session_id": "11111111-1111-4111-8111-111111111111"})
         assert r.exit_code == 0 and r.output == ""
-        assert routefile.read_route(blind.tandem_id) is None
+        assert routefile.read_pending(blind.tandem_id) is None
 
     def test_unstashable_route_allows_the_native_turn(self, env_factory,
                                                       monkeypatch):
@@ -244,40 +242,41 @@ class TestCli:
         r = self._typed(env, "@codex fix the test")
         assert r.exit_code == 0 and r.output == ""
 
-    def test_a_stale_route_file_cannot_vouch_for_a_failed_stash(
+    def test_a_leftover_route_file_cannot_vouch_for_a_failed_stash(
             self, env_factory, monkeypatch):
-        # an earlier request still inside the TTL is exactly what makes a
-        # bare "some route file exists" check dangerous: it would certify a
-        # write that never landed, and the block would destroy this prompt
+        # an earlier request sitting in the slot is exactly what makes a
+        # content check dangerous: re-type the same prompt after a failed
+        # pickup and prompt+target match, so the leftover would certify a
+        # write that never landed and the block would destroy this prompt.
+        # Only the id can tell the two apart.
         from tandem import routefile
         env = env_factory(active="claude")
         self._mixed(env)
-        routefile.write_route(env.session.tandem_id, routefile.RouteRequest(
-            target="codex", model="", prompt="an older prompt",
-            source="claude", reason="→ codex"))
+        leftover = routefile.RouteRequest(
+            target="codex", model="", prompt="fix the test",
+            source="claude", reason="→ codex")
+        routefile.write_route(env.session.tandem_id, leftover)
         monkeypatch.setattr(routefile, "write_route", lambda *a, **kw: None)
         r = self._typed(env, "@codex fix the test")
         assert r.exit_code == 0 and r.output == ""
-        assert routefile.read_route(env.session.tandem_id).prompt \
-            == "an older prompt"
+        assert routefile.read_pending(env.session.tandem_id) == leftover
 
-    def test_a_stash_picked_up_mid_hook_still_blocks(self, env_factory,
-                                                     monkeypatch):
-        # the frame can flip the request to "dispatched" between the write
-        # and the verifying read; treating that as a failed stash would run
-        # the prompt natively AND on the target — worse than either
+    def test_a_stash_claimed_mid_hook_still_blocks(self, env_factory,
+                                                   monkeypatch):
+        # the frame can claim the request — renaming it out of the pending
+        # slot — between the write and the verifying read; treating that as
+        # a failed stash would run the prompt natively AND on the target,
+        # which is worse than either
         from tandem import routefile
         env = env_factory(active="claude")
         self._mixed(env)
         real_write = routefile.write_route
 
-        def write_then_pickup(tandem_id, req):
+        def write_then_claim(tandem_id, req):
             real_write(tandem_id, req)
-            # what mark_dispatched does, spelled through real_write so the
-            # patch below cannot recurse into itself
-            real_write(tandem_id, replace(req, state="dispatched"))
+            assert routefile.claim(tandem_id, req.id) is True
 
-        monkeypatch.setattr(routefile, "write_route", write_then_pickup)
+        monkeypatch.setattr(routefile, "write_route", write_then_claim)
         r = self._typed(env, "@codex fix the test")
         assert json.loads(r.output)["decision"] == "block"
 

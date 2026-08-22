@@ -1728,6 +1728,14 @@ _LONG_PROMPT = ("rewrite this migration to be idempotent, then run the whole"
 assert len(_LONG_PROMPT) > 60
 
 
+def _claimed(tandem_id, req):
+    """Put a request where the frame's own slot has it: written by the hook
+    and already claimed. That is what an injecting run inherits, and what a
+    crashed run leaves behind."""
+    routefile.write_route(tandem_id, req)
+    assert routefile.claim(tandem_id, req.id) is True
+
+
 def test_runner_defaults_have_no_route_state(env_factory):
     env = env_factory(active="claude")
     r = runner.InteractiveRunner(env.session, sink_factory=None)
@@ -1735,7 +1743,7 @@ def test_runner_defaults_have_no_route_state(env_factory):
     assert r.inject is None and r.inject_failed is False
 
 
-def test_mixer_pickup_arms_and_marks_dispatched(env_factory):
+def test_mixer_pickup_arms_and_claims(env_factory):
     env = env_factory(active="claude")
     req = RouteRequest("codex", "", "do it", "claude", "→ codex")
     routefile.write_route(env.session.tandem_id, req)
@@ -1744,7 +1752,8 @@ def test_mixer_pickup_arms_and_marks_dispatched(env_factory):
     monitor = _StubMonitor()
     r._pickup_route("claude", monitor)
     assert r.route_request is not None and r.route_request.target == "codex"
-    assert routefile.read_route(env.session.tandem_id).state == "dispatched"
+    assert routefile.read_claimed(env.session.tandem_id) == req
+    assert routefile.read_pending(env.session.tandem_id) is None
     assert monitor.pressed == 1
     assert tabs.pending_target() == "codex"
 
@@ -1758,7 +1767,7 @@ def test_mixer_pickup_ignores_route_to_current_harness(env_factory):
     monitor = _StubMonitor()
     r._pickup_route("claude", monitor)
     assert r.route_request is None and monitor.pressed == 0
-    assert routefile.read_route(env.session.tandem_id) is None   # cleared
+    assert routefile.read_pending(env.session.tandem_id) is None   # cleared
 
 
 def test_mixer_pickup_clears_a_route_to_a_stranger(env_factory):
@@ -1770,13 +1779,13 @@ def test_mixer_pickup_clears_a_route_to_a_stranger(env_factory):
     monitor = _StubMonitor()
     r._pickup_route("claude", monitor)
     assert r.route_request is None and monitor.pressed == 0
-    assert routefile.read_route(env.session.tandem_id) is None
+    assert routefile.read_pending(env.session.tandem_id) is None
 
 
 def test_mixer_pickup_leaves_the_request_when_a_press_owns_the_slot(env_factory):
     # The pump records a user press before the glue arms the monitor, so a
     # tick landing in that window sees an unarmed monitor over a taken slot.
-    # The claim fails there: nothing may be dispatched or armed, and the
+    # The claim fails there: nothing may be taken or armed, and the
     # request stays pending for the next tick.
     env = env_factory(active="codex")
     routefile.write_route(env.session.tandem_id, RouteRequest(
@@ -1787,7 +1796,7 @@ def test_mixer_pickup_leaves_the_request_when_a_press_owns_the_slot(env_factory)
     monitor = _StubMonitor()
     r._pickup_route("codex", monitor)
     assert r.route_request is None and monitor.pressed == 0
-    assert routefile.read_route(env.session.tandem_id).state == "pending"
+    assert routefile.read_pending(env.session.tandem_id) is not None
 
 
 def test_mixer_pickup_holds_off_while_a_flip_is_already_in_flight(env_factory):
@@ -1799,12 +1808,12 @@ def test_mixer_pickup_holds_off_while_a_flip_is_already_in_flight(env_factory):
     r._pickup_route("claude", _StubMonitor(armed=True))
     r._pickup_route("claude", _StubMonitor(flip_requested=True))
     assert r.route_request is None
-    assert routefile.read_route(env.session.tandem_id).state == "pending"
+    assert routefile.read_pending(env.session.tandem_id) is not None
     # and never outside the mixed tab
     tabs.tab = "harness"
     r._pickup_route("claude", _StubMonitor())
     assert r.route_request is None
-    assert routefile.read_route(env.session.tandem_id).state == "pending"
+    assert routefile.read_pending(env.session.tandem_id) is not None
 
 
 class _InjectChild:
@@ -1822,8 +1831,7 @@ def test_deliver_inject_pastes_and_clears(env_factory, monkeypatch):
     from tandem.ptyrun import PtyControl
 
     env = env_factory(active="codex")
-    req = RouteRequest("codex", "", "do it", "claude", "→ codex",
-                       state="dispatched")
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
     routefile.write_route(env.session.tandem_id, req)
 
     class StubAdapter:      # no session_status attr: fixed-delay path
@@ -1837,15 +1845,14 @@ def test_deliver_inject_pastes_and_clears(env_factory, monkeypatch):
                       control, threading.Event(), _StubMonitor())
     assert child.written == b"\x1b[200~do it\x1b[201~\r"
     assert r.inject_failed is False
-    assert routefile.read_route(env.session.tandem_id) is None
+    assert routefile.read_pending(env.session.tandem_id) is None
 
 
 def test_deliver_inject_waits_for_a_waiting_status(env_factory, monkeypatch):
     from tandem.ptyrun import PtyControl
 
     env = env_factory(active="claude")
-    req = RouteRequest("claude", "", "do it", "codex", "→ claude",
-                       state="dispatched")
+    req = RouteRequest("claude", "", "do it", "codex", "→ claude")
     routefile.write_route(env.session.tandem_id, req)
     answers = ["busy", "busy", "waiting"]
 
@@ -1882,8 +1889,7 @@ def test_deliver_inject_never_believes_opencodes_status(tmp_path, monkeypatch):
                         lambda self, sid: asked.append(sid) or "waiting")
     slept = []
     monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
-    req = RouteRequest("opencode", "", "do it", "claude", "→ opencode",
-                       state="dispatched")
+    req = RouteRequest("opencode", "", "do it", "claude", "→ opencode")
     routefile.write_route(env.session.tandem_id, req)
     control, child = PtyControl(), _InjectChild()
     control.attach(child)
@@ -1900,22 +1906,20 @@ def test_deliver_inject_wrong_target_keeps_file(env_factory):
     from tandem.ptyrun import PtyControl
 
     env = env_factory(active="claude")
-    req = RouteRequest("codex", "", "do it", "claude", "→ codex",
-                       state="dispatched")
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
     routefile.write_route(env.session.tandem_id, req)
     r = runner.InteractiveRunner(env.session, sink_factory=None, inject=req)
     r._deliver_inject("claude", "c-id", object(), PtyControl(),
                       threading.Event(), _StubMonitor())
     assert r.inject_failed is True
-    assert routefile.read_route(env.session.tandem_id) is not None
+    assert routefile.read_pending(env.session.tandem_id) is not None
 
 
 def test_deliver_inject_failed_write_keeps_file(env_factory, monkeypatch):
     from tandem.ptyrun import PtyControl
 
     env = env_factory(active="codex")
-    req = RouteRequest("codex", "", "do it", "claude", "→ codex",
-                       state="dispatched")
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
     routefile.write_route(env.session.tandem_id, req)
 
     class StubAdapter:
@@ -1927,15 +1931,14 @@ def test_deliver_inject_failed_write_keeps_file(env_factory, monkeypatch):
                       threading.Event(),   # nothing attached: write fails
                       _StubMonitor())
     assert r.inject_failed is True
-    assert routefile.read_route(env.session.tandem_id) is not None
+    assert routefile.read_pending(env.session.tandem_id) is not None
 
 
 def test_deliver_inject_gives_up_when_the_run_is_stopping(env_factory, monkeypatch):
     from tandem.ptyrun import PtyControl
 
     env = env_factory(active="claude")
-    req = RouteRequest("claude", "", "do it", "codex", "→ claude",
-                       state="dispatched")
+    req = RouteRequest("claude", "", "do it", "codex", "→ claude")
     routefile.write_route(env.session.tandem_id, req)
 
     class StubAdapter:
@@ -1951,7 +1954,7 @@ def test_deliver_inject_gives_up_when_the_run_is_stopping(env_factory, monkeypat
     r._deliver_inject("claude", "c-id", StubAdapter(), control, stop,
                       _StubMonitor())
     assert r.inject_failed is True and child.written == b""
-    assert routefile.read_route(env.session.tandem_id) is not None
+    assert routefile.read_pending(env.session.tandem_id) is not None
 
 
 def test_deliver_inject_holds_off_while_a_flip_is_in_flight(env_factory,
@@ -1963,8 +1966,7 @@ def test_deliver_inject_holds_off_while_a_flip_is_in_flight(env_factory,
     from tandem.ptyrun import PtyControl
 
     env = env_factory(active="codex")
-    req = RouteRequest("codex", "", "do it", "claude", "→ codex",
-                       state="dispatched")
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
 
     class StubAdapter:
         pass
@@ -1979,7 +1981,7 @@ def test_deliver_inject_holds_off_while_a_flip_is_in_flight(env_factory,
                           StubAdapter(), control, threading.Event(), monitor)
         assert child.written == b""          # nothing typed into a dying CLI
         assert r.inject_failed is True
-        assert routefile.read_route(env.session.tandem_id) is not None
+        assert routefile.read_pending(env.session.tandem_id) is not None
 
 
 def test_deliver_inject_keeps_the_file_when_the_flip_lands_mid_paste(
@@ -1990,8 +1992,7 @@ def test_deliver_inject_keeps_the_file_when_the_flip_lands_mid_paste(
     from tandem.ptyrun import PtyControl
 
     env = env_factory(active="codex")
-    req = RouteRequest("codex", "", "do it", "claude", "→ codex",
-                       state="dispatched")
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
     routefile.write_route(env.session.tandem_id, req)
     monitor = _StubMonitor()
 
@@ -2011,7 +2012,7 @@ def test_deliver_inject_keeps_the_file_when_the_flip_lands_mid_paste(
     r._deliver_inject("codex", env.session.native_id("codex"), StubAdapter(),
                       control, threading.Event(), monitor)
     assert r.inject_failed is True
-    assert routefile.read_route(env.session.tandem_id) is not None
+    assert routefile.read_pending(env.session.tandem_id) is not None
 
 
 def test_deliver_inject_never_clears_someone_elses_route(env_factory,
@@ -2024,8 +2025,7 @@ def test_deliver_inject_never_clears_someone_elses_route(env_factory,
     from tandem.ptyrun import PtyControl
 
     env = env_factory(active="codex")
-    req = RouteRequest("codex", "", "do it", "claude", "→ codex",
-                       state="dispatched")
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
     routefile.write_route(env.session.tandem_id, req)
     later = RouteRequest("claude", "", "and then this one", "codex",
                          "→ claude")
@@ -2046,7 +2046,7 @@ def test_deliver_inject_never_clears_someone_elses_route(env_factory,
     r._deliver_inject("codex", env.session.native_id("codex"), StubAdapter(),
                       control, threading.Event(), _StubMonitor())
     assert r.inject_failed is False          # this one did land
-    survivor = routefile.read_route(env.session.tandem_id)
+    survivor = routefile.read_pending(env.session.tandem_id)
     assert survivor is not None and survivor.prompt == "and then this one"
 
 
@@ -2054,9 +2054,8 @@ def test_runner_notes_an_undelivered_routed_prompt(env_factory, monkeypatch):
     # the injector thread really runs here: the ladder landed in codex while
     # the prompt was routed to claude, so it gives up without writing
     env = env_factory(active="codex")
-    req = RouteRequest("claude", "", _LONG_PROMPT, "codex", "→ claude",
-                       state="dispatched")
-    routefile.write_route(env.session.tandem_id, req)
+    req = RouteRequest("claude", "", _LONG_PROMPT, "codex", "→ claude")
+    _claimed(env.session.tandem_id, req)
 
     def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
         assert _wait_for(lambda: r.inject_failed)
@@ -2071,7 +2070,7 @@ def test_runner_notes_an_undelivered_routed_prompt(env_factory, monkeypatch):
     assert any("routed prompt was not delivered" in line
                and _LONG_PROMPT in line
                and "re-type it in claude" in line for line in r.reports)
-    assert routefile.read_route(env.session.tandem_id) is not None
+    assert routefile.read_claimed(env.session.tandem_id) is not None
 
 
 @pytest.fixture
@@ -2164,16 +2163,16 @@ def test_frame_state_says_routing_is_off_without_the_plugin(env_factory,
         "tab": "mixed", "focus": "claude", "routing_ok": False}
 
 
-def test_mixer_startup_surfaces_and_clears_a_leftover_dispatch(env_factory,
-                                                               monkeypatch):
+def test_mixer_startup_surfaces_and_clears_a_leftover_claim(env_factory,
+                                                            monkeypatch):
     env = env_factory(active="claude")
-    routefile.write_route(env.session.tandem_id, RouteRequest(
-        "codex", "", _LONG_PROMPT, "claude", "→ codex", state="dispatched"))
+    _claimed(env.session.tandem_id, RouteRequest(
+        "codex", "", _LONG_PROMPT, "claude", "→ codex"))
+    path = routefile._claimed_path(env.session.tandem_id)
     tabs = TabState(env.session.participants, tab="mixed", focus="claude")
 
     def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
-        assert _wait_for(
-            lambda: not routefile._route_path(env.session.tandem_id).exists())
+        assert _wait_for(lambda: not path.exists())
         return 0
 
     monkeypatch.setattr(runner, "TranscriptWatcher", _QuietWatcher)
@@ -2197,7 +2196,7 @@ def test_mixer_startup_surfaces_and_clears_a_leftover_pending_route(
 
     def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
         assert _wait_for(
-            lambda: not routefile._route_path(env.session.tandem_id).exists())
+            lambda: not routefile._pending_path(env.session.tandem_id).exists())
         return 0
 
     monkeypatch.setattr(runner, "TranscriptWatcher", _QuietWatcher)
@@ -2208,16 +2207,16 @@ def test_mixer_startup_surfaces_and_clears_a_leftover_pending_route(
                and "codex" in line for line in r.reports)
 
 
-def test_mixer_startup_clears_a_ttl_stale_route_file(env_factory, monkeypatch):
-    # `read_route` answers None past the TTL whatever the state, so a clear
-    # keyed off what it returned would leave the file on disk forever.
+def test_mixer_startup_surfaces_an_old_leftover_too(env_factory, monkeypatch):
+    """Age is not a reason to keep quiet. A prompt typed before lunch is
+    still a prompt the user typed, and the sweep deletes it either way — so
+    an age cut-off could only ever turn a note into a silent loss."""
     env = env_factory(active="claude")
     routefile.write_route(env.session.tandem_id, RouteRequest(
-        "codex", "", "do it", "claude", "→ codex"))
-    path = routefile._route_path(env.session.tandem_id)
-    old = time.time() - routefile.ROUTE_TTL - 60
+        "codex", "", _LONG_PROMPT, "claude", "→ codex"))
+    path = routefile._pending_path(env.session.tandem_id)
+    old = time.time() - 86400
     os.utime(path, (old, old))
-    assert routefile.read_route(env.session.tandem_id) is None
     tabs = TabState(env.session.participants, tab="mixed", focus="claude")
 
     def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
@@ -2229,15 +2228,15 @@ def test_mixer_startup_clears_a_ttl_stale_route_file(env_factory, monkeypatch):
     r = runner.InteractiveRunner(env.session, _null_sink, tabs=tabs)
     r.run()
     assert not path.exists()
-    assert r.reports == []          # stale, not surfaced
+    assert any("never picked up" in line and _LONG_PROMPT in line
+               for line in r.reports)
 
 
 def test_mixer_startup_leaves_the_route_this_run_is_delivering(env_factory,
                                                                monkeypatch):
     env = env_factory(active="codex")
-    req = RouteRequest("codex", "", "do it", "claude", "→ codex",
-                       state="dispatched")
-    routefile.write_route(env.session.tandem_id, req)
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
+    _claimed(env.session.tandem_id, req)
     tabs = TabState(env.session.participants, tab="mixed", focus="codex")
 
     def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
@@ -2254,7 +2253,7 @@ def test_mixer_startup_leaves_the_route_this_run_is_delivering(env_factory,
     # which must keep its hands off the route this run is there to deliver.
     r = runner.InteractiveRunner(env.session, _null_sink, tabs=tabs, inject=req)
     r.run()
-    assert routefile.read_route(env.session.tandem_id) is not None
+    assert routefile.read_claimed(env.session.tandem_id) is not None
 
 
 def test_no_warm_fire_when_the_flip_is_routed(env_factory, monkeypatch):
@@ -2346,7 +2345,7 @@ def test_the_mixer_thread_picks_a_live_route_up_and_a_cancel_undoes_it(
             "codex", "", _LONG_PROMPT, "claude", "→ codex"))
         assert _wait_for(lambda: r.route_request is not None)
         assert tabs.pending_target() == "codex"
-        assert routefile.read_route(env.session.tandem_id).state == "dispatched"
+        assert routefile.read_claimed(env.session.tandem_id) is not None
         assert made["monitor"].armed() is True
         made["monitor"].on_wait_cancelled()      # as the monitor thread does
         return 0
@@ -2357,7 +2356,7 @@ def test_the_mixer_thread_picks_a_live_route_up_and_a_cancel_undoes_it(
     r = runner.InteractiveRunner(env.session, _null_sink, tabs=tabs)
     r.run()
     assert r.route_request is None and tabs.pending is None
-    assert routefile.read_route(env.session.tandem_id) is None
+    assert routefile.read_pending(env.session.tandem_id) is None
     assert any("routed turn cancelled" in line and _LONG_PROMPT in line
                for line in r.reports)
 
@@ -2398,8 +2397,7 @@ def test_routed_inject_pins_the_model_at_launch(env_factory, monkeypatch):
     """The runner builds the launch, so a routed turn's model has to reach
     `build_launch` from the inject the flip loop carried in."""
     env = env_factory(active="claude")
-    req = RouteRequest("claude", "haiku", "do it", "codex", "→ claude",
-                       state="dispatched")
+    req = RouteRequest("claude", "haiku", "do it", "codex", "→ claude")
     argv, r = _argv_and_reports(env, monkeypatch, inject=req)
     assert argv[argv.index("--model") + 1] == "haiku"
     assert not any("cannot pin a model" in line for line in r.reports)
@@ -2410,8 +2408,7 @@ def test_inject_for_another_target_pins_nothing(env_factory, monkeypatch):
     harness the way it would have launched anyway (the injector then keeps
     the prompt instead of typing it in here)."""
     env = env_factory(active="claude")
-    req = RouteRequest("codex", "gpt-5.3-codex", "do it", "claude", "→ codex",
-                       state="dispatched")
+    req = RouteRequest("codex", "gpt-5.3-codex", "do it", "claude", "→ codex")
     argv, _ = _argv_and_reports(env, monkeypatch, inject=req)
     assert "--model" not in argv
 
@@ -2424,8 +2421,7 @@ def test_a_model_the_harness_cannot_pin_is_reported(env_factory, monkeypatch):
 
     env = env_factory(active="claude")
     monkeypatch.setattr(ClaudeCodeAdapter, "model_argv", lambda self, m: [])
-    req = RouteRequest("claude", "haiku", "do it", "codex", "→ claude",
-                       state="dispatched")
+    req = RouteRequest("claude", "haiku", "do it", "codex", "→ claude")
     argv, r = _argv_and_reports(env, monkeypatch, inject=req)
     assert "--model" not in argv
     assert any("claude cannot pin a model at launch — running its default"

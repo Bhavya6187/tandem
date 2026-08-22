@@ -732,19 +732,18 @@ def hook_prompt_cmd() -> None:
         if got is None:
             sys.exit(0)
         decision, body = got
-        routefile.write_route(session.tandem_id, routefile.RouteRequest(
+        req = routefile.RouteRequest(
             target=decision.harness, model=decision.model, prompt=body,
-            source=focus, reason=decision.reason))
-        req = routefile.read_route(session.tandem_id)
-        # THIS request has to be the one on disk, not merely some request: a
-        # leftover from an earlier prompt is still inside the TTL, so a bare
-        # existence check would let it vouch for a write that failed on a
-        # disk fault — and the block would then destroy the typed prompt.
-        # `state` is deliberately not compared: the frame can pick the
-        # request up and flip it to "dispatched" between the write and this
-        # read, and demanding "pending" would turn a landed stash into an
-        # allow — the prompt would run here AND there.
-        if req is None or req.prompt != body or req.target != decision.harness:
+            source=focus, reason=decision.reason)
+        routefile.write_route(session.tandem_id, req)
+        # the id proves THIS stash landed — a leftover or a concurrent
+        # second prompt cannot vouch for it. Either slot counts: a fast
+        # frame may have claimed the request already, and claimed-by-frame
+        # IS landed (demanding "still pending" would run the prompt here
+        # AND there).
+        landed = (routefile.read_pending(session.tandem_id)
+                  or routefile.read_claimed(session.tandem_id))
+        if landed is None or landed.id != req.id:
             sys.exit(0)   # stash didn't land: allow the native turn
         click.echo(json.dumps({
             "decision": "block",
