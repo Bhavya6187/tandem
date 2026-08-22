@@ -24,8 +24,9 @@ from .events import SessionContext
 from .harness import get_adapter
 from .ptyrun import FrameIO, PtyControl, _winsize, run_in_pty
 from .ratelimit import RateLimitPoller
+from .routing import RouteCoordinator
 from .state import PairedSession, StateStore, SyncCursor
-from .tabs import MIXED, TabState
+from .tabs import TabState
 from .tailer import TailedLine, TranscriptTruncated, TranscriptWatcher
 from .util import json_line
 from .warm import WarmChild, _shadow_size, build_launch, spawn_hidden
@@ -558,13 +559,10 @@ class InteractiveRunner:
         # set here too so the attributes exist even if run() raises early
         self._released = False
         self.flip_requested = False
-        # Filled by the mixer thread when a routed request armed this run's
-        # flip; the flip loop reads it after run() to learn where to go and
-        # what to carry. Only the mixer writes it, and only once per run.
-        self.route_request: routefile.RouteRequest | None = None
-        # The injector could not put `inject` into the harness; the exit
-        # notes tell the user the prompt was kept rather than lost.
-        self.inject_failed = False
+        # This run's routed-turn lifecycle, built by `_run` once the launch
+        # it belongs to is known. Everything about routing lives on it; the
+        # two properties below are what the flip loop reads back.
+        self.coordinator: RouteCoordinator | None = None
         # The harness this run fired at its flip decision, surrendered to the
         # flip loop's carry. Only a flip can fill it: no flip, no fire.
         self.warm_child: WarmChild | None = None
@@ -573,6 +571,18 @@ class InteractiveRunner:
         # not, because the flip's screen clear would wipe them a moment
         # later — the flip loop reprints them onto the fresh screen instead.
         self.reports: list[str] = []
+
+    @property
+    def route_request(self) -> routefile.RouteRequest | None:
+        """Where the mixer took this run — the flip loop reads it after
+        `run()` to learn where to go and what to carry."""
+        c = self.coordinator
+        return c.route_request if c is not None else None
+
+    @property
+    def inject_failed(self) -> bool:
+        c = self.coordinator
+        return c.inject_failed if c is not None else False
 
     def run(self) -> int:
         """Run the harness, and own the adoptee's disposal while doing it.
@@ -608,142 +618,6 @@ class InteractiveRunner:
                     self.adopt_child.kill()
                 except Exception:
                     pass   # never mask the failure that got us here
-
-    def _pickup_route(self, active: str, monitor) -> None:
-        """One mixer tick's worth of route pickup: turn a pending route
-        request into an armed flip toward its target.
-
-        Runs on the `tandem-mixer` thread — the only thread on this side
-        that takes route requests, so the pending → claimed rename is
-        single-writer here (the hook process owns the other side, and
-        writes are atomic renames).
-
-        Two claims, in this order, and it is load-bearing. `tabs.routed` is
-        a claim, not an assignment: a user press records its pending move on
-        the pump thread and arms the monitor a beat later, so a tick landing
-        inside that window sees an unarmed monitor over a slot that is
-        already taken. Taking the request before the slot would burn it on a
-        flip that goes somewhere else. On a refused claim nothing moves and
-        the request stays pending for the next tick.
-
-        Everything from the claim to `flip_pressed` is exposed the same way:
-        the rename between them is not instant, and a press landing in there
-        wins the monitor. `on_wait_cancelled` is the recovery — it releases
-        both the request and the file when the arm is toggled off."""
-        tabs = self.tabs
-        if tabs is None or tabs.tab != MIXED:
-            return
-        if self.route_request is not None:
-            return               # this run already has its routed flip
-        if monitor.armed() or monitor.flip_requested:
-            return               # a flip is already in flight; not ours to take
-        tandem_id = self.session.tandem_id
-        req = routefile.read_pending(tandem_id)
-        if req is None:
-            return
-        if req.target == active or req.target not in self.session.participants:
-            # nowhere to go: routing to the harness the user is already in is
-            # the hook's job to prevent, and a target that left the session
-            # cannot be launched. Drop it rather than arm a flip to nowhere.
-            routefile.release(tandem_id, req.id)
-        elif tabs.routed(req.target):
-            if not routefile.claim(tandem_id, req.id):
-                tabs.cancelled()   # a second prompt overwrote the slot in
-                return             # between: give the tab move back
-            # plain attribute assignment, GIL-atomic: read by fire_warm on the
-            # monitor thread and by the flip loop after run() returns
-            self.route_request = req
-            monitor.flip_pressed()
-
-    def _deliver_inject(self, active: str, active_sid: str | None, adapter,
-                        control: PtyControl, stop: threading.Event,
-                        monitor) -> None:
-        """Type this run's routed prompt into its harness once the harness is
-        ready to take one, then drop the route file.
-
-        Runs on the `tandem-inject` daemon thread. `PtyControl.write` flushes
-        to the pty master, which is a BLOCKING write: a harness that stopped
-        draining its input would park this thread for as long as it sulks.
-        Daemon is the containment — a wedged write can cost the injection,
-        never tandem's exit — and nothing else waits on this thread.
-
-        Readiness has two shapes, and the split is claude-or-not rather than
-        has-a-probe-or-not. Claude keeps a per-live-session registry whose
-        "waiting" really does mean an idle composer, so it is asked directly
-        and the prompt goes in the moment it answers. Everyone else takes a
-        fixed settle delay from spawn: opencode *has* a `session_status`,
-        but it reads the transcript sqlite — an unknown session id and a
-        resumed session's last row both answer "waiting" — which says
-        nothing about whether the TUI has drawn and can take a paste.
-        Trusting it would either fail every routed opencode turn (write
-        before attach) or, worse, land the paste in a TUI that is not
-        listening and then clear the route file, destroying the prompt. (The
-        `hasattr(adapter, "session_status")` idiom stays right for the flip
-        gate in `_run`, where a stale "waiting" only means flipping a beat
-        early — a safe answer there, not here.)
-
-        Two liveness questions, not one. `stop` says the run is over, but it
-        is set in `_run`'s finally — *after* `run_in_pty` returns, which is
-        after the quit ladder has already killed the child. The ladder itself
-        runs while the harness is still alive and draining input, so `stop`
-        alone would let a paste land in a harness that is on its way out and
-        then clear the route file believing it delivered. `monitor` answers
-        the other half (`flip_requested` = the ladder is running or about to,
-        `armed()` = a press is waiting on the turn boundary), and it is asked
-        twice: once before the paste, and again before the clear, since a
-        flip can fire in between. It is passed in rather than read off self
-        because it is `_run`'s local — one monitor per run, and an attribute
-        would outlive the run it belongs to.
-
-        Failure never destroys the prompt: the route file stays on disk and
-        `inject_failed` turns it into an exit note, so the user can see what
-        was meant to land and re-type it. The guards fail in that direction on
-        purpose — the worst case is a delivered prompt that also earns a
-        "kept" note, which costs a duplicate line, not a turn."""
-        req = self.inject
-        if req is None:
-            return
-        if req.target != active:
-            self.inject_failed = True   # ladder landed elsewhere; keep
-            return                      # the file for the user to see
-
-        def flipping() -> bool:
-            # plain reads of a flag and an Event, in the monitor's own
-            # lock-free contract: never blocks this thread, never raises
-            return bool(monitor.flip_requested) or bool(monitor.armed())
-
-        deadline = time.time() + 30
-        ready = False
-        while time.time() < deadline and not stop.is_set():
-            # claude only, by name: see the docstring — opencode's probe
-            # answers "waiting" off transcript state and would be believed
-            if active == "claude" and active_sid:
-                try:
-                    if adapter.session_status(active_sid) == "waiting":
-                        ready = True
-                        break
-                except Exception:
-                    pass    # a raising probe is not an answer; keep asking
-                time.sleep(0.3)
-            else:
-                # no usable readiness signal (codex/opencode): fixed settle
-                # delay from spawn — verified in the live gate
-                time.sleep(2.5)
-                ready = True
-                break
-        if not ready or stop.is_set() or flipping():
-            self.inject_failed = True
-            return
-        body = req.prompt.encode()
-        # bracketed paste: multi-line prompts must not submit per line
-        ok = control.write(b"\x1b[200~" + body + b"\x1b[201~")
-        if ok:
-            time.sleep(0.15)   # let the composer ingest the paste
-            ok = control.write(b"\r")
-        if not ok or flipping():
-            self.inject_failed = True
-            return
-        routefile.release(self.session.tandem_id, req.id)
 
     def _run(self, adopting: bool) -> int:
         session = self.session
@@ -956,66 +830,19 @@ class InteractiveRunner:
             notes.append(f"{active} cannot pin a model at launch —"
                          " running its default")
 
-        def on_wait_cancelled() -> None:
-            # monitor thread, after an armed wait was toggled off. The
-            # pending tab move is gone either way; a routed arm riding on it
-            # has to be undone here too, including the route file — it is
-            # already claimed, and left alone it would be surfaced at the
-            # next frame start as a prompt that never landed.
-            tabs.cancelled()
-            req = self.route_request
-            if req is not None:
-                self.route_request = None
-                routefile.release(session.tandem_id, req.id)
-                # list.append is atomic; the reporting read happens after
-                # this thread is joined in the finally below. Quoted whole,
-                # like every other route note: the file is gone by the time
-                # this prints, so the note IS the prompt — a long exit line
-                # beats a prompt the user cannot get back.
-                notes.append("routed turn cancelled — the prompt was "
-                             f"discarded: {req.prompt!r}")
-
+        route = self.coordinator = RouteCoordinator(
+            session, tabs, active, active_sid, adapter, routing_ok,
+            self.inject, notes)
         if tabs is not None:
             # plain assignment, like on_flip_decided: the monitor thread has
             # not started yet (monitor.start() is below)
-            monitor.on_wait_cancelled = on_wait_cancelled
+            monitor.on_wait_cancelled = route.cancelled
 
         def mixer_thread() -> None:
-            last_version = -1
-            # A leftover route from an earlier run must not replay a stale
-            # prompt into this one, so both files go — but never silently.
-            # A claimed one never landed; a pending one was never even
-            # picked up, which a user can reach without crashing anything
-            # (route while a flip is already armed: the mixer refuses the
-            # claim, the flip proceeds, and this sweep is what eats the
-            # request). Either way it is a typed prompt about to be deleted,
-            # and the note is the only copy the user gets. Not while this
-            # run is the one delivering it: that request is the injector's,
-            # and only the injector releases it.
-            if self.inject is None:
-                pending, claimed = routefile.sweep(session.tandem_id)
-                for left, what in ((pending, "never picked up"),
-                                   (claimed, "never delivered")):
-                    if left is not None:
-                        notes.append(
-                            f"a routed prompt was {what} and was kept: "
-                            f"{left.prompt!r} (target {left.target})")
+            route.sweep_leftovers()
             while not mixer_stop.is_set():
-                # version is the whole change feed: every TabState mutation
-                # bumps it, so one integer compare per tick keeps the frame
-                # file (which the hook reads) in step without rewriting it
-                # 4x a second.
-                if tabs.version != last_version:
-                    last_version = tabs.version
-                    routefile.write_frame_state(
-                        session.tandem_id,
-                        tabs.snapshot(active, routing_ok=routing_ok))
-                self._pickup_route(active, monitor)
+                route.tick(monitor)
                 mixer_stop.wait(0.25)
-
-        def injector_thread() -> None:
-            self._deliver_inject(active, active_sid, adapter, control, stop,
-                                 monitor)
 
         def tail_thread() -> None:
             # Own store/connection: sqlite handles are thread-bound, and the
@@ -1097,8 +924,9 @@ class InteractiveRunner:
         thread.start()
         if self.inject is not None:
             # daemon and never joined: a blocking pty write must not be able
-            # to hold the session's exit (see `_deliver_inject`)
-            threading.Thread(target=injector_thread, name="tandem-inject",
+            # to hold the session's exit (see `RouteCoordinator.deliver`)
+            threading.Thread(target=route.deliver, name="tandem-inject",
+                             args=(control, stop, monitor),
                              daemon=True).start()
         monitor.start()   # before the try: stop() on an unstarted thread raises
         mixer: threading.Thread | None = None
@@ -1170,13 +998,7 @@ class InteractiveRunner:
                 "status bar disabled for this session (terminal conflict);"
                 " set [frame] bar = false to silence"
             )
-        if self.inject_failed and self.inject is not None:
-            # the route file is still on disk, so the prompt itself is not
-            # lost — the user just has to put it in by hand
-            notes.append(
-                "routed prompt was not delivered — it is preserved; re-type"
-                f" it in {self.inject.target} ({self.inject.prompt!r})"
-            )
+        route.exit_notes()
         self.reports = [f"tandem: sync error: {err}" for err in errors]
         self.reports += [f"tandem: {note}" for note in notes]
         _flip_debug(
