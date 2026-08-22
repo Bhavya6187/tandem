@@ -1980,7 +1980,7 @@ git commit -m "feat: tab-aware flip loop with routed switch and inject carry"
 
 **Interfaces:**
 - Produces:
-  - `plugin_setup.install_plugin_codex() -> bool` — best-effort mirror of `install_plugin` shelling out to `codex plugin marketplace add` / `codex plugin install`; called from `install_plugin()` after a successful claude install when `codex` is on PATH. Failure prints a yellow note (routing *from* codex needs it; everything else works without).
+  - `plugin_setup.install_plugin_codex() -> bool` — best-effort mirror of `install_plugin` shelling out to `codex plugin marketplace add` / `codex plugin add`; called from `install_plugin()` after a successful claude install when `codex` is on PATH. Failure prints a yellow note (routing *from* codex needs it; everything else works without).
   - `plugin_setup.is_plugin_installed_codex() -> bool` — parses `paths.codex_home() / "config.toml"` with tomllib and looks for any key starting `"tandem@"` in its `plugins` table. Same ambiguity rule as `is_plugin_installed`: a missing file or absent entry is definitively False, an unreadable/unparseable config is True (doubt must not nag or flash warnings).
   - `plugin_setup.hook_available(harness_id: str) -> bool` — `"claude"` → `is_plugin_installed()`, `"codex"` → `is_plugin_installed_codex()`, anything else → False. This is the spec's hook-registration-trap signal.
 - Also modifies: `src/tandem/runner.py` — tighten Task 10's `routing_ok` local to `adapter.prompt_hook_capable and plugin_setup.hook_available(active)` (computed once per run; a run started before plugin install shows the `(no @-routing)` hint instead of silently eating prefixes). And `src/tandem/doctor.py` — a new check in `run_doctor`: when a session exists, report ok/warn per hook-capable participant on `hook_available` (`"mixed-tab routing: <harness> hook installed"` / warn `"mixed-tab routing: <harness> plugin not installed — @-routing from it is unavailable (tandem plugin install)"`).
@@ -2051,7 +2051,7 @@ def install_plugin_codex() -> bool:
     ins = _run(["codex", "plugin", "install", PLUGIN_ID])
     if ins is None or ins.returncode != 0:
         click.secho(
-            "  codex plugin install failed — @-routing from codex in the "
+            "  codex plugin add failed — @-routing from codex in the "
             "mixed tab will be unavailable (routing to codex still works).",
             fg="yellow", err=True)
         return False
@@ -2134,7 +2134,7 @@ def _routing_checks(report: DoctorReport, session) -> None:
 
 called from `run_doctor` beside `_subagent_checks(report, session)`, with a matching test in `tests/test_memory_doctor.py` following its existing report-assertion style.
 
-NOTE: the exact codex subcommand names (`codex plugin marketplace add` / `codex plugin install`) are the claude-compatible spelling and MUST be confirmed in Task 14's live gate; if codex spells them differently, fix here and re-run this task's tests.
+NOTE (settled 2026-08-22, codex-cli 0.147.0): the codex subcommands are `codex plugin marketplace add <source>` and `codex plugin add <plugin>@<marketplace>` — the install step is spelled `add`, not `install`. Fixed in the code and the tests; Task 14's live gate only has to confirm the run succeeds.
 
 - [ ] **Step 4: Run to verify pass**: `uv run pytest tests/test_plugin.py tests/test_plugin_setup.py -q`
 

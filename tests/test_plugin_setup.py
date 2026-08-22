@@ -95,7 +95,9 @@ def recorded_runs(monkeypatch):
 ADD_CMD = ("claude", "plugin", "marketplace", "add", "Bhavya6187/tandem")
 INSTALL_CMD = ("claude", "plugin", "install", "tandem@tandem")
 CODEX_ADD_CMD = ("codex", "plugin", "marketplace", "add", "Bhavya6187/tandem")
-CODEX_INSTALL_CMD = ("codex", "plugin", "install", "tandem@tandem")
+# codex spells its install step `add`, not `install` (verified on
+# codex-cli 0.147.0); the marketplace step matches claude's spelling.
+CODEX_INSTALL_CMD = ("codex", "plugin", "add", "tandem@tandem")
 
 
 def test_install_runs_add_then_install(claude_on_path, recorded_runs, capsys):
@@ -229,6 +231,7 @@ def test_codex_install_failure_is_a_yellow_note_naming_the_consequence(
     assert plugin_setup.install_plugin_codex() is False
     err = capsys.readouterr().err
     assert "@-routing from codex" in err
+    assert "codex plugin add" in err     # the command the user would retry
     assert "error" not in err.lower()
 
 

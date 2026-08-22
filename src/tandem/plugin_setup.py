@@ -5,7 +5,9 @@ sole writer of its own state). Install shells out to `claude plugin …` —
 verified idempotent on claude 2.1.220: re-adding the marketplace and
 re-installing the plugin both exit 0 with an "already" notice — and then
 mirrors the same two steps onto codex, which since 0.145 loads
-claude-format plugin trees. The one-time offer lives here too so both
+claude-format plugin trees. Codex spells the second step `add`
+(`codex plugin add <plugin>@<marketplace>`, verified on codex-cli
+0.147.0), not `install`; its marketplace step matches claude's. The one-time offer lives here too so both
 entry points (bare `tandem` and `tandem plugin install`) share a single
 routine.
 """
@@ -154,7 +156,10 @@ def install_plugin_codex() -> bool:
     """Register the same plugin tree with codex, best-effort.
 
     Codex >= 0.145 loads claude-format plugins; `.codex-plugin/plugin.json`
-    is the metadata it reads. Only @-routing *from* codex in the mixed tab
+    is the metadata it reads. Its two commands are
+    `codex plugin marketplace add <source>` and `codex plugin add
+    <plugin>@<marketplace>` — the second is spelled `add`, where claude
+    says `install` (codex-cli 0.147.0). Only @-routing *from* codex in the mixed tab
     needs this — routing *to* codex, subagents and sync all work without
     it — so every failure here is a yellow note naming what the user loses,
     never an error, and a machine with no codex at all says nothing.
@@ -169,13 +174,13 @@ def install_plugin_codex() -> bool:
         if detail:
             click.secho(f"  codex marketplace add failed: {detail}",
                         fg="yellow", err=True)
-    ins = _run(["codex", "plugin", "install", PLUGIN_ID])
+    ins = _run(["codex", "plugin", "add", PLUGIN_ID])
     if ins is None or ins.returncode != 0:
         detail = "" if ins is None else (ins.stderr or ins.stdout).strip()
         if detail:
             click.secho(f"  {detail}", fg="yellow", err=True)
         click.secho(
-            "  codex plugin install did not succeed — @-routing from codex "
+            "  codex plugin add did not succeed — @-routing from codex "
             "in the mixed tab will be unavailable (routing to codex still "
             "works). Retry later with: tandem plugin install",
             fg="yellow", err=True)
