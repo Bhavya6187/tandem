@@ -13,7 +13,7 @@ import threading
 
 import click
 
-from . import ops, routefile
+from . import ops, plugin_setup, routefile
 from .config import load_frame_config
 from .harness import get_adapter
 from .state import StateStore
@@ -196,8 +196,16 @@ def _tab_state(tandem_id: str) -> TabState | None:
         routefile.write_frame_state(
             tandem_id, {"tab": "harness", "focus": "", "routing_ok": False})
         return None
+    # Which participants a prompt can be @-routed *from*: the CLI needs a
+    # prompt hook and tandem's plugin has to be registered there. Read once
+    # per process, exactly like the runner's own `routing_ok` (that one is
+    # about the harness on screen; this one is what keeps the mixed tab from
+    # adopting a focus no keystroke could ever move off).
+    routable = {h for h in session.participants
+                if get_adapter(h).prompt_hook_capable
+                and plugin_setup.hook_available(h)}
     return TabState(session.participants, tab=meta.get("tab", "harness"),
-                    focus=meta.get("mixed_focus", ""))
+                    focus=meta.get("mixed_focus", ""), routable=routable)
 
 
 def _persist_tabs(store: StateStore, tandem_id: str, tabs: TabState) -> None:

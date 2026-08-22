@@ -38,11 +38,17 @@ class TabMove:
 
 
 class TabState:
+    """`routable` is the set of participants a prompt can be @-routed *from*
+    (a prompt hook in the CLI plus tandem's plugin registered there). None
+    means the caller did not measure it, and every participant stays
+    eligible. It only ever moves the *entry* focus — see `press`."""
+
     def __init__(self, participants: list[str], tab: str = "harness",
-                 focus: str = ""):
+                 focus: str = "", routable: set[str] | None = None):
         self.participants = list(participants)
         self.tab = tab if tab in ("harness", MIXED) else "harness"
         self.focus = focus if focus in self.participants else ""
+        self.routable = routable
         self.pending: TabMove | None = None
         self.version = 0
 
@@ -69,6 +75,21 @@ class TabState:
                                target=self.participants[idx + 1])
             else:
                 focus = self.focus or active
+                # The mixed tab is only ever entered from the *last*
+                # participant, and after that the focus moves only by way of
+                # a routed turn — which needs a prompt hook in the focus
+                # harness. Adopting a focus with no hook would therefore be
+                # permanent: no keystroke reaches it, so routing would be
+                # off for the rest of the session (with the stock cycle,
+                # forever — opencode is last and hookless). Land on the
+                # first harness the user can actually route from instead.
+                # Same substitution heals a sticky focus whose plugin was
+                # removed since it was saved. With nothing routable at all
+                # there is no better place to be: keep the focus, and the
+                # bar's `(no @-routing)` hint says why.
+                if self.routable is not None and focus not in self.routable:
+                    focus = next((h for h in self.participants
+                                  if h in self.routable), focus)
                 if focus == active:
                     self.tab, self.focus = MIXED, focus
                     self.version += 1

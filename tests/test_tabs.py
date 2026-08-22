@@ -33,6 +33,75 @@ def test_last_harness_press_enters_mixed_bar_only():
     assert t.pending_target() == ""
 
 
+# -- first entry must land somewhere you can route *from* --------------------
+#
+# Ctrl-] only ever enters the mixed tab from the *last* participant, and the
+# focus moves after that only by way of a routed turn — which needs a prompt
+# hook in the focus harness. With the stock cycle the last participant is
+# opencode, which has no hook: adopting it would make the mixed tab's focus
+# both un-routable and unreachable, i.e. routing off for good.
+
+def test_first_entry_skips_a_focus_you_cannot_route_from():
+    """opencode is last in the stock cycle and hookless, so the entry press
+    lands on the first participant that *can* route — a flip, not a bar
+    move."""
+    t = TabState(PARTS, routable={"claude", "codex"})
+    m = t.press("opencode")
+    assert m.kind == "flip" and m.target == "claude" and m.tab == MIXED
+    t.settle("claude")
+    assert t.tab == MIXED and t.focus == "claude"
+
+
+def test_first_entry_takes_the_first_routable_in_cycle_order():
+    t = TabState(PARTS, routable={"codex"})
+    m = t.press("opencode")
+    assert m.kind == "flip" and m.target == "codex" and m.tab == MIXED
+    t.settle("codex")
+    assert t.tab == MIXED and t.focus == "codex"
+
+
+def test_first_entry_adopts_the_active_harness_when_it_can_route():
+    """Nothing to fix: the harness you came from is routable, so entry stays
+    the free bar move it always was."""
+    t = TabState(PARTS, routable={"claude", "opencode"})
+    assert t.press("opencode") == TabMove(kind="bar", tab=MIXED,
+                                          focus="opencode")
+    assert t.tab == MIXED and t.focus == "opencode"
+
+
+def test_first_entry_adopts_the_active_harness_when_nothing_is_routable():
+    """No plugin anywhere: there is no better focus to move to, so the old
+    bar move stands and the bar's `(no @-routing)` hint carries the news."""
+    t = TabState(PARTS, routable=set())
+    assert t.press("opencode") == TabMove(kind="bar", tab=MIXED,
+                                          focus="opencode")
+    assert t.tab == MIXED and t.focus == "opencode"
+
+
+def test_a_sticky_focus_that_lost_its_hook_is_repaired_on_entry():
+    """Same substitution heals a focus saved when the plugin was installed
+    and re-entered after it was removed."""
+    t = TabState(PARTS, tab="harness", focus="claude", routable={"codex"})
+    m = t.press("opencode")
+    assert m.kind == "flip" and m.target == "codex" and m.tab == MIXED
+
+
+def test_unknown_routability_leaves_every_participant_eligible():
+    """`routable=None` is "not measured" — the caller that never passes it
+    (and every pre-existing one) keeps the plain adopt-the-active rule."""
+    t = TabState(PARTS, routable=None)
+    assert t.press("opencode").kind == "bar"
+    assert t.focus == "opencode"
+
+
+def test_leaving_the_mixed_tab_ignores_routability():
+    """The exit press goes to the first participant whatever its hooks: it
+    is a harness tab, not a focus."""
+    t = TabState(PARTS, tab=MIXED, focus="codex", routable={"codex"})
+    m = t.press("codex")
+    assert m.kind == "flip" and m.target == "claude" and m.tab == "harness"
+
+
 def test_mixed_entry_with_sticky_focus_elsewhere_is_a_flip():
     t = TabState(PARTS, tab="harness", focus="codex")
     m = t.press("opencode")

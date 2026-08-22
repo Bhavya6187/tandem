@@ -882,6 +882,26 @@ def test_a_bar_move_survives_the_session_exit(sess, monkeypatch):
                                                   "mixed_focus": "codex"}
 
 
+def test_tab_state_computes_which_participants_can_be_routed_from(
+    sess3, monkeypatch
+):
+    """The mixed tab may only adopt a focus whose prompts tandem can
+    intercept, and both halves of that answer live out here: the adapter's
+    `prompt_hook_capable` and the plugin registration on disk. Read once per
+    process, here, and handed to the tab cycle."""
+    monkeypatch.setattr(flip.plugin_setup, "hook_available", lambda hid: True)
+    # opencode has no prompt hook at all, so no plugin answer can save it
+    assert flip._tab_state(sess3.tandem_id).routable == {"claude", "codex"}
+
+
+def test_tab_state_drops_a_hook_capable_harness_without_the_plugin(
+    sess3, monkeypatch
+):
+    monkeypatch.setattr(flip.plugin_setup, "hook_available",
+                        lambda hid: hid == "codex")
+    assert flip._tab_state(sess3.tandem_id).routable == {"codex"}
+
+
 def test_a_locked_store_at_startup_degrades_to_the_pre_mixed_frame(
     sess, capsys, monkeypatch
 ):

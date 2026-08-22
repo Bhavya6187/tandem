@@ -63,9 +63,17 @@ mixed is a view + routing mode, not a fourth session.
 - **Ctrl-].** Mixed joins the cycle as the fourth stop
   (claude → codex → opencode → mixed).
 - **Focus lifecycle.** On the first-ever entry the focus defaults to the
-  harness the user came from; thereafter the mixed tab keeps its own focus
-  across visits (leaving and re-entering does not reset it). Focus is saved
-  in session state, and `tandem resume` restores it.
+  harness the user came from when routing is available from it; otherwise to
+  the first participant it is available from (a flip). Entry only ever
+  happens from the last participant and the focus only ever moves on a
+  routed turn, so adopting a harness with no prompt hook would strand the
+  tab with routing permanently off — with the stock cycle, always (opencode
+  is last and hookless). The same substitution repairs a saved focus whose
+  plugin has since been removed; with nothing routable at all the focus is
+  adopted as-is and the bar's `(no @-routing)` hint stands. Thereafter the
+  mixed tab keeps its own focus across visits (leaving and re-entering does
+  not reset it). Focus is saved in session state, and `tandem resume`
+  restores it.
 
 ## Route grammar
 

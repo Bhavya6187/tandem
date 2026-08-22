@@ -7,9 +7,9 @@ re-installing the plugin both exit 0 with an "already" notice — and then
 mirrors the same two steps onto codex, which since 0.145 loads
 claude-format plugin trees. Codex spells the second step `add`
 (`codex plugin add <plugin>@<marketplace>`, verified on codex-cli
-0.147.0), not `install`; its marketplace step matches claude's. The one-time offer lives here too so both
-entry points (bare `tandem` and `tandem plugin install`) share a single
-routine.
+0.147.0), not `install`; its marketplace step matches claude's. The
+one-time offer lives here too so both entry points (bare `tandem` and
+`tandem plugin install`) share a single routine.
 """
 
 from __future__ import annotations
@@ -159,10 +159,11 @@ def install_plugin_codex() -> bool:
     is the metadata it reads. Its two commands are
     `codex plugin marketplace add <source>` and `codex plugin add
     <plugin>@<marketplace>` — the second is spelled `add`, where claude
-    says `install` (codex-cli 0.147.0). Only @-routing *from* codex in the mixed tab
-    needs this — routing *to* codex, subagents and sync all work without
-    it — so every failure here is a yellow note naming what the user loses,
-    never an error, and a machine with no codex at all says nothing.
+    says `install` (codex-cli 0.147.0). Only @-routing *from* codex in the
+    mixed tab needs this — routing *to* codex, subagents and sync all work
+    without it — so every failure here is a yellow note naming what the
+    user loses, never an error, and a machine with no codex at all says
+    nothing.
     """
     if shutil.which("codex") is None:
         return False

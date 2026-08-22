@@ -148,8 +148,9 @@ on exit and quotes the prompt back in full, so you can re-type it where you
 meant it to go. Nothing is dropped silently.
 
 The mixed tab remembers the CLI it last showed. The first time you enter it,
-it adopts the one you came from, and `tandem resume` restores both the tab
-and its focus. Choosing the target is manual today; a router that proposes
+it adopts the one you came from — or, when that one can't intercept prompts,
+the first of yours that can — and `tandem resume` restores both the tab and
+its focus. Choosing the target is manual today; a router that proposes
 one is the next step, and the `@` prefix stays the way to overrule it.
 
 Don't want the fourth stop? Set `mixed = false` under `[frame]` in
