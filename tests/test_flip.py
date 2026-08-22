@@ -245,6 +245,14 @@ def test_flip_with_a_vanished_session_row_stops_the_loop(sess, capsys):
     assert "switch failed" in capsys.readouterr().err
 
 
+class _FakeCoordinator:
+    """The real runner's routed-turn out-surface: the flip loop reads the
+    route off `runner.coordinator`, which the real `_run` builds per run."""
+
+    def __init__(self):
+        self.route_request = None
+
+
 class FakeInteractiveRunner:
     """Stands in for the real runner behind `run_session`'s own closure — the
     seam the reports plumbing actually lives in, so the injected `run_harness`
@@ -261,7 +269,7 @@ class FakeInteractiveRunner:
         self.adopt_child = adopt_child
         self.tabs = tabs
         self.inject = inject
-        self.route_request = None   # the real runner's routed-flip out-attr
+        self.coordinator = _FakeCoordinator()
         self.warm_child = None   # the real runner's standby-out attribute
 
     def run(self):
@@ -830,7 +838,7 @@ class _MixedRunner(FakeInteractiveRunner):
         route = _MixedRunner.route
         if route is not None and self.tabs is not None \
                 and self.tabs.routed(route.target):
-            self.route_request = route
+            self.coordinator.route_request = route
             _MixedRunner.route = None
         return super().run()
 
@@ -899,10 +907,10 @@ def test_a_locked_store_at_startup_degrades_to_the_pre_mixed_frame(
 def test_a_locked_store_at_startup_still_stamps_the_frame_file(sess, monkeypatch):
     """The degraded start runs no mixer either, so the hook has to be told.
     Left saying `mixed`, the frame file makes it block and stash a routed
-    prompt nothing will ever pick up — and a `pending` leftover is cleared
-    *silently* at the next mixed start (only `dispatched` earns the preserved
-    note), so the prompt is destroyed after the user was told it went to
-    another harness."""
+    prompt nothing will ever pick up: the user is told the turn is running
+    in another harness and it never runs anywhere. The next mixed start
+    does quote the leftover, but that is one session too late — the stamp
+    is what stops the stash from being taken at all."""
     routefile.write_frame_state(sess.tandem_id, {"tab": "mixed",
                                                  "focus": "claude",
                                                  "routing_ok": True})

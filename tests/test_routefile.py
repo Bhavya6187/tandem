@@ -113,17 +113,32 @@ def test_release_never_deletes_someone_elses_request():
     assert routefile.read_pending("abc123") == later
 
 
+def test_release_tells_two_identical_prompts_apart():
+    # the twin of the case above, and the one only an id can answer: the
+    # user re-typed the same prompt at the same target, so every field but
+    # the id matches the request being delivered
+    first = req("do it")
+    routefile.write_route("abc123", first)
+    routefile.claim("abc123", first.id)
+    twin = req("do it")
+    assert twin.id != first.id
+    routefile.write_route("abc123", twin)
+    routefile.release("abc123", first.id)
+    assert routefile.read_claimed("abc123") is None
+    assert routefile.read_pending("abc123") == twin
+
+
 def test_release_of_an_unknown_id_is_quiet():
     routefile.release("nope", "deadbeef1234")   # must not raise
 
 
 def test_sweep_returns_both_leftovers_and_deletes_them(home):
-    stranded = req("never picked up")
-    routefile.write_route("abc123", stranded)
-    routefile.claim("abc123", stranded.id)
-    fresh = req("never dispatched")
-    routefile.write_route("abc123", fresh)
-    assert routefile.sweep("abc123") == (fresh, stranded)
+    undelivered = req("claimed but never typed in")
+    routefile.write_route("abc123", undelivered)
+    routefile.claim("abc123", undelivered.id)
+    unclaimed = req("never picked up at all")
+    routefile.write_route("abc123", unclaimed)
+    assert routefile.sweep("abc123") == (unclaimed, undelivered)
     assert routefile.read_pending("abc123") is None
     assert routefile.read_claimed("abc123") is None
     assert list((home / "tmp").iterdir()) == []
@@ -153,6 +168,43 @@ def test_sweep_deletes_an_unparseable_file(home):
     p = home / "tmp" / "abc123-route.json"
     p.parent.mkdir(parents=True)
     p.write_text("{not json")
+    assert routefile.sweep("abc123") == (None, None)
+    assert not p.exists()
+
+
+def test_sweep_still_quotes_a_request_from_before_the_ids(home):
+    """A route file written by a pre-v2 tandem — `state`, no `id` — is one
+    the readers above refuse. The sweep is the last thing that will ever
+    see it, so refusing it there would delete a typed prompt in silence,
+    which is the whole failure this protocol exists to prevent."""
+    p = home / "tmp" / "abc123-route.json"
+    p.parent.mkdir(parents=True)
+    p.write_text('{"target": "codex", "model": "", "prompt": "fix the test",'
+                 ' "source": "claude", "reason": "\u2192 codex",'
+                 ' "state": "dispatched"}')
+    assert routefile.read_pending("abc123") is None    # not routable
+    left, _ = routefile.sweep("abc123")
+    assert left is not None and left.prompt == "fix the test"
+    assert left.target == "codex"                      # enough for the note
+    assert not p.exists()
+
+
+def test_sweep_quotes_a_request_missing_everything_but_its_prompt(home):
+    # the id it comes back with is synthetic and goes nowhere: the file is
+    # already deleted, so nothing will ever claim or release this request
+    p = home / "tmp" / "abc123-route.claimed.json"
+    p.parent.mkdir(parents=True)
+    p.write_text('{"prompt": "the only thing left"}')
+    pending, claimed = routefile.sweep("abc123")
+    assert pending is None
+    assert claimed.prompt == "the only thing left" and claimed.target == ""
+    assert not p.exists()
+
+
+def test_sweep_says_nothing_about_a_file_with_no_prompt(home):
+    p = home / "tmp" / "abc123-route.json"
+    p.parent.mkdir(parents=True)
+    p.write_text('{"target": "codex", "state": "pending"}')
     assert routefile.sweep("abc123") == (None, None)
     assert not p.exists()
 

@@ -87,8 +87,9 @@ class TabState:
         landing in that window sees an unarmed monitor. Overwriting there
         would retarget the user's flip and then arm a monitor the pump is
         about to arm again — a double toggle that leaves the monitor
-        disarmed with the route file stuck "dispatched". Returning False
-        instead leaves the route request pending for the next tick.
+        disarmed with the route request claimed and nothing left to deliver
+        it. Returning False instead leaves the request pending for the next
+        tick.
 
         The check-then-set is a few bytecodes wide, and `press` must stay
         lock-free, so the residual race is accepted rather than locked

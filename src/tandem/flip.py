@@ -71,8 +71,12 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
                 carry["standby"] = r.warm_child
                 # Where the run's mixer wants to go, if anywhere. Safe to
                 # read here and only here: the runner joins the mixer thread
-                # before returning, so nothing can still be writing it.
-                carry["route"] = r.route_request
+                # before returning, so nothing can still be writing it. No
+                # coordinator means the run raised before it had a launch to
+                # route for — and this is a finally, so an AttributeError
+                # here would mask whatever actually went wrong.
+                c = r.coordinator
+                carry["route"] = c.route_request if c is not None else None
                 if tabs is not None:
                     # Again, because the run may have moved the tab without
                     # ever flipping: entering the mixed tab from the harness
@@ -111,10 +115,12 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
             # Degraded or not, this process runs no mixer, and the hook reads
             # the frame file to decide whether to hold a prompt. A file left
             # saying `mixed` would have it stash a routed prompt with nothing
-            # to pick it up — and a `pending` leftover is cleared silently at
-            # the next mixed start (only `dispatched` earns the preserved
-            # note), so the prompt is destroyed after the user was told it
-            # went elsewhere. The stamp is right whichever way the unreadable
+            # to pick it up: the block tells the user their turn is running
+            # in another harness, and nothing ever runs it. The next mixed
+            # start does surface it — the sweep quotes both slots — but that
+            # is a note about a prompt that already went nowhere, one
+            # session too late. Stamping the tab off stops the stash from
+            # happening at all. The stamp is right whichever way the unreadable
             # config would have gone: mixed off is exactly what `_tab_state`
             # writes, and mixed on still has no mixer this run. Best-effort by
             # construction (`routefile._write_json` swallows its own errors),

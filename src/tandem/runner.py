@@ -560,8 +560,9 @@ class InteractiveRunner:
         self._released = False
         self.flip_requested = False
         # This run's routed-turn lifecycle, built by `_run` once the launch
-        # it belongs to is known. Everything about routing lives on it; the
-        # two properties below are what the flip loop reads back.
+        # it belongs to is known — and the only place routing state lives.
+        # Still None if `run()` raised before the launch was settled, which
+        # is why the flip loop's read of it is guarded.
         self.coordinator: RouteCoordinator | None = None
         # The harness this run fired at its flip decision, surrendered to the
         # flip loop's carry. Only a flip can fill it: no flip, no fire.
@@ -571,18 +572,6 @@ class InteractiveRunner:
         # not, because the flip's screen clear would wipe them a moment
         # later — the flip loop reprints them onto the fresh screen instead.
         self.reports: list[str] = []
-
-    @property
-    def route_request(self) -> routefile.RouteRequest | None:
-        """Where the mixer took this run — the flip loop reads it after
-        `run()` to learn where to go and what to carry."""
-        c = self.coordinator
-        return c.route_request if c is not None else None
-
-    @property
-    def inject_failed(self) -> bool:
-        c = self.coordinator
-        return c.inject_failed if c is not None else False
 
     def run(self) -> int:
         """Run the harness, and own the adoptee's disposal while doing it.
@@ -696,7 +685,7 @@ class InteractiveRunner:
         fired_lock = threading.Lock()
 
         def fire_warm() -> None:
-            if self.route_request is not None:
+            if route.route_request is not None:
                 return   # routed flips spawn cold in v1: the standby would
                          # be for the wrong side or the wrong model
             if not (frame_cfg.warm and _stdin_tty()):

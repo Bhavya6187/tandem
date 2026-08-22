@@ -99,6 +99,25 @@ def _read_req(path) -> RouteRequest | None:
         return None
 
 
+def _read_quotable(path) -> RouteRequest | None:
+    """A request good enough to quote in a note, even when it is not good
+    enough to route. Only the sweep uses it, and the sweep is the last
+    thing that will ever see these files: a shape this version cannot read
+    — a request written by a tandem from before the ids, say — must still
+    reach the user as text instead of being deleted in silence. The
+    synthetic id is never used for anything; nothing claims or releases a
+    request the sweep has already taken off disk. No prompt really is
+    nothing to say."""
+    req = _read_req(path)
+    if req is not None:
+        return req
+    obj = _read_json(path)
+    if obj is None or not isinstance(obj.get("prompt"), str):
+        return None
+    return RouteRequest(target=str(obj.get("target", "")), model="",
+                        prompt=obj["prompt"], source="", reason="")
+
+
 def _unlink(path) -> None:
     try:
         path.unlink(missing_ok=True)
@@ -153,12 +172,14 @@ def sweep(tandem_id: str) -> tuple[RouteRequest | None, RouteRequest | None]:
 
     Whatever the caller does with them, the files go: they belong to a run
     that is over, and replaying one into a fresh session would type a stale
-    prompt into a harness the user has moved on from. Unparseable files are
-    deleted too — there is nothing to quote, and nothing else would ever
-    remove them."""
+    prompt into a harness the user has moved on from. What comes back is
+    read loosely on purpose (`_read_quotable`) — a file too old or too
+    broken to route is still a prompt somebody typed, and this is its last
+    chance to be quoted. Only a file with no prompt in it goes without a
+    word; there is nothing to say about one."""
     found = []
     for path in (_pending_path(tandem_id), _claimed_path(tandem_id)):
-        found.append(_read_req(path))
+        found.append(_read_quotable(path))
         _unlink(path)
     return found[0], found[1]
 

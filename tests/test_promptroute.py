@@ -280,6 +280,29 @@ class TestCli:
         r = self._typed(env, "@codex fix the test")
         assert json.loads(r.output)["decision"] == "block"
 
+    def test_a_claimed_stash_behind_a_newer_prompt_still_blocks(
+            self, env_factory, monkeypatch):
+        # the frame claimed this request and a second prompt took the
+        # pending slot behind it. Reading only the first slot that answers
+        # would find the newcomer, miss the id, and allow a turn that is
+        # already on its way to the target — it would then run twice.
+        from tandem import routefile
+        env = env_factory(active="claude")
+        self._mixed(env)
+        real_write = routefile.write_route
+
+        def write_claim_then_overwrite(tandem_id, req):
+            real_write(tandem_id, req)
+            assert routefile.claim(tandem_id, req.id) is True
+            real_write(tandem_id, routefile.RouteRequest(
+                target="codex", model="", prompt="a second prompt",
+                source="claude", reason="→ codex"))
+
+        monkeypatch.setattr(routefile, "write_route",
+                            write_claim_then_overwrite)
+        r = self._typed(env, "@codex fix the test")
+        assert json.loads(r.output)["decision"] == "block"
+
     def test_empty_prompt_is_silent(self, env_factory):
         env = env_factory(active="claude")
         self._mixed(env)

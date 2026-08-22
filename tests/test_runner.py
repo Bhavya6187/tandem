@@ -1721,10 +1721,11 @@ def _claimed(tandem_id, req):
 
 
 def test_runner_defaults_have_no_route_state(env_factory):
+    # before `run()` there is no launch, so there is no coordinator: the
+    # flip loop's read of it has to survive a run that raised early
     env = env_factory(active="claude")
     r = runner.InteractiveRunner(env.session, sink_factory=None)
-    assert r.route_request is None and r.tabs is None
-    assert r.inject is None and r.inject_failed is False
+    assert r.coordinator is None and r.tabs is None and r.inject is None
 
 
 def test_runner_notes_an_undelivered_routed_prompt(env_factory, monkeypatch):
@@ -1735,7 +1736,7 @@ def test_runner_notes_an_undelivered_routed_prompt(env_factory, monkeypatch):
     _claimed(env.session.tandem_id, req)
 
     def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
-        assert _wait_for(lambda: r.inject_failed)
+        assert _wait_for(lambda: r.coordinator.inject_failed)
         return 0
 
     monkeypatch.setattr(runner, "TranscriptWatcher", _QuietWatcher)
@@ -1862,10 +1863,11 @@ def test_mixer_startup_surfaces_and_clears_a_leftover_claim(env_factory,
 
 def test_mixer_startup_surfaces_and_clears_a_leftover_pending_route(
         env_factory, monkeypatch):
-    """A `pending` leftover is as lost as a dispatched one, and reachable:
-    route while a user flip is already armed and the mixer refuses the claim,
-    the flip proceeds anyway, and this sweep is what eats the request. The
-    clear stays unconditional — the note is what stops it being silent."""
+    """A leftover in the *pending* slot is as lost as a claimed one, and
+    reachable without crashing anything: route while a user flip is already
+    armed, the mixer refuses the claim, the flip proceeds, and this sweep is
+    what eats the request. The delete is unconditional — the note is what
+    stops it being silent."""
     env = env_factory(active="claude")
     routefile.write_route(env.session.tandem_id, RouteRequest(
         "codex", "", _LONG_PROMPT, "claude", "→ codex"))
@@ -1996,8 +1998,8 @@ def test_monitor_survives_a_raising_cancel_hook(tmp_path):
 def test_the_mixer_thread_picks_a_live_route_up_and_a_cancel_undoes_it(
         env_factory, monkeypatch):
     """The whole routed arm end to end on the real threads: the mixer picks
-    the request up, marks it dispatched and arms the real monitor; the
-    monitor's cancel hook then puts everything back."""
+    the request up, claims it and arms the real monitor; the monitor's
+    cancel hook then puts everything back."""
     from tandem.harness.claude_code import ClaudeCodeAdapter
 
     env = env_factory(active="claude")
@@ -2020,7 +2022,7 @@ def test_the_mixer_thread_picks_a_live_route_up_and_a_cancel_undoes_it(
             lambda: routefile.read_frame_state(env.session.tandem_id) is not None)
         routefile.write_route(env.session.tandem_id, RouteRequest(
             "codex", "", _LONG_PROMPT, "claude", "→ codex"))
-        assert _wait_for(lambda: r.route_request is not None)
+        assert _wait_for(lambda: r.coordinator.route_request is not None)
         assert tabs.pending_target() == "codex"
         assert routefile.read_claimed(env.session.tandem_id) is not None
         assert made["monitor"].armed() is True
@@ -2032,7 +2034,7 @@ def test_the_mixer_thread_picks_a_live_route_up_and_a_cancel_undoes_it(
     monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
     r = runner.InteractiveRunner(env.session, _null_sink, tabs=tabs)
     r.run()
-    assert r.route_request is None and tabs.pending is None
+    assert r.coordinator.route_request is None and tabs.pending is None
     assert routefile.read_pending(env.session.tandem_id) is None
     assert any("routed turn cancelled" in line and _LONG_PROMPT in line
                for line in r.reports)

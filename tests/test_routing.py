@@ -6,6 +6,7 @@ monitor, no real harness. The tests that drive the same code on the real
 threads (mixer, injector, monitor cancel) stay in test_runner.py.
 """
 
+import json
 import threading
 
 from tandem import routefile
@@ -172,25 +173,44 @@ def test_pickup_holds_off_while_a_flip_is_already_in_flight(env_factory):
     assert routefile.read_pending(env.session.tandem_id) is not None
 
 
-def test_tick_publishes_the_frame_file_once_per_tab_change(env_factory):
+def test_tick_publishes_the_frame_file_once_per_tab_change(env_factory,
+                                                          monkeypatch):
     """`tabs.version` is the whole change feed: the file the hook reads must
     keep up with it without being rewritten four times a second."""
     env = env_factory(active="claude")
     tabs = TabState(env.session.participants, tab="mixed", focus="claude")
     c = _coord(env, "claude", tabs=tabs)
     writes = []
-    real_publish = c.publish_frame
-    c.publish_frame = lambda: writes.append(1) or real_publish()
+    real_write = routefile.write_frame_state
+
+    def counting_write(tid, snap):
+        writes.append(snap)
+        real_write(tid, snap)
+
+    monkeypatch.setattr(routefile, "write_frame_state", counting_write)
     monitor = _StubMonitor()
     c.tick(monitor)
-    c.tick(monitor)
-    assert writes == [1]
-    assert routefile.read_frame_state(env.session.tandem_id) == {
-        "tab": "mixed", "focus": "claude", "routing_ok": True}
+    c.tick(monitor)                 # nothing moved: no second write
+    assert writes == [{"tab": "mixed", "focus": "claude", "routing_ok": True}]
     tabs.press("claude")            # mixed -> harness: a bar move
     c.tick(monitor)
-    assert writes == [1, 1]
-    assert routefile.read_frame_state(env.session.tandem_id)["tab"] == "harness"
+    assert len(writes) == 2 and writes[1]["tab"] == "harness"
+    assert routefile.read_frame_state(env.session.tandem_id) == writes[1]
+
+
+def test_tick_does_nothing_without_a_tab_cycle(env_factory):
+    """The pre-mixed frame runs no mixer at all, so this is belt-and-braces
+    — but it is the one place the `tabs is None` policy lives, and the
+    methods below dereference `tabs` on the strength of it."""
+    env = env_factory(active="claude")
+    routefile.write_route(env.session.tandem_id, RouteRequest(
+        "codex", "", "do it", "claude", "→ codex"))
+    c = _coord(env, "claude")       # tabs=None
+    monitor = _StubMonitor()
+    c.tick(monitor)
+    assert routefile.read_frame_state(env.session.tandem_id) is None
+    assert c.route_request is None and monitor.pressed == 0
+    assert routefile.read_pending(env.session.tandem_id) is not None
 
 
 # -- deliver ------------------------------------------------------------------
@@ -361,6 +381,36 @@ def test_deliver_keeps_the_request_when_the_flip_lands_mid_paste(
     assert routefile.read_claimed(env.session.tandem_id) is not None
 
 
+def test_deliver_tells_an_identical_re_typed_prompt_apart(env_factory,
+                                                          monkeypatch):
+    """The twin of the case below, and the one only an id can answer: the
+    second request has the same prompt and the same target as the one being
+    delivered, so every field but the id says "this is mine"."""
+    env = env_factory(active="codex")
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
+    _claimed(env.session.tandem_id, req)
+    twin = RouteRequest("codex", "", "do it", "claude", "→ codex")
+    assert twin.id != req.id
+
+    class StubAdapter:
+        pass
+
+    class _TwinChild(_InjectChild):
+        def write(self, data):
+            super().write(data)
+            if data == b"\r":
+                routefile.write_route(env.session.tandem_id, twin)
+
+    control, child = PtyControl(), _TwinChild()
+    control.attach(child)
+    c = _coord(env, "codex", inject=req, adapter=StubAdapter())
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    c.deliver(control, threading.Event(), _StubMonitor())
+    assert c.inject_failed is False
+    assert routefile.read_claimed(env.session.tandem_id) is None
+    assert routefile.read_pending(env.session.tandem_id) == twin
+
+
 def test_deliver_never_releases_someone_elses_request(env_factory,
                                                       monkeypatch):
     """A second routed prompt can land while this one is still in flight
@@ -450,6 +500,22 @@ def test_sweep_notes_both_slots_and_clears_them(env_factory):
     ]
 
 
+def test_sweep_quotes_a_leftover_with_no_target_left(env_factory):
+    """A file the sweep could only read loosely — a request from before the
+    ids, or a truncated one — may have no target to name. The prompt is the
+    part the user needs back; the note drops the rest rather than printing
+    an empty `(target )`."""
+    env = env_factory(active="claude")
+    path = routefile._pending_path(env.session.tandem_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"prompt": _LONG_PROMPT}))
+    c = _coord(env, "claude")
+    c.sweep_leftovers()
+    assert c.notes == ["a routed prompt was never picked up and was kept: "
+                       f"{_LONG_PROMPT!r}"]
+    assert not path.exists()
+
+
 def test_sweep_keeps_the_request_this_run_is_delivering(env_factory):
     env = env_factory(active="codex")
     req = RouteRequest("codex", "", "do it", "claude", "→ codex")
@@ -469,5 +535,5 @@ def test_exit_notes_quote_an_undelivered_prompt(env_factory):
     c.inject_failed = True
     c.exit_notes()
     assert c.notes == [
-        "routed prompt was not delivered — it is preserved; re-type"
-        f" it in claude ({_LONG_PROMPT!r})"]
+        "routed prompt was not delivered — the prompt is below;"
+        f" re-type it in claude ({_LONG_PROMPT!r})"]

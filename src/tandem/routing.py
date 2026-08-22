@@ -80,27 +80,32 @@ class RouteCoordinator:
         for left, what in ((pending, "never picked up"),
                            (claimed, "never delivered")):
             if left is not None:
+                # a leftover the sweep could only read loosely may have no
+                # target left to name; the prompt is the part that matters
+                where = f" (target {left.target})" if left.target else ""
                 self.notes.append(
                     f"a routed prompt was {what} and was kept: "
-                    f"{left.prompt!r} (target {left.target})")
-
-    def publish_frame(self) -> None:
-        """Write the frame file the hook reads: which tab is up and which
-        harness has focus."""
-        routefile.write_frame_state(
-            self.session.tandem_id,
-            self.tabs.snapshot(self.active, routing_ok=self.routing_ok))
+                    f"{left.prompt!r}{where}")
 
     def tick(self, monitor) -> None:
-        """One mixer tick: republish the frame file if the tabs moved, then
-        try to pick a route up.
+        """One mixer tick: republish the frame file the hook reads if the
+        tabs moved, then try to pick a route up.
+
+        The `tabs is None` gate lives here because this is where every
+        tabs-touching path starts — the pre-mixed frame has no mixer thread
+        to call this, and nothing below has to ask again.
 
         `tabs.version` is the whole change feed — every TabState mutation
         bumps it, so one integer compare keeps the hook's view in step
         without rewriting the file four times a second."""
-        if self.tabs.version != self._published:
-            self._published = self.tabs.version
-            self.publish_frame()
+        tabs = self.tabs
+        if tabs is None:
+            return
+        if tabs.version != self._published:
+            self._published = tabs.version
+            routefile.write_frame_state(
+                self.session.tandem_id,
+                tabs.snapshot(self.active, routing_ok=self.routing_ok))
         self.pickup(monitor)
 
     def pickup(self, monitor) -> None:
@@ -119,7 +124,7 @@ class RouteCoordinator:
         wins the monitor. `cancelled` is the recovery — it releases both the
         request and the file when the arm is toggled off."""
         tabs = self.tabs
-        if tabs is None or tabs.tab != MIXED:
+        if tabs.tab != MIXED:
             return
         if self.route_request is not None:
             return               # this run already has its routed flip
@@ -251,11 +256,14 @@ class RouteCoordinator:
 
     def exit_notes(self) -> None:
         """The report line a run owes the user when its injection failed.
-        The claimed file is still on disk, so the prompt itself is not lost
-        — the user just has to put it in by hand."""
+
+        The note carries the prompt itself rather than promising the file:
+        usually the claimed request is still on disk for the next start to
+        surface, but a second routed prompt claimed during this run would
+        have renamed over it. Quoting it here is true either way."""
         req = self.inject
         if req is not None and self.inject_failed:
             self.notes.append(
-                "routed prompt was not delivered — it is preserved; re-type"
-                f" it in {req.target} ({req.prompt!r})"
+                "routed prompt was not delivered — the prompt is below;"
+                f" re-type it in {req.target} ({req.prompt!r})"
             )
