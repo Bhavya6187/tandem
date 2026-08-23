@@ -30,6 +30,12 @@ from .tabs import MIXED, TabState
 # Seconds of child-output silence after the first draw that count as "the
 # composer is up"; TUIs repaint in bursts well under this while booting.
 OUTPUT_QUIET_S = 1.0
+# How long a listening TUI gets to echo a paste (redraw its composer). No
+# output at all after a paste means the TUI was not taking input yet — the
+# bytes went nowhere — so the paste is retried after the next quiet period.
+ECHO_WAIT_S = 1.5
+# Paste attempts per delivery; each one waits out a fresh quiet period.
+PASTE_ATTEMPTS = 3
 
 
 class RouteCoordinator:
@@ -245,15 +251,61 @@ class RouteCoordinator:
             self.inject_failed = True
             return
         body = req.prompt.encode()
-        # bracketed paste: multi-line prompts must not submit per line
-        ok = control.write(b"\x1b[200~" + body + b"\x1b[201~")
-        if ok:
-            time.sleep(0.15)   # let the composer ingest the paste
-            ok = control.write(b"\r")
-        if not ok or flipping():
+        # Bracketed paste (multi-line prompts must not submit per line), and
+        # a write only counts once the TUI has echoed it. Live gate
+        # 2026-08-23: opencode draws its frame and goes quiet while it is
+        # still loading the session, and input in that window is discarded
+        # — a paste that nothing echoes went nowhere, so it is safe (and
+        # necessary) to wait for the next quiet period and paste again.
+        paste = b"\x1b[200~" + body + b"\x1b[201~"
+        delivered = False
+        for _ in range(PASTE_ATTEMPTS):
+            if flipping() or stop.is_set():
+                break
+            if self._write_echoed(control, paste):
+                delivered = True
+                break
+            if not self._quiet_again(control, stop, flipping):
+                break
+        if not delivered or flipping():
+            self.inject_failed = True
+            return
+        time.sleep(0.15)   # let the composer ingest the paste
+        # The submit must be acknowledged too: a TUI that echoed the paste
+        # and then produced nothing for the Enter has a prompt sitting in
+        # its composer, not a turn running — keep the request so the user
+        # is told, rather than release on faith.
+        if not self._write_echoed(control, b"\r") or flipping():
             self.inject_failed = True
             return
         routefile.release(self.session.tandem_id, req.id)
+
+    @staticmethod
+    def _write_echoed(control: PtyControl, data: bytes) -> bool:
+        """Write, then wait up to ECHO_WAIT_S for the child to produce any
+        output — the only evidence available from outside that the bytes
+        reached a TUI that was listening."""
+        before = control.last_output
+        if not control.write(data):
+            return False
+        deadline = time.monotonic() + ECHO_WAIT_S
+        while time.monotonic() < deadline:
+            if control.last_output > before:
+                return True
+            time.sleep(0.05)
+        return False
+
+    @staticmethod
+    def _quiet_again(control: PtyControl, stop, flipping) -> bool:
+        """Wait for the next output-then-quiet period (the TUI finishing
+        whatever it was still doing), bounded by the delivery deadline."""
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not stop.is_set() and not flipping():
+            last = control.last_output
+            if last and time.monotonic() - last >= OUTPUT_QUIET_S:
+                return True
+            time.sleep(0.3)
+        return False
 
     def cancelled(self) -> None:
         """Undo a routed arm: the monitor thread, after an armed wait was

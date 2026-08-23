@@ -10,7 +10,7 @@ import json
 import threading
 import time
 
-from tandem import routefile
+from tandem import routefile, routing
 from tandem.ptyrun import PtyControl
 from tandem.routefile import RouteRequest
 from tandem.routing import RouteCoordinator
@@ -217,10 +217,22 @@ def test_tick_does_nothing_without_a_tab_cycle(env_factory):
 # -- deliver ------------------------------------------------------------------
 
 
+class _EchoingControl(PtyControl):
+    """A control whose child echoes every accepted write, the way a
+    listening TUI redraws its composer — the pump normally stamps
+    `last_output` from the child's output; here the write itself does."""
+
+    def write(self, data: bytes) -> bool:
+        ok = super().write(data)
+        if ok:
+            self.last_output = time.monotonic()
+        return ok
+
+
 def _quiet_control():
-    """A control whose child has drawn and gone quiet: the non-claude
-    readiness signal (`PtyControl.last_output` is stamped by the pump)."""
-    control = PtyControl()
+    """A control whose child has drawn, gone quiet (the non-claude
+    readiness signal) and will echo what it is sent."""
+    control = _EchoingControl()
     control.last_output = time.monotonic() - 5.0
     return control
 
@@ -253,7 +265,7 @@ def test_deliver_waits_for_a_waiting_status(env_factory, monkeypatch):
         def session_status(self, sid):
             return answers.pop(0)
 
-    control, child = PtyControl(), _InjectChild()
+    control, child = _EchoingControl(), _InjectChild()
     control.attach(child)
     c = _coord(env, "claude", inject=req, adapter=StubAdapter())
     monkeypatch.setattr("time.sleep", lambda s: None)
@@ -275,7 +287,7 @@ def test_deliver_accepts_idle_and_keeps_asking_on_none(env_factory, monkeypatch)
         def session_status(self, sid):
             return answers.pop(0)
 
-    control, child = PtyControl(), _InjectChild()
+    control, child = _EchoingControl(), _InjectChild()
     control.attach(child)
     c = _coord(env, "claude", inject=req, adapter=StubAdapter())
     monkeypatch.setattr("time.sleep", lambda s: None)
@@ -331,6 +343,55 @@ def test_deliver_waits_for_the_child_to_draw_and_go_quiet(env_factory,
     monkeypatch.setattr("time.time", lambda: clock[0])
     c.deliver(control, threading.Event(), _StubMonitor())
     assert c.inject_failed is True and child.written == b""
+    assert routefile.read_claimed(env.session.tandem_id) is not None
+
+
+class _ScriptedEchoControl(_EchoingControl):
+    """Echo only the writes the script says a listening TUI would: one
+    False per write the TUI was not yet taking (live gate 2026-08-23:
+    opencode discards input during its session-load phase)."""
+
+    def __init__(self, echoes):
+        super().__init__()
+        self.echoes = list(echoes)
+        self.last_output = time.monotonic() - 5.0
+
+    def write(self, data: bytes) -> bool:
+        ok = PtyControl.write(self, data)
+        if ok and (self.echoes.pop(0) if self.echoes else True):
+            self.last_output = time.monotonic()
+        return ok
+
+
+def test_deliver_repastes_when_the_tui_swallowed_the_first(env_factory,
+                                                           monkeypatch):
+    env = env_factory(active="codex")
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
+    _claimed(env.session.tandem_id, req)
+    control, child = _ScriptedEchoControl([False, True, True]), _InjectChild()
+    control.attach(child)
+    monkeypatch.setattr(routing, "ECHO_WAIT_S", 0.01)
+    monkeypatch.setattr(routing, "OUTPUT_QUIET_S", 0.0)
+    c = _coord(env, "codex", inject=req)
+    c.deliver(control, threading.Event(), _StubMonitor())
+    paste = b"\x1b[200~do it\x1b[201~"
+    assert child.written == paste + paste + b"\r"   # second paste landed
+    assert c.inject_failed is False
+    assert routefile.read_claimed(env.session.tandem_id) is None
+
+
+def test_deliver_keeps_the_request_when_enter_is_not_acknowledged(
+        env_factory, monkeypatch):
+    env = env_factory(active="codex")
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
+    _claimed(env.session.tandem_id, req)
+    control, child = _ScriptedEchoControl([True, False]), _InjectChild()
+    control.attach(child)
+    monkeypatch.setattr(routing, "ECHO_WAIT_S", 0.01)
+    c = _coord(env, "codex", inject=req)
+    c.deliver(control, threading.Event(), _StubMonitor())
+    assert child.written.endswith(b"\r")
+    assert c.inject_failed is True                     # told, not assumed
     assert routefile.read_claimed(env.session.tandem_id) is not None
 
 
