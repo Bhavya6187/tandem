@@ -8,6 +8,7 @@ threads (mixer, injector, monitor cancel) stay in test_runner.py.
 
 import json
 import threading
+import time
 
 from tandem import routefile
 from tandem.ptyrun import PtyControl
@@ -216,6 +217,14 @@ def test_tick_does_nothing_without_a_tab_cycle(env_factory):
 # -- deliver ------------------------------------------------------------------
 
 
+def _quiet_control():
+    """A control whose child has drawn and gone quiet: the non-claude
+    readiness signal (`PtyControl.last_output` is stamped by the pump)."""
+    control = PtyControl()
+    control.last_output = time.monotonic() - 5.0
+    return control
+
+
 def test_deliver_pastes_and_releases(env_factory, monkeypatch):
     env = env_factory(active="codex")
     req = RouteRequest("codex", "", "do it", "claude", "→ codex")
@@ -224,7 +233,7 @@ def test_deliver_pastes_and_releases(env_factory, monkeypatch):
     class StubAdapter:      # no session_status attr: fixed-delay path
         pass
 
-    control, child = PtyControl(), _InjectChild()
+    control, child = _quiet_control(), _InjectChild()
     control.attach(child)
     c = _coord(env, "codex", inject=req, adapter=StubAdapter())
     monkeypatch.setattr("time.sleep", lambda s: None)   # skip settle delays
@@ -281,7 +290,8 @@ def test_deliver_never_believes_opencodes_status(tmp_path, monkeypatch):
     row both answer "waiting"), which says nothing about whether the TUI has
     drawn. Believing it would either write before the child is attached or
     paste into a TUI that is not listening and then release the request.
-    So the gate is claude-by-name and opencode takes the fixed settle."""
+    So the gate is claude-by-name and opencode waits for its TUI to draw
+    and go quiet instead."""
     from conftest import Env3
     from tandem.harness.opencode import OpencodeAdapter
 
@@ -295,14 +305,33 @@ def test_deliver_never_believes_opencodes_status(tmp_path, monkeypatch):
     monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
     req = RouteRequest("opencode", "", "do it", "claude", "→ opencode")
     _claimed(env.session.tandem_id, req)
-    control, child = PtyControl(), _InjectChild()
+    control, child = _quiet_control(), _InjectChild()
     control.attach(child)
     c = _coord(env, "opencode", inject=req, adapter=adapter)
     c.deliver(control, threading.Event(), _StubMonitor())
     assert asked == []                    # the probe is never consulted
-    assert slept[0] == 2.5                # the fixed settle from spawn
+    assert asked == []                    # the probe was never consulted
     assert child.written == b"\x1b[200~do it\x1b[201~\r"
     assert c.inject_failed is False
+
+
+def test_deliver_waits_for_the_child_to_draw_and_go_quiet(env_factory,
+                                                          monkeypatch):
+    """Non-claude readiness is output quiescence (live gate 2026-08-23: a
+    fixed settle pasted into a codex TUI that had not drawn yet and the
+    prompt was lost). No output at all → never ready → request kept."""
+    env = env_factory(active="codex")
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
+    _claimed(env.session.tandem_id, req)
+    control, child = PtyControl(), _InjectChild()   # last_output == 0.0
+    control.attach(child)
+    c = _coord(env, "codex", inject=req)
+    clock = [0.0]
+    monkeypatch.setattr("time.sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    monkeypatch.setattr("time.time", lambda: clock[0])
+    c.deliver(control, threading.Event(), _StubMonitor())
+    assert c.inject_failed is True and child.written == b""
+    assert routefile.read_claimed(env.session.tandem_id) is not None
 
 
 def test_deliver_into_the_wrong_target_keeps_the_request(env_factory):
@@ -326,7 +355,7 @@ def test_deliver_keeps_the_request_when_the_write_fails(env_factory,
 
     c = _coord(env, "codex", inject=req, adapter=StubAdapter())
     monkeypatch.setattr("time.sleep", lambda s: None)
-    c.deliver(PtyControl(),            # nothing attached: the write fails
+    c.deliver(_quiet_control(),        # drawn+quiet, but nothing attached: the write fails
               threading.Event(), _StubMonitor())
     assert c.inject_failed is True
     assert routefile.read_claimed(env.session.tandem_id) is not None
@@ -341,7 +370,7 @@ def test_deliver_gives_up_when_the_run_is_stopping(env_factory, monkeypatch):
         def session_status(self, sid):
             return "busy"
 
-    control, child = PtyControl(), _InjectChild()
+    control, child = _quiet_control(), _InjectChild()
     control.attach(child)
     stop = threading.Event()
     stop.set()
@@ -365,7 +394,7 @@ def test_deliver_holds_off_while_a_flip_is_in_flight(env_factory, monkeypatch):
 
     for monitor in (_StubMonitor(flip_requested=True), _StubMonitor(armed=True)):
         _claimed(env.session.tandem_id, req)
-        control, child = PtyControl(), _InjectChild()
+        control, child = _quiet_control(), _InjectChild()
         control.attach(child)
         c = _coord(env, "codex", inject=req, adapter=StubAdapter())
         monkeypatch.setattr("time.sleep", lambda s: None)
@@ -394,7 +423,7 @@ def test_deliver_keeps_the_request_when_the_flip_lands_mid_paste(
             if data == b"\r":       # the ladder fires as the turn is submitted
                 monitor.flip_requested = True
 
-    control, child = PtyControl(), _FlippingChild()
+    control, child = _quiet_control(), _FlippingChild()
     control.attach(child)
     c = _coord(env, "codex", inject=req, adapter=StubAdapter())
     monkeypatch.setattr("time.sleep", lambda s: None)
@@ -423,7 +452,7 @@ def test_deliver_tells_an_identical_re_typed_prompt_apart(env_factory,
             if data == b"\r":
                 routefile.write_route(env.session.tandem_id, twin)
 
-    control, child = PtyControl(), _TwinChild()
+    control, child = _quiet_control(), _TwinChild()
     control.attach(child)
     c = _coord(env, "codex", inject=req, adapter=StubAdapter())
     monkeypatch.setattr("time.sleep", lambda s: None)
@@ -453,7 +482,7 @@ def test_deliver_never_releases_someone_elses_request(env_factory,
             if data == b"\r":
                 routefile.write_route(env.session.tandem_id, later)
 
-    control, child = PtyControl(), _OverwritingChild()
+    control, child = _quiet_control(), _OverwritingChild()
     control.attach(child)
     c = _coord(env, "codex", inject=req, adapter=StubAdapter())
     monkeypatch.setattr("time.sleep", lambda s: None)

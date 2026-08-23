@@ -91,6 +91,12 @@ class PtyControl:
     def __init__(self):
         self._child = None
         self._attached = threading.Event()
+        # Monotonic time of the last byte the child wrote, 0.0 before any.
+        # Stamped by the pump on every read (plain float assignment — GIL-
+        # atomic, read from other threads); the injector uses "has drawn
+        # and has gone quiet" as the readiness signal for harnesses with no
+        # registry to ask.
+        self.last_output = 0.0
 
     def attach(self, child) -> None:
         self._child = child
@@ -438,6 +444,8 @@ def run_in_pty(
                     break
                 if not data:
                     break
+                if control is not None:
+                    control.last_output = time.monotonic()
                 _write_all(out_fd, data)
                 if guard is not None:
                     verdict = guard.feed(data)

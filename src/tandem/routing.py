@@ -27,6 +27,11 @@ from .state import PairedSession
 from .tabs import MIXED, TabState
 
 
+# Seconds of child-output silence after the first draw that count as "the
+# composer is up"; TUIs repaint in bursts well under this while booting.
+OUTPUT_QUIET_S = 1.0
+
+
 class RouteCoordinator:
     """The routed-turn state of one run: at most one request taken, at most
     one prompt to deliver."""
@@ -224,11 +229,18 @@ class RouteCoordinator:
                     pass    # a raising probe is not an answer; keep asking
                 time.sleep(0.3)
             else:
-                # no usable readiness signal (codex/opencode): fixed settle
-                # delay from spawn — verified in the live gate
-                time.sleep(2.5)
-                ready = True
-                break
+                # No registry to ask (codex/opencode): the TUI is ready once
+                # it has drawn something and then gone quiet. A fixed delay
+                # was not enough — live gate 2026-08-23: codex took longer
+                # to boot (MCP startup), a 2.5 s settle pasted into a TUI
+                # that was not listening, the request was released as
+                # delivered, and the prompt was gone. `control.last_output`
+                # is stamped by the pump on every child read.
+                last = control.last_output
+                if last and time.monotonic() - last >= OUTPUT_QUIET_S:
+                    ready = True
+                    break
+                time.sleep(0.3)
         if not ready or stop.is_set() or flipping():
             self.inject_failed = True
             return

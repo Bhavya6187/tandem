@@ -1925,7 +1925,7 @@ def test_mixer_startup_leaves_the_route_this_run_is_delivering(env_factory,
 
     monkeypatch.setattr(runner, "TranscriptWatcher", _QuietWatcher)
     monkeypatch.setattr(runner, "run_in_pty", fake_run_in_pty)
-    # `inject` does start a real injector thread — it sleeps out its 2.5s
+    # `inject` does start a real injector thread — it waits for output that
     # settle past the end of this test and its write then fails (nothing is
     # attached to the faked pty), which is harmless: a failed write never
     # touches the file. What is under test is the mixer's startup sweep,
