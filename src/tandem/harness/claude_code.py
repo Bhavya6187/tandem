@@ -246,7 +246,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
     def session_status(self, session_id: str) -> str | None:
         """Live turn state from claude's session registry: "busy" while a
-        turn runs, "waiting" at the prompt, None when no live entry
+        turn runs, "waiting" (2.1.226) or "idle" (2.1.241) at the prompt, None when no live entry
         matches. The flip wait treats anything but "busy" as flippable
         (single-tier by spec: eager on schema drift). Matched by
         sessionId — tandem mints claude session ids — never by pid

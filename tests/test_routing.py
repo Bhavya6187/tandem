@@ -253,6 +253,28 @@ def test_deliver_waits_for_a_waiting_status(env_factory, monkeypatch):
     assert c.inject_failed is False
 
 
+def test_deliver_accepts_idle_and_keeps_asking_on_none(env_factory, monkeypatch):
+    """claude 2.1.241 spells the idle composer "idle", not "waiting" (live
+    gate 2026-08-23); a None answer is a registry entry that does not exist
+    yet — booting — and must not count as ready."""
+    env = env_factory(active="claude")
+    req = RouteRequest("claude", "", "do it", "codex", "→ claude")
+    _claimed(env.session.tandem_id, req)
+    answers = [None, "busy", "idle"]
+
+    class StubAdapter:
+        def session_status(self, sid):
+            return answers.pop(0)
+
+    control, child = PtyControl(), _InjectChild()
+    control.attach(child)
+    c = _coord(env, "claude", inject=req, adapter=StubAdapter())
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    c.deliver(control, threading.Event(), _StubMonitor())
+    assert answers == [] and child.written.endswith(b"\r")
+    assert c.inject_failed is False
+
+
 def test_deliver_never_believes_opencodes_status(tmp_path, monkeypatch):
     """opencode HAS a `session_status`, and it is the wrong question: it
     reads the transcript sqlite (unknown sid and a resumed session's last

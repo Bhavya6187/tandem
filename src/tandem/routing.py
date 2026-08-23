@@ -161,8 +161,9 @@ class RouteCoordinator:
 
         Readiness has two shapes, and the split is claude-or-not rather than
         has-a-probe-or-not. Claude keeps a per-live-session registry whose
-        "waiting" really does mean an idle composer, so it is asked directly
-        and the prompt goes in the moment it answers. Everyone else takes a
+        idle answer ("waiting" on 2.1.226, "idle" on 2.1.241) really does
+        mean an idle composer, so it is asked directly and the prompt goes in
+        the moment it answers anything but "busy". Everyone else takes a
         fixed settle delay from spawn: opencode *has* a `session_status`,
         but it reads the transcript sqlite — an unknown session id and a
         resumed session's last row both answer "waiting" — which says
@@ -211,7 +212,12 @@ class RouteCoordinator:
             # answers "waiting" off transcript state and would be believed
             if self.active == "claude" and self.active_sid:
                 try:
-                    if self.adapter.session_status(self.active_sid) == "waiting":
+                    # Any positive non-busy answer is an idle composer:
+                    # claude 2.1.226 spelled it "waiting", 2.1.241 spells it
+                    # "idle" (live gate 2026-08-23). None means no live
+                    # registry entry yet — still booting — so keep asking.
+                    status = self.adapter.session_status(self.active_sid)
+                    if status is not None and status != "busy":
                         ready = True
                         break
                 except Exception:
