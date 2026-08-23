@@ -24,12 +24,26 @@ import time
 
 from . import routefile
 from .state import PairedSession
+
+
+def _debug(msg: str) -> None:
+    """Inject diagnostics into the flip-debug log (lazy import: runner
+    imports this module). Never raises."""
+    try:
+        from .runner import _flip_debug
+        _flip_debug("inject " + msg)
+    except Exception:
+        pass
 from .tabs import MIXED, TabState
 
 
 # Seconds of child-output silence after the first draw that count as "the
-# composer is up"; TUIs repaint in bursts well under this while booting.
-OUTPUT_QUIET_S = 1.0
+# composer is up". Measured on opencode 1.18.20 (live gate 2026-08-23): its
+# boot draws a first frame, pauses up to ~1.6 s, then renders the session
+# history — and input in that pause is discarded, with the history render
+# looking exactly like an echo. 2.5 s clears that gap with margin; codex's
+# and claude's boot gaps are shorter, so they only pay the wait.
+OUTPUT_QUIET_S = 2.5
 # How long a listening TUI gets to echo a paste (redraw its composer). No
 # output at all after a paste means the TUI was not taking input yet — the
 # bytes went nowhere — so the paste is retried after the next quiet period.
@@ -247,6 +261,9 @@ class RouteCoordinator:
                     ready = True
                     break
                 time.sleep(0.3)
+        _debug(f"ready={ready} stop={stop.is_set()} flipping={flipping()}"
+               f" last_output_age={time.monotonic() - control.last_output:.2f}"
+               if control.last_output else f"ready={ready} no-output-yet")
         if not ready or stop.is_set() or flipping():
             self.inject_failed = True
             return
@@ -264,7 +281,9 @@ class RouteCoordinator:
                 break
             if self._write_echoed(control, paste):
                 delivered = True
+                _debug("paste echoed")
                 break
+            _debug("paste NOT echoed; waiting for quiet")
             if not self._quiet_again(control, stop, flipping):
                 break
         if not delivered or flipping():
@@ -276,8 +295,10 @@ class RouteCoordinator:
         # its composer, not a turn running — keep the request so the user
         # is told, rather than release on faith.
         if not self._write_echoed(control, b"\r") or flipping():
+            _debug("enter NOT acknowledged; request kept")
             self.inject_failed = True
             return
+        _debug("delivered; releasing")
         routefile.release(self.session.tandem_id, req.id)
 
     @staticmethod
