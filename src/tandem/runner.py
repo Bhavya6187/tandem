@@ -24,7 +24,7 @@ from .events import SessionContext
 from .harness import get_adapter
 from .ptyrun import FrameIO, PtyControl, _winsize, run_in_pty
 from .ratelimit import RateLimitPoller
-from .routing import RouteCoordinator
+from .routing import RouteCoordinator, make_submission_probe
 from .state import PairedSession, StateStore, SyncCursor
 from .tabs import TabState
 from .tailer import TailedLine, TranscriptTruncated, TranscriptWatcher
@@ -776,6 +776,7 @@ class InteractiveRunner:
             # the mixer thread persists the frame file
             move = tabs.press(active)
             if move.kind == "bar":
+                route.publish_frame()
                 return
             monitor.flip_pressed()   # arms a flip, or toggles off a pending
                                      # one (move.kind == "cancel")
@@ -821,7 +822,9 @@ class InteractiveRunner:
 
         route = self.coordinator = RouteCoordinator(
             session, tabs, active, active_sid, adapter, routing_ok,
-            self.inject, notes)
+            self.inject, notes,
+            lambda prompt: make_submission_probe(
+                adapter, session, monitor.transcript, prompt))
         if tabs is not None:
             # plain assignment, like on_flip_decided: the monitor thread has
             # not started yet (monitor.start() is below)

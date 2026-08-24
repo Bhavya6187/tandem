@@ -313,6 +313,53 @@ class OpencodeAdapter(HarnessAdapter):
             return []
         return [db, db.with_name(db.name + "-wal")]
 
+    def route_submission_probe(self, session, transcript: Path, prompt: str):
+        """Predicate for this session gaining an exact new user message.
+
+        The normal source reader waits for a completed assistant turn; route
+        acknowledgement must see the user row immediately after submission.
+        """
+        db = db_path()
+        sid = session.native_id("opencode")
+        if db is None or not sid:
+            return lambda: False
+        try:
+            with connect(db) as conn:
+                row = conn.execute(
+                    "SELECT id, time_created FROM message WHERE session_id = ?"
+                    " ORDER BY time_created DESC, id DESC LIMIT 1", (sid,)
+                ).fetchone()
+        except sqlite3.Error:
+            return lambda: False
+        checkpoint = ({"time": row["time_created"], "id": row["id"]}
+                      if row is not None else {"time": 0, "id": ""})
+
+        def landed() -> bool:
+            try:
+                with connect(db) as conn:
+                    rows = conn.execute(
+                        "SELECT id FROM message WHERE session_id = ?"
+                        " AND (time_created > ? OR"
+                        " (time_created = ? AND id > ?))"
+                        " AND json_extract(data, '$.role') = 'user'"
+                        " ORDER BY time_created, id",
+                        (sid, checkpoint["time"], checkpoint["time"],
+                         checkpoint["id"]),
+                    ).fetchall()
+                    for candidate in rows:
+                        text = "\n".join(
+                            part.get("text", "")
+                            for part in _parts_for(conn, candidate["id"])
+                            if part.get("type") == "text"
+                        )
+                        if text == prompt:
+                            return True
+            except (sqlite3.Error, ValueError):
+                return False
+            return False
+
+        return landed
+
     def fast_forward_cursor(self, session, cursor) -> None:
         db = db_path()
         sid = session.native_id("opencode")

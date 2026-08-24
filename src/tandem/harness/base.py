@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..events import NormalizedEvent, SessionContext
+from ..events import NormalizedEvent, SessionContext, UserMessage
 
 
 def _fmt_tokens(n: int) -> str:
@@ -205,6 +205,48 @@ class HarnessAdapter(ABC):
 
     def watch_paths(self, session, transcript: Path) -> list[Path]:
         return [transcript]
+
+    def route_submission_probe(self, session, transcript: Path, prompt: str):
+        """Predicate for an exact user prompt appended after this call.
+
+        JSONL harnesses share this implementation. It tails from the current
+        end and parses native entries through the adapter, so unrelated file
+        growth cannot acknowledge a routed turn.
+        """
+        from ..state import SyncCursor
+
+        targets = session.targets_for(self.id)
+        if not targets:
+            return lambda: False
+        cursor = SyncCursor(tandem_id=session.tandem_id, source=self.id,
+                            target="__route_ack__")
+        try:
+            data = transcript.read_bytes()
+            cursor.byte_offset = len(data)
+            cursor.line_index = data.count(b"\n")
+            reader = self.make_source_reader(session, cursor, transcript)
+            ctx = SessionContext(
+                tandem_id=session.tandem_id, cwd=session.cwd,
+                direction=f"{self.id}->{targets[0]}",
+                source_session_id=session.native_id(self.id),
+            )
+        except Exception:
+            return lambda: False
+
+        def landed() -> bool:
+            try:
+                lines = reader.poll()
+                for line in lines:
+                    events = self.parse_entry(line.raw, ctx) if line.raw else []
+                    line.advance(cursor)
+                    if any(isinstance(event, UserMessage)
+                           and event.text == prompt for event in events):
+                        return True
+            except Exception:
+                return False
+            return False
+
+        return landed
 
     def shadow_append(self, ref: Path, entries: list[dict]) -> None:
         from ..util import append_jsonl_fsync

@@ -739,12 +739,12 @@ def hook_prompt_cmd() -> None:
         # the id proves THIS stash landed — a leftover or a concurrent
         # second prompt cannot vouch for it. Both slots are asked, not just
         # the first that answers: a fast frame may have claimed this
-        # request while a newer prompt took the pending slot behind it, and
-        # claimed-by-frame IS landed (demanding "still pending" would run
+        # request before this verification, and claimed-by-frame IS landed
+        # (demanding "still pending" would run
         # the prompt here AND there).
         if not any(got is not None and got.id == req.id
-                   for got in (routefile.read_pending(session.tandem_id),
-                               routefile.read_claimed(session.tandem_id))):
+                   for got in (routefile.read_pending(session.tandem_id, req.id),
+                               routefile.read_claimed(session.tandem_id, req.id))):
             sys.exit(0)   # stash didn't land: allow the native turn
         click.echo(json.dumps({
             "decision": "block",

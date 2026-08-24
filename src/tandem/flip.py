@@ -117,7 +117,7 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
             # saying `mixed` would have it stash a routed prompt with nothing
             # to pick it up: the block tells the user their turn is running
             # in another harness, and nothing ever runs it. The next mixed
-            # start does surface it — the sweep quotes both slots — but that
+            # start does surface it — the sweep quotes every leftover — but that
             # is a note about a prompt that already went nowhere, one
             # session too late. Stamping the tab off stops the stash from
             # happening at all. The stamp is right whichever way the unreadable

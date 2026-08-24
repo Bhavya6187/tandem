@@ -282,9 +282,8 @@ class TestCli:
 
     def test_a_claimed_stash_behind_a_newer_prompt_still_blocks(
             self, env_factory, monkeypatch):
-        # the frame claimed this request and a second prompt took the
-        # pending slot behind it. Reading only the first slot that answers
-        # would find the newcomer, miss the id, and allow a turn that is
+        # the frame claimed this request before verification. Reading only
+        # pending state would miss the id and allow a turn that is
         # already on its way to the target — it would then run twice.
         from tandem import routefile
         env = env_factory(active="claude")

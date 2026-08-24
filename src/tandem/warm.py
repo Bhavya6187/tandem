@@ -70,14 +70,14 @@ def build_launch(session: PairedSession, side: str, model: str = "") -> LaunchRe
     argv += load_harness_args(side)
     # After the user's [args], not before: an explicit per-turn route pin
     # outranks a static config entry, and both CLIs take the last flag.
-    if model:
-        argv += adapter.model_argv(model)
+    model_args = adapter.model_argv(model) if model else []
+    argv += model_args
     hook_extra = adapter.hook_argv_extra(sentinel)
     argv += hook_extra
     return LaunchRecipe(
         side=side, argv=argv, sentinel=sentinel, hook_extra=hook_extra,
         transcript=transcript, fresh=fresh, cwd=session.cwd,
-        model=model if model and adapter.model_argv(model) else "",
+        model=model if model_args else "",
     )
 
 

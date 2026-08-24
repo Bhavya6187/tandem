@@ -6,7 +6,7 @@
 
 **Architecture:** A `UserPromptSubmit` hook (registered in both claude and codex via the existing tandem plugin) intercepts prompts typed in the mixed tab, parses the `@` prefix, stashes a route request under `$TANDEM_HOME/tmp/`, and blocks the local turn. The runner's new mixer thread picks the request up, arms the existing flip machinery toward the route's target, and the flip loop relaunches the target harness with the pinned model on its argv and injects the stashed prompt into its pty as a bracketed paste. Tab state (harness vs mixed, sticky focus) lives in a new session-meta column and a frame-state file the hook reads.
 
-**Amended after implementation (post-review simplification pass).** Tasks 2, 9 and 10 below describe protocol v1: one mutable route file with a `state` field and a 10-minute `ROUTE_TTL`. What is on the branch is v2: the request is immutable and carries an `id`, the filename is the state (`<id>-route.json` pending → `<id>-route.claimed.json`, taken by one atomic `os.replace`), and there is no TTL — a startup `sweep` clears both slots and reports what they held at any age. `read_route`/`mark_dispatched`/`clear_route`/`ROUTE_TTL` are gone, replaced by `read_pending`/`read_claimed`/`claim`/`release`/`sweep`. That closed two review findings: leftovers older than the TTL were deleted silently, and the hook proved its own stash by comparing prompt text, which a same-text leftover could vouch for. The frame side of the lifecycle also moved out of `InteractiveRunner` into `routing.RouteCoordinator`.
+**Amended after implementation (post-review race fix).** Tasks 2, 9 and 10 below describe protocol v1: one mutable route file with a `state` field and a 10-minute `ROUTE_TTL`. What is on the branch is v3: every immutable request carries an `id` in its own path (`<session>-route.<request>.json` pending → `<session>-route.<request>.claimed.json`, taken by one exact-path atomic `os.replace`), and there is no TTL — startup `sweep` reports and clears every leftover at any age. `read_route`/`mark_dispatched`/`clear_route`/`ROUTE_TTL` are gone, replaced by `read_pending`/`read_claimed`/`claim`/`release`/`sweep`. Per-request paths close v2's check-then-rename/unlink race and allow concurrent prompts without shared-slot overwrites. The frame lifecycle lives in `routing.RouteCoordinator`.
 
 **Tech Stack:** Python 3.11+ stdlib + existing deps only (click, ptyprocess, pytest). No new dependencies.
 
@@ -29,7 +29,7 @@
 | File | Responsibility |
 |---|---|
 | `src/tandem/promptroute.py` (new) | Pure @-prefix grammar: parse the first token into a `RouteDecision`, cross-harness bare-model resolution, hook decision JSON. Mirrors `hookroute.py`'s pure-logic style. |
-| `src/tandem/routefile.py` (new) | Route-request + frame-state files under `$TANDEM_HOME/tmp/`: atomic writes, id-keyed pending → claimed lifecycle (claim by rename), startup sweep. |
+| `src/tandem/routefile.py` (new) | Route-request + frame-state files under `$TANDEM_HOME/tmp/`: per-id immutable files, exact-path pending → claimed rename, startup sweep. |
 | `src/tandem/routing.py` (new, simplification pass) | `RouteCoordinator`: one run's routed-turn lifecycle on the frame side — startup sweep, frame-file publish, pickup, injection, cancel, notes. |
 | `src/tandem/tabs.py` (new) | `TabState`: the tab cycle (participants + mixed), sticky focus, pending flip moves, cancel semantics. Pure in-memory state machine. |
 | `src/tandem/state.py` | New `meta` JSON column on sessions (+ additive migration) with `get_meta`/`set_meta`. |

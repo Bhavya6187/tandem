@@ -6,27 +6,24 @@ and the tandem frame that owns the session.
   which harness has focus; rewritten by the runner's mixer thread on every
   tab change. The hook treats a missing/corrupt file as "not the mixed tab"
   and stays silent — the safe default.
-- route request: hook → frame. Two filenames, and the *location* is the
-  state, so nothing here is ever mutated in place:
-  `<id>-route.json` is pending (the hook wrote it, nobody has taken it) and
-  `<id>-route.claimed.json` is claimed (the frame took it by rename, and is
-  on the hook for delivering it).
+- route request: hook → frame. Every request gets its own immutable file;
+  the *location* is the state, so nothing is mutated in place:
+  `<session>-route.<request>.json` is pending and
+  `<session>-route.<request>.claimed.json` is claimed by exact-path rename.
 
 Lifecycle: the hook writes pending durably BEFORE blocking the turn — the
 stash is what makes the prompt unlosable; the frame `claim`s it at pickup,
 which is one atomic rename, so its own next tick cannot re-arm on it; the
 injector `release`s it once the prompt has landed. Whatever is still on
 disk at the next frame start is a routed prompt that never ran: `sweep`
-deletes both files and hands back what they held, at any age, so the frame
+deletes every request file and hands back what it held, at any age, so the frame
 can quote them. There is no TTL — an old leftover is still a typed prompt,
 and deleting it quietly would be the one way to lose one.
 
 Every request carries an `id`, and that is what makes each hand-off safe
-without a lock: the hook proves ITS stash landed by id, the frame claims
-one specific id, and delivery releases only the id it delivered. The single
-pending slot means a second routed prompt written before pickup overwrites
-the first — but the losing hook's verify then fails the id check and allows
-its native turn, so the prompt runs where it was typed instead of vanishing.
+without a lock: the hook proves ITS stash landed by id, the frame renames
+that exact request path, and delivery unlinks only that id. Separate paths
+mean concurrent hooks cannot overwrite one another.
 
 Best-effort like pinstash: writes go through `util.write_file_atomic`
 (fsync + rename in the destination dir) so a concurrent read never sees a
@@ -37,12 +34,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from dataclasses import asdict, dataclass, field
 
 from . import paths, util
 
 _FIELDS = ("target", "model", "prompt", "source", "reason", "id")
+_REQUEST_ID_RE = re.compile(r"[0-9a-f]{12}\Z")
+
+
+def _valid_request_id(req_id: str) -> bool:
+    return bool(_REQUEST_ID_RE.fullmatch(req_id))
 
 
 @dataclass(frozen=True)
@@ -55,12 +58,18 @@ class RouteRequest:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
 
-def _pending_path(tandem_id: str):
-    return paths.tandem_home() / "tmp" / f"{tandem_id}-route.json"
+def _pending_path(tandem_id: str, req_id: str | None = None):
+    """One pending request path; no id names the pre-v3 legacy slot."""
+    name = (f"{tandem_id}-route.{req_id}.json" if req_id else
+            f"{tandem_id}-route.json")
+    return paths.tandem_home() / "tmp" / name
 
 
-def _claimed_path(tandem_id: str):
-    return paths.tandem_home() / "tmp" / f"{tandem_id}-route.claimed.json"
+def _claimed_path(tandem_id: str, req_id: str | None = None):
+    """One claimed request path; no id names the pre-v3 legacy slot."""
+    name = (f"{tandem_id}-route.{req_id}.claimed.json" if req_id else
+            f"{tandem_id}-route.claimed.json")
+    return paths.tandem_home() / "tmp" / name
 
 
 def _frame_path(tandem_id: str):
@@ -94,9 +103,10 @@ def _read_req(path) -> RouteRequest | None:
     if obj is None:
         return None
     try:
-        return RouteRequest(**{k: str(obj[k]) for k in _FIELDS})
+        req = RouteRequest(**{k: str(obj[k]) for k in _FIELDS})
     except (KeyError, TypeError):
         return None
+    return req if _valid_request_id(req.id) else None
 
 
 def _read_quotable(path) -> RouteRequest | None:
@@ -125,50 +135,83 @@ def _unlink(path) -> None:
         pass
 
 
+def _request_paths(tandem_id: str, claimed: bool) -> list:
+    """Current per-request paths in deterministic order, plus a legacy
+    shared slot when upgrading from the previous protocol."""
+    root = paths.tandem_home() / "tmp"
+    prefix = f"{tandem_id}-route."
+    suffix = ".claimed.json" if claimed else ".json"
+    try:
+        found = [p for p in root.iterdir()
+                 if p.name.startswith(prefix) and p.name.endswith(suffix)
+                 and (claimed or not p.name.endswith(".claimed.json"))]
+    except OSError:
+        found = []
+    legacy = _claimed_path(tandem_id) if claimed else _pending_path(tandem_id)
+    try:
+        if legacy.exists():
+            found.append(legacy)
+    except OSError:
+        pass
+    return sorted(found, key=lambda p: p.name)
+
+
 def write_route(tandem_id: str, req: RouteRequest) -> None:
-    _write_json(_pending_path(tandem_id), asdict(req))
+    if not _valid_request_id(req.id):
+        return
+    _write_json(_pending_path(tandem_id, req.id), asdict(req))
 
 
-def read_pending(tandem_id: str) -> RouteRequest | None:
-    return _read_req(_pending_path(tandem_id))
+def read_pending(tandem_id: str, req_id: str | None = None) -> RouteRequest | None:
+    if req_id is not None:
+        if not _valid_request_id(req_id):
+            return None
+        return _read_req(_pending_path(tandem_id, req_id))
+    return next((req for path in _request_paths(tandem_id, False)
+                 if (req := _read_req(path)) is not None), None)
 
 
-def read_claimed(tandem_id: str) -> RouteRequest | None:
-    return _read_req(_claimed_path(tandem_id))
+def read_claimed(tandem_id: str, req_id: str | None = None) -> RouteRequest | None:
+    if req_id is not None:
+        if not _valid_request_id(req_id):
+            return None
+        return _read_req(_claimed_path(tandem_id, req_id))
+    return next((req for path in _request_paths(tandem_id, True)
+                 if (req := _read_req(path)) is not None), None)
 
 
 def claim(tandem_id: str, req_id: str) -> bool:
     """Take the pending request, if it is still the one with this id.
 
-    The rename is the claim: after it the frame owns the request and a
-    later tick reads an empty pending slot. Checking the id first is what
-    keeps a second prompt — written between validation and here — from
-    being armed as a flip nobody looked at."""
-    req = _read_req(_pending_path(tandem_id))
-    if req is None or req.id != req_id:
+    The exact-path rename is the claim: after it the frame owns this request
+    and concurrent request ids remain independently pending."""
+    if not _valid_request_id(req_id):
+        return False
+    source = _pending_path(tandem_id, req_id)
+    if _read_req(source) is None:
         return False
     try:
-        os.replace(_pending_path(tandem_id), _claimed_path(tandem_id))
+        os.replace(source, _claimed_path(tandem_id, req_id))
     except OSError:
         return False
     return True
 
 
 def release(tandem_id: str, req_id: str) -> None:
-    """Delete this request's file wherever it sits: the claimed slot once
-    the prompt has landed, the pending slot when the frame drops one it
-    cannot route. Never anyone else's — a second prompt written while this
-    one was in flight carries a different id and is left alone."""
-    for path in (_claimed_path(tandem_id), _pending_path(tandem_id)):
-        req = _read_req(path)
-        if req is not None and req.id == req_id:
-            _unlink(path)
-            return
+    """Delete only this id's claimed/pending files. A concurrent request has
+    a different path, so no read-before-unlink comparison is needed."""
+    if not _valid_request_id(req_id):
+        return
+    _unlink(_claimed_path(tandem_id, req_id))
+    _unlink(_pending_path(tandem_id, req_id))
 
 
-def sweep(tandem_id: str) -> tuple[RouteRequest | None, RouteRequest | None]:
-    """Startup recovery: clear both slots and return `(pending, claimed)` —
-    a prompt that was never picked up and one that was never delivered.
+def sweep(tandem_id: str, preserve_id: str | None = None
+          ) -> tuple[list[RouteRequest], list[RouteRequest]]:
+    """Clear leftovers and return pending/claimed lists.
+
+    `preserve_id` belongs to the injecting run and remains in place; every
+    other request, including legacy shared-slot files, is surfaced and removed.
 
     Whatever the caller does with them, the files go: they belong to a run
     that is over, and replaying one into a fresh session would type a stale
@@ -177,10 +220,17 @@ def sweep(tandem_id: str) -> tuple[RouteRequest | None, RouteRequest | None]:
     broken to route is still a prompt somebody typed, and this is its last
     chance to be quoted. Only a file with no prompt in it goes without a
     word; there is nothing to say about one."""
-    found = []
-    for path in (_pending_path(tandem_id), _claimed_path(tandem_id)):
-        found.append(_read_quotable(path))
-        _unlink(path)
+    found: list[list[RouteRequest]] = []
+    for claimed in (False, True):
+        group = []
+        for path in _request_paths(tandem_id, claimed):
+            req = _read_quotable(path)
+            if req is not None and req.id == preserve_id:
+                continue
+            if req is not None:
+                group.append(req)
+            _unlink(path)
+        found.append(group)
     return found[0], found[1]
 
 

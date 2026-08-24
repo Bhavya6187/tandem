@@ -50,6 +50,19 @@ OUTPUT_QUIET_S = 2.5
 ECHO_WAIT_S = 1.5
 # Paste attempts per delivery; each one waits out a fresh quiet period.
 PASTE_ATTEMPTS = 3
+# Maximum wait for the submitted user turn to reach durable native history.
+SUBMIT_WAIT_S = 3.0
+
+
+def make_submission_probe(adapter, session: PairedSession, transcript,
+                          prompt: str):
+    """Return a predicate for the exact routed prompt reaching native state."""
+    if transcript is None:
+        return lambda: False
+    try:
+        return adapter.route_submission_probe(session, transcript, prompt)
+    except Exception:
+        return lambda: False
 
 
 class RouteCoordinator:
@@ -60,7 +73,7 @@ class RouteCoordinator:
                  active: str, active_sid: str | None, adapter,
                  routing_ok: bool,
                  inject: routefile.RouteRequest | None,
-                 notes: list[str]):
+                 notes: list[str], submission_probe=None):
         self.session = session
         # The tab cycle, or None for the pre-mixed frame: no frame file, no
         # pickup, and Ctrl-] goes straight to the monitor.
@@ -78,6 +91,8 @@ class RouteCoordinator:
         # The run's shared exit-report list; `list.append` is atomic and the
         # runner reads it only after the threads are joined.
         self.notes = notes
+        self.submission_probe = submission_probe or (
+            lambda prompt: (lambda: False))
         # Filled by `pickup` when a request armed this run's flip; the flip
         # loop reads it after run() to learn where to go and what to carry.
         self.route_request: routefile.RouteRequest | None = None
@@ -87,7 +102,7 @@ class RouteCoordinator:
         self._published = -1
 
     def sweep_leftovers(self) -> None:
-        """Clear both route files at startup, saying what they held.
+        """Clear every leftover route file at startup, saying what it held.
 
         A leftover from an earlier run must not replay a stale prompt into
         this one, so the files go — but never silently. A claimed one never
@@ -97,14 +112,13 @@ class RouteCoordinator:
         sweep is what eats the request). Either way it is a typed prompt
         about to be deleted, and the note is the only copy the user gets.
 
-        Not while this run is the one delivering: that request is the
-        injector's, and only the injector releases it."""
-        if self.inject is not None:
-            return
-        pending, claimed = routefile.sweep(self.session.tandem_id)
-        for left, what in ((pending, "never picked up"),
-                           (claimed, "never delivered")):
-            if left is not None:
+        The request this run is delivering is excluded by id; every other
+        leftover is still recovered."""
+        preserve = self.inject.id if self.inject is not None else None
+        pending, claimed = routefile.sweep(self.session.tandem_id, preserve)
+        for leftovers, what in ((pending, "never picked up"),
+                                (claimed, "never delivered")):
+            for left in leftovers:
                 # a leftover the sweep could only read loosely may have no
                 # target left to name; the prompt is the part that matters
                 where = f" (target {left.target})" if left.target else ""
@@ -126,12 +140,17 @@ class RouteCoordinator:
         tabs = self.tabs
         if tabs is None:
             return
-        if tabs.version != self._published:
+        self.publish_frame()
+        self.pickup(monitor)
+
+    def publish_frame(self) -> None:
+        """Synchronize the hook-facing snapshot with the visible tab state."""
+        tabs = self.tabs
+        if tabs is not None and tabs.version != self._published:
             self._published = tabs.version
             routefile.write_frame_state(
                 self.session.tandem_id,
                 tabs.snapshot(self.active, routing_ok=self.routing_ok))
-        self.pickup(monitor)
 
     def pickup(self, monitor) -> None:
         """Turn a pending route request into an armed flip toward its target.
@@ -146,8 +165,8 @@ class RouteCoordinator:
 
         Everything from the claim to `flip_pressed` is exposed the same way:
         the rename between them is not instant, and a press landing in there
-        wins the monitor. `cancelled` is the recovery — it releases both the
-        request and the file when the arm is toggled off."""
+        wins the monitor. `cancelled` releases the tab/monitor claim while
+        preserving the durable request."""
         tabs = self.tabs
         if tabs.tab != MIXED:
             return
@@ -290,12 +309,34 @@ class RouteCoordinator:
             self.inject_failed = True
             return
         time.sleep(0.15)   # let the composer ingest the paste
-        # The submit must be acknowledged too: a TUI that echoed the paste
-        # and then produced nothing for the Enter has a prompt sitting in
-        # its composer, not a turn running — keep the request so the user
-        # is told, rather than release on faith.
-        if not self._write_echoed(control, b"\r") or flipping():
+        # Enter needs both terminal acknowledgement and a durable native
+        # transcript change. A redraw can satisfy the former without the TUI
+        # accepting input, so only the latter permits release.
+        before_enter = control.last_output
+        if not control.write(b"\r"):
+            _debug("enter write failed; request kept")
+            self.inject_failed = True
+            return
+        # Checkpoint only after Enter has reached the pty. An identical native
+        # user entry created before submission can never acknowledge this one;
+        # a child that persists synchronously may cause a conservative kept
+        # copy, never a false release.
+        submitted = self.submission_probe(req.prompt)
+        deadline = time.monotonic() + ECHO_WAIT_S
+        while (time.monotonic() < deadline
+               and control.last_output <= before_enter):
+            time.sleep(0.05)
+        if control.last_output <= before_enter or flipping():
             _debug("enter NOT acknowledged; request kept")
+            self.inject_failed = True
+            return
+        deadline = time.monotonic() + SUBMIT_WAIT_S
+        while time.monotonic() < deadline and not stop.is_set() and not flipping():
+            if submitted():
+                break
+            time.sleep(0.05)
+        else:
+            _debug("submit absent from transcript; request kept")
             self.inject_failed = True
             return
         _debug("delivered; releasing")
@@ -329,21 +370,17 @@ class RouteCoordinator:
         return False
 
     def cancelled(self) -> None:
-        """Undo a routed arm: the monitor thread, after an armed wait was
-        toggled off. The pending tab move is gone either way; a routed arm
-        riding on it has to be undone here too, including the file — it is
-        already claimed, and left alone it would be surfaced at the next
-        frame start as a prompt that never landed."""
+        """Undo a routed arm after its wait was toggled off. The tab move and
+        in-memory carry go; the claimed file remains recoverable and will be
+        surfaced at the next frame start."""
         self.tabs.cancelled()
         req = self.route_request
         if req is not None:
             self.route_request = None
-            routefile.release(self.session.tandem_id, req.id)
-            # Quoted whole, like every other route note: the file is gone by
-            # the time this prints, so the note IS the prompt — a long exit
-            # line beats a prompt the user cannot get back.
-            self.notes.append("routed turn cancelled — the prompt was "
-                              f"discarded: {req.prompt!r}")
+            # Keep the claimed file for startup recovery. Cancellation must
+            # undo the flip, not destroy the only durable prompt copy.
+            self.notes.append("routed turn cancelled — the prompt was kept: "
+                              f"{req.prompt!r}")
 
     def exit_notes(self) -> None:
         """The report line a run owes the user when its injection failed.

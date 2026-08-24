@@ -1774,6 +1774,7 @@ def test_frame_gets_the_tab_snapshot_and_the_press_glue(env_factory, monkeypatch
         seen["mode"] = frame.mode()
         frame.on_flip()          # mixed -> harness with focus already here
         seen["after"] = frame.mode()
+        seen["published"] = routefile.read_frame_state(env.session.tandem_id)
         return 0
 
     monkeypatch.setattr(runner, "TranscriptWatcher", _QuietWatcher)
@@ -1784,6 +1785,9 @@ def test_frame_gets_the_tab_snapshot_and_the_press_glue(env_factory, monkeypatch
                             "routing_ok": True}
     # a bar move: the tab changed and no flip was ever armed
     assert seen["after"] == {"tab": "harness", "focus": "", "routing_ok": True}
+    # The hook-facing file changes in the same callback as the visible mode;
+    # it must not wait for the mixer's next 250ms tick.
+    assert seen["published"] == seen["after"]
     assert r.flip_requested is False and tabs.pending is None
 
 
@@ -1844,9 +1848,9 @@ def test_frame_state_says_routing_is_off_without_the_plugin(env_factory,
 def test_mixer_startup_surfaces_and_clears_a_leftover_claim(env_factory,
                                                             monkeypatch):
     env = env_factory(active="claude")
-    _claimed(env.session.tandem_id, RouteRequest(
-        "codex", "", _LONG_PROMPT, "claude", "→ codex"))
-    path = routefile._claimed_path(env.session.tandem_id)
+    req = RouteRequest("codex", "", _LONG_PROMPT, "claude", "→ codex")
+    _claimed(env.session.tandem_id, req)
+    path = routefile._claimed_path(env.session.tandem_id, req.id)
     tabs = TabState(env.session.participants, tab="mixed", focus="claude")
 
     def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
@@ -1869,13 +1873,14 @@ def test_mixer_startup_surfaces_and_clears_a_leftover_pending_route(
     what eats the request. The delete is unconditional — the note is what
     stops it being silent."""
     env = env_factory(active="claude")
-    routefile.write_route(env.session.tandem_id, RouteRequest(
-        "codex", "", _LONG_PROMPT, "claude", "→ codex"))
+    req = RouteRequest("codex", "", _LONG_PROMPT, "claude", "→ codex")
+    routefile.write_route(env.session.tandem_id, req)
     tabs = TabState(env.session.participants, tab="mixed", focus="claude")
 
     def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
         assert _wait_for(
-            lambda: not routefile._pending_path(env.session.tandem_id).exists())
+            lambda: not routefile._pending_path(
+                env.session.tandem_id, req.id).exists())
         return 0
 
     monkeypatch.setattr(runner, "TranscriptWatcher", _QuietWatcher)
@@ -1891,9 +1896,9 @@ def test_mixer_startup_surfaces_an_old_leftover_too(env_factory, monkeypatch):
     still a prompt the user typed, and the sweep deletes it either way — so
     an age cut-off could only ever turn a note into a silent loss."""
     env = env_factory(active="claude")
-    routefile.write_route(env.session.tandem_id, RouteRequest(
-        "codex", "", _LONG_PROMPT, "claude", "→ codex"))
-    path = routefile._pending_path(env.session.tandem_id)
+    req = RouteRequest("codex", "", _LONG_PROMPT, "claude", "→ codex")
+    routefile.write_route(env.session.tandem_id, req)
+    path = routefile._pending_path(env.session.tandem_id, req.id)
     old = time.time() - 86400
     os.utime(path, (old, old))
     tabs = TabState(env.session.participants, tab="mixed", focus="claude")
@@ -2036,6 +2041,7 @@ def test_the_mixer_thread_picks_a_live_route_up_and_a_cancel_undoes_it(
     r.run()
     assert r.coordinator.route_request is None and tabs.pending is None
     assert routefile.read_pending(env.session.tandem_id) is None
+    assert routefile.read_claimed(env.session.tandem_id) is not None
     assert any("routed turn cancelled" in line and _LONG_PROMPT in line
                for line in r.reports)
 

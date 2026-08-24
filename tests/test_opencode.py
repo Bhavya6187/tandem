@@ -121,6 +121,26 @@ def _insert_part(db, sid, msg_id, part_id, data, t=1):
                      (part_id, msg_id, sid, t, t, json.dumps(data)))
 
 
+def test_route_submission_probe_matches_only_the_exact_new_user(mini_db):
+    sid = _insert_session(mini_db)
+
+    class Session:
+        @staticmethod
+        def native_id(harness):
+            return sid if harness == "opencode" else None
+
+    probe = opencode.OpencodeAdapter().route_submission_probe(
+        Session(), mini_db, "wanted")
+    _insert_message(mini_db, sid, "msg_aa0000000001x", {"role": "user"}, 10)
+    _insert_part(mini_db, sid, "msg_aa0000000001x", "prt_aa0000000001x",
+                 {"type": "text", "text": "unrelated"}, 10)
+    assert probe() is False
+    _insert_message(mini_db, sid, "msg_ab0000000001x", {"role": "user"}, 20)
+    _insert_part(mini_db, sid, "msg_ab0000000001x", "prt_ab0000000001x",
+                 {"type": "text", "text": "wanted"}, 20)
+    assert probe() is True
+
+
 def _seed_turn(db, sid, complete=True, provider="openai"):
     """user('is the readme updated?') + assistant(reasoning, text, tool,
     step parts) — shapes lifted from the operator's real 1.18.15 session."""

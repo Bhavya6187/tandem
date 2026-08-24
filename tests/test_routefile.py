@@ -31,6 +31,14 @@ def test_every_request_gets_its_own_id():
     assert a.id and a.id != b.id
 
 
+def test_hostile_request_id_cannot_escape_the_route_directory(home):
+    hostile = RouteRequest("codex", "", "do it", "claude", "→ codex",
+                           id="x/../../../escaped")
+    routefile.write_route("abc123", hostile)
+    assert routefile.read_pending("abc123") is None
+    assert not (home.parent / "escaped.json").exists()
+
+
 def test_pending_round_trip_carries_the_id():
     r = req()
     routefile.write_route("abc123", r)
@@ -77,6 +85,39 @@ def test_claim_of_another_id_touches_nothing():
     assert routefile.claim("abc123", "deadbeef1234") is False
     assert routefile.read_pending("abc123") == r
     assert routefile.read_claimed("abc123") is None
+
+
+def test_claim_renames_the_exact_request_when_another_arrives(monkeypatch):
+    """A claim must operate on the id it was given, not on whichever
+    request happens to occupy a shared slot after validation."""
+    first = req("first")
+    later = req("later")
+    routefile.write_route("abc123", first)
+    real_replace = routefile.os.replace
+    injected = False
+
+    def replace_after_new_arrival(src, dst):
+        nonlocal injected
+        if not injected and src.name.endswith(f"route.{first.id}.json"):
+            injected = True
+            routefile.write_route("abc123", later)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(routefile.os, "replace", replace_after_new_arrival)
+    assert routefile.claim("abc123", first.id) is True
+    assert routefile.read_claimed("abc123", first.id) == first
+    assert routefile.read_pending("abc123", later.id) == later
+
+
+def test_two_claimed_requests_never_overwrite_each_other():
+    first = req("first")
+    later = req("later")
+    routefile.write_route("abc123", first)
+    assert routefile.claim("abc123", first.id) is True
+    routefile.write_route("abc123", later)
+    assert routefile.claim("abc123", later.id) is True
+    assert routefile.read_claimed("abc123", first.id) == first
+    assert routefile.read_claimed("abc123", later.id) == later
 
 
 def test_claim_with_nothing_pending_is_false():
@@ -138,7 +179,7 @@ def test_sweep_returns_both_leftovers_and_deletes_them(home):
     routefile.claim("abc123", undelivered.id)
     unclaimed = req("never picked up at all")
     routefile.write_route("abc123", unclaimed)
-    assert routefile.sweep("abc123") == (unclaimed, undelivered)
+    assert routefile.sweep("abc123") == ([unclaimed], [undelivered])
     assert routefile.read_pending("abc123") is None
     assert routefile.read_claimed("abc123") is None
     assert list((home / "tmp").iterdir()) == []
@@ -152,15 +193,15 @@ def test_sweep_has_no_age_limit(home):
 
     r = req()
     routefile.write_route("abc123", r)
-    p = home / "tmp" / "abc123-route.json"
+    p = routefile._pending_path("abc123", r.id)
     old = time.time() - 86400 * 7
     os.utime(p, (old, old))
-    assert routefile.sweep("abc123") == (r, None)
+    assert routefile.sweep("abc123") == ([r], [])
     assert not p.exists()
 
 
 def test_sweep_of_nothing_is_quiet():
-    assert routefile.sweep("abc123") == (None, None)
+    assert routefile.sweep("abc123") == ([], [])
 
 
 def test_sweep_deletes_an_unparseable_file(home):
@@ -168,7 +209,7 @@ def test_sweep_deletes_an_unparseable_file(home):
     p = home / "tmp" / "abc123-route.json"
     p.parent.mkdir(parents=True)
     p.write_text("{not json")
-    assert routefile.sweep("abc123") == (None, None)
+    assert routefile.sweep("abc123") == ([], [])
     assert not p.exists()
 
 
@@ -184,8 +225,8 @@ def test_sweep_still_quotes_a_request_from_before_the_ids(home):
                  ' "state": "dispatched"}')
     assert routefile.read_pending("abc123") is None    # not routable
     left, _ = routefile.sweep("abc123")
-    assert left is not None and left.prompt == "fix the test"
-    assert left.target == "codex"                      # enough for the note
+    assert len(left) == 1 and left[0].prompt == "fix the test"
+    assert left[0].target == "codex"                   # enough for the note
     assert not p.exists()
 
 
@@ -196,8 +237,9 @@ def test_sweep_quotes_a_request_missing_everything_but_its_prompt(home):
     p.parent.mkdir(parents=True)
     p.write_text('{"prompt": "the only thing left"}')
     pending, claimed = routefile.sweep("abc123")
-    assert pending is None
-    assert claimed.prompt == "the only thing left" and claimed.target == ""
+    assert pending == []
+    assert len(claimed) == 1
+    assert claimed[0].prompt == "the only thing left" and claimed[0].target == ""
     assert not p.exists()
 
 
@@ -205,7 +247,7 @@ def test_sweep_says_nothing_about_a_file_with_no_prompt(home):
     p = home / "tmp" / "abc123-route.json"
     p.parent.mkdir(parents=True)
     p.write_text('{"target": "codex", "state": "pending"}')
-    assert routefile.sweep("abc123") == (None, None)
+    assert routefile.sweep("abc123") == ([], [])
     assert not p.exists()
 
 
@@ -239,5 +281,7 @@ def test_write_leaves_no_scratch_file(home):
     # itself — a stray scratch file would live there forever
     routefile.write_route("abc123", req())
     routefile.write_frame_state("abc123", {"tab": "mixed"})
-    assert sorted(p.name for p in (home / "tmp").iterdir()) == [
-        "abc123-frame.json", "abc123-route.json"]
+    names = sorted(p.name for p in (home / "tmp").iterdir())
+    assert names[0] == "abc123-frame.json"
+    assert len(names) == 2 and names[1].startswith("abc123-route.")
+    assert names[1].endswith(".json")

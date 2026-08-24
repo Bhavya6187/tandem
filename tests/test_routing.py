@@ -53,11 +53,13 @@ assert len(_LONG_PROMPT) > 60
 
 
 def _coord(env, active, tabs=None, inject=None, adapter=None,
-           routing_ok=True):
+           routing_ok=True, submission_probe=None):
     """A coordinator bound to a launch, the way `_run` binds one."""
+    if submission_probe is None:
+        submission_probe = lambda prompt: (lambda: True)
     return RouteCoordinator(env.session, tabs, active,
                             env.session.native_id(active), adapter,
-                            routing_ok, inject, [])
+                            routing_ok, inject, [], submission_probe)
 
 
 def _claimed(tandem_id, req):
@@ -128,11 +130,9 @@ def test_pickup_leaves_the_request_when_a_press_owns_the_slot(env_factory):
     assert routefile.read_pending(env.session.tandem_id) is not None
 
 
-def test_pickup_gives_the_tab_move_back_when_the_slot_changed(env_factory):
-    """Between validating the request and claiming it, a second prompt can
-    overwrite the pending slot. The tab move is already taken by then, and
-    keeping it would leave a pending flip toward a request nobody holds —
-    the next Ctrl-] would read as a cancel."""
+def test_pickup_claims_the_exact_request_when_another_arrives(env_factory):
+    """A second prompt arriving during claim gets its own pending file; it
+    cannot retarget or invalidate the request the coordinator inspected."""
     env = env_factory(active="claude")
     routefile.write_route(env.session.tandem_id, RouteRequest(
         "codex", "", "do it", "claude", "→ codex"))
@@ -149,12 +149,11 @@ def test_pickup_gives_the_tab_move_back_when_the_slot_changed(env_factory):
     tabs.routed = routed_then_overwrite
     monitor = _StubMonitor()
     c.pickup(monitor)
-    assert c.route_request is None and monitor.pressed == 0
-    assert tabs.pending is None
-    # the newcomer is untouched, and the next tick can take it
+    assert c.route_request is not None and c.route_request.prompt == "do it"
+    assert monitor.pressed == 1 and tabs.pending_target() == "codex"
     assert routefile.read_pending(env.session.tandem_id).prompt \
         == "and then this one"
-    assert routefile.read_claimed(env.session.tandem_id) is None
+    assert routefile.read_claimed(env.session.tandem_id) == c.route_request
 
 
 def test_pickup_holds_off_while_a_flip_is_already_in_flight(env_factory):
@@ -395,6 +394,61 @@ def test_deliver_keeps_the_request_when_enter_is_not_acknowledged(
     assert routefile.read_claimed(env.session.tandem_id) is not None
 
 
+def test_deliver_keeps_request_when_terminal_output_has_no_transcript_ack(
+        env_factory, monkeypatch):
+    """A spinner/redraw can echo both writes without the submitted prompt
+    reaching durable history; terminal activity alone must not release it."""
+    env = env_factory(active="codex")
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
+    _claimed(env.session.tandem_id, req)
+    control, child = _quiet_control(), _InjectChild()
+    control.attach(child)
+    monkeypatch.setattr(routing, "SUBMIT_WAIT_S", 0.01)
+    c = _coord(env, "codex", inject=req,
+               submission_probe=lambda prompt: (lambda: False))
+    c.deliver(control, threading.Event(), _StubMonitor())
+    assert child.written.endswith(b"\r")
+    assert c.inject_failed is True
+    assert routefile.read_claimed(env.session.tandem_id, req.id) == req
+
+
+def test_submit_checkpoint_is_taken_after_enter_is_written(env_factory):
+    env = env_factory(active="codex")
+    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
+    _claimed(env.session.tandem_id, req)
+    control, child = _quiet_control(), _InjectChild()
+    control.attach(child)
+
+    def checkpoint(prompt):
+        assert prompt == "do it"
+        assert child.written.endswith(b"\r")
+        return lambda: True
+
+    c = _coord(env, "codex", inject=req, submission_probe=checkpoint)
+    c.deliver(control, threading.Event(), _StubMonitor())
+    assert c.inject_failed is False
+
+
+def test_submission_probe_requires_the_exact_new_user_prompt(env_factory,
+                                                             tmp_path):
+    from tandem.harness.codex import CodexAdapter
+
+    env = env_factory(active="codex")
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"type":"session_meta","payload":{}}\n')
+    probe = routing.make_submission_probe(
+        CodexAdapter(), env.session, transcript, "wanted prompt")
+    assert probe() is False
+    with transcript.open("a") as f:
+        f.write('{"type":"event_msg","payload":{"type":"user_message",'
+                '"message":"unrelated"}}\n')
+    assert probe() is False
+    with transcript.open("a") as f:
+        f.write('{"type":"event_msg","payload":{"type":"user_message",'
+                '"message":"wanted prompt"}}\n')
+    assert probe() is True
+
+
 def test_deliver_into_the_wrong_target_keeps_the_request(env_factory):
     env = env_factory(active="claude")
     req = RouteRequest("codex", "", "do it", "claude", "→ codex")
@@ -556,7 +610,7 @@ def test_deliver_never_releases_someone_elses_request(env_factory,
 # -- cancel, sweep, notes -----------------------------------------------------
 
 
-def test_cancel_releases_the_request_and_quotes_it(env_factory):
+def test_cancel_preserves_the_request_and_quotes_it(env_factory):
     env = env_factory(active="claude")
     req = RouteRequest("codex", "", _LONG_PROMPT, "claude", "→ codex")
     routefile.write_route(env.session.tandem_id, req)
@@ -565,10 +619,9 @@ def test_cancel_releases_the_request_and_quotes_it(env_factory):
     c.pickup(_StubMonitor())
     c.cancelled()
     assert c.route_request is None and tabs.pending is None
-    assert routefile.read_claimed(env.session.tandem_id) is None
-    # the file is gone, so the note IS the prompt: all of it
-    assert c.notes == ["routed turn cancelled — the prompt was "
-                       f"discarded: {_LONG_PROMPT!r}"]
+    assert routefile.read_claimed(env.session.tandem_id, req.id) == req
+    assert c.notes == ["routed turn cancelled — the prompt was kept: "
+                       f"{_LONG_PROMPT!r}"]
 
 
 def test_cancel_without_a_route_only_drops_the_tab_move(env_factory):
@@ -603,7 +656,7 @@ def test_sweep_notes_both_slots_and_clears_them(env_factory):
         "opencode", "", _LONG_PROMPT, "claude", "→ opencode"))
     c = _coord(env, "claude")
     c.sweep_leftovers()
-    assert routefile.sweep(env.session.tandem_id) == (None, None)
+    assert routefile.sweep(env.session.tandem_id) == ([], [])
     assert c.notes == [
         f"a routed prompt was never picked up and was kept: {_LONG_PROMPT!r}"
         " (target opencode)",
@@ -636,6 +689,22 @@ def test_sweep_keeps_the_request_this_run_is_delivering(env_factory):
     c.sweep_leftovers()
     assert routefile.read_claimed(env.session.tandem_id) == req
     assert c.notes == []
+
+
+def test_sweep_preserves_only_the_request_this_run_is_delivering(env_factory):
+    env = env_factory(active="codex")
+    inject = RouteRequest("codex", "", "deliver me", "claude", "→ codex")
+    leftover = RouteRequest("claude", "", "surface me", "codex", "→ claude")
+    _claimed(env.session.tandem_id, inject)
+    routefile.write_route(env.session.tandem_id, leftover)
+    c = _coord(env, "codex", inject=inject)
+    c.sweep_leftovers()
+    assert routefile.read_claimed(env.session.tandem_id, inject.id) == inject
+    assert routefile.read_pending(env.session.tandem_id, leftover.id) is None
+    assert c.notes == [
+        "a routed prompt was never picked up and was kept: 'surface me'"
+        " (target claude)"
+    ]
 
 
 def test_exit_notes_quote_an_undelivered_prompt(env_factory):
