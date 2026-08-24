@@ -6,7 +6,6 @@ monitor, no real harness. The tests that drive the same code on the real
 threads (mixer, injector, monitor cancel) stay in test_runner.py.
 """
 
-import json
 import threading
 import time
 
@@ -379,21 +378,6 @@ def test_deliver_repastes_when_the_tui_swallowed_the_first(env_factory,
     assert routefile.read_claimed(env.session.tandem_id) is None
 
 
-def test_deliver_keeps_the_request_when_enter_is_not_acknowledged(
-        env_factory, monkeypatch):
-    env = env_factory(active="codex")
-    req = RouteRequest("codex", "", "do it", "claude", "→ codex")
-    _claimed(env.session.tandem_id, req)
-    control, child = _ScriptedEchoControl([True, False]), _InjectChild()
-    control.attach(child)
-    monkeypatch.setattr(routing, "ECHO_WAIT_S", 0.01)
-    c = _coord(env, "codex", inject=req)
-    c.deliver(control, threading.Event(), _StubMonitor())
-    assert child.written.endswith(b"\r")
-    assert c.inject_failed is True                     # told, not assumed
-    assert routefile.read_claimed(env.session.tandem_id) is not None
-
-
 def test_deliver_keeps_request_when_terminal_output_has_no_transcript_ack(
         env_factory, monkeypatch):
     """A spinner/redraw can echo both writes without the submitted prompt
@@ -663,22 +647,6 @@ def test_sweep_notes_both_slots_and_clears_them(env_factory):
         "a routed prompt was never delivered and was kept: "
         "'the one that never landed' (target codex)",
     ]
-
-
-def test_sweep_quotes_a_leftover_with_no_target_left(env_factory):
-    """A file the sweep could only read loosely — a request from before the
-    ids, or a truncated one — may have no target to name. The prompt is the
-    part the user needs back; the note drops the rest rather than printing
-    an empty `(target )`."""
-    env = env_factory(active="claude")
-    path = routefile._pending_path(env.session.tandem_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"prompt": _LONG_PROMPT}))
-    c = _coord(env, "claude")
-    c.sweep_leftovers()
-    assert c.notes == ["a routed prompt was never picked up and was kept: "
-                       f"{_LONG_PROMPT!r}"]
-    assert not path.exists()
 
 
 def test_sweep_keeps_the_request_this_run_is_delivering(env_factory):

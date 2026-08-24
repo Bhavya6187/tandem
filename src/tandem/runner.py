@@ -772,8 +772,10 @@ class InteractiveRunner:
 
         def on_flip() -> None:
             # pump thread: TabState.press is allocation-light and I/O-free
-            # by contract; bar moves repaint via mode() on the next tick and
-            # the mixer thread persists the frame file
+            # by contract. A bar move publishes the frame file right here —
+            # one small atomic write per keypress, never per byte — because
+            # the hook must not read a tab the user has already left; the
+            # bar repaints via mode() on the next tick.
             move = tabs.press(active)
             if move.kind == "bar":
                 route.publish_frame()

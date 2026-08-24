@@ -52,13 +52,6 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
                 # would leave the hidden harness with nothing to reap it.
                 _kill(adopt)
                 adopt = None
-            if tabs is not None:
-                # Every flip is a fresh process in the same terminal, so the
-                # tab the user is in only survives through the store. Written
-                # before the harness takes over the terminal: from here on
-                # this process is not coming back until the run ends.
-                with StateStore() as s:
-                    _persist_tabs(s, session.tandem_id, tabs)
             r = InteractiveRunner(session, sink_factory=sink_factory,
                                   adopt_child=adopt, tabs=tabs,
                                   inject=carry.pop("route", None))
@@ -77,23 +70,6 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
                 # here would mask whatever actually went wrong.
                 c = r.coordinator
                 carry["route"] = c.route_request if c is not None else None
-                if tabs is not None:
-                    # Again, because the run may have moved the tab without
-                    # ever flipping: entering the mixed tab from the harness
-                    # that already holds its focus is a *bar* move, so
-                    # `_switch` never runs and the pre-run write above is
-                    # stale by exactly that move. Persisting here is what
-                    # makes `tandem resume` land back in the tab the user
-                    # was actually looking at. Best-effort on purpose: this
-                    # sits in a finally, and a locked store raising here
-                    # would turn a clean exit into a failed launch and send
-                    # the ladder off to boot a harness nobody asked for. One
-                    # lost bar move is the cheaper failure.
-                    try:
-                        with StateStore() as s:
-                            _persist_tabs(s, session.tandem_id, tabs)
-                    except Exception:
-                        pass
             reports[:] = r.reports
             return code, r.flip_requested
 
@@ -112,22 +88,9 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
             # holds its own) must never be the reason a session is lost. The
             # loop's own store opens keep their existing error paths.
             tabs = None
-            # Degraded or not, this process runs no mixer, and the hook reads
-            # the frame file to decide whether to hold a prompt. A file left
-            # saying `mixed` would have it stash a routed prompt with nothing
-            # to pick it up: the block tells the user their turn is running
-            # in another harness, and nothing ever runs it. The next mixed
-            # start does surface it — the sweep quotes every leftover — but that
-            # is a note about a prompt that already went nowhere, one
-            # session too late. Stamping the tab off stops the stash from
-            # happening at all. The stamp is right whichever way the unreadable
-            # config would have gone: mixed off is exactly what `_tab_state`
-            # writes, and mixed on still has no mixer this run. Best-effort by
-            # construction (`routefile._write_json` swallows its own errors),
-            # so it cannot raise back into this guard.
-            routefile.write_frame_state(
-                tandem_id, {"tab": "harness", "focus": "",
-                            "routing_ok": False})
+            # degraded or not, this process runs no mixer: stamp the tab off
+            # so the hook does not stash a prompt nothing will ever pick up
+            _stamp_off(tandem_id)
         code = _flip_loop(
             tandem_id, run_harness, _enter(tandem_id, run_harness), reports,
             carry, tabs=tabs,
@@ -135,22 +98,8 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
     finally:
         # Hint first: state bookkeeping must not be able to swallow it.
         click.echo(f"to continue this session: tandem resume {tandem_id}")
-        # The session is over, so no mixer owns that file any more — and a
-        # file left saying `mixed` is a trap the user can walk into without
-        # tandem at all. The hook's identity gate only asks that the prompt
-        # came from the focus harness's native session id, which is exactly
-        # what `claude -r <same id>` outside tandem hands it: it would read a
-        # live-looking frame, block the prompt and stash it for a frame that
-        # no longer exists. Stamping the tab off closes it. Same shape as the
-        # two startup stamps (`_tab_state`'s mixed-off branch and the
-        # degraded-read guard above), and best-effort by the same
-        # construction — `routefile._write_json` swallows its own errors, so
-        # this cannot raise into a finally that still has a standby to reap.
-        # Accepted residual: a SIGKILL'd frame never runs this, so the trap
-        # survives a hard kill. Nothing in-process can cover that; the next
-        # `tandem` / `tandem resume` in the directory re-stamps the file.
-        routefile.write_frame_state(
-            tandem_id, {"tab": "harness", "focus": "", "routing_ok": False})
+        # the session is over, so no mixer owns the frame file any more
+        _stamp_off(tandem_id)
         # Nested so the reap survives a raising store — a locked sqlite (a
         # concurrent `tandem sub` holds its own) must not be the reason a
         # hidden harness outlives the session with nothing left to reap it.
@@ -176,25 +125,19 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
 def _tab_state(tandem_id: str) -> TabState | None:
     """This session's tab cycle, or None when the mixed tab is off.
 
-    Built once per process and restored from session meta, because a flip is
-    a fresh run of this function in the same terminal: without the meta blob
-    every flip would drop the user back into the harness tab.
-
-    The `mixed = false` branch is not a plain "return None". The prompt hook
-    reads the *frame file*, not the config, and a file left by an earlier run
-    that had the tab on still says `tab: "mixed"` — so the hook would keep
-    stashing prompts for a mixer that no longer runs. Stamping it back to the
-    harness tab once at startup is what keeps that from swallowing turns.
-    (With the tab on, the runner's mixer owns that file and this must not
-    write it: two writers, one file.)"""
+    Built once per process and carried across every flip in it; a new
+    process (`tandem resume`) starts in the harness tab. The `mixed = false`
+    branch stamps the frame file off rather than just returning None: the
+    prompt hook reads the file, not the config, and a `tab: "mixed"` left by
+    an earlier run would keep it stashing prompts for a mixer that no longer
+    runs (see `_stamp_off`). With the tab on, the runner's mixer owns that
+    file and this must not write it: two writers, one file."""
     with StateStore() as store:
         session = store.get_session(tandem_id)
-        meta = store.get_meta(tandem_id) if session is not None else {}
     if session is None:
         return None
     if not load_frame_config().mixed:
-        routefile.write_frame_state(
-            tandem_id, {"tab": "harness", "focus": "", "routing_ok": False})
+        _stamp_off(tandem_id)
         return None
     # Which participants a prompt can be @-routed *from*: the CLI needs a
     # prompt hook and tandem's plugin has to be registered there. Read once
@@ -204,15 +147,21 @@ def _tab_state(tandem_id: str) -> TabState | None:
     routable = {h for h in session.participants
                 if get_adapter(h).prompt_hook_capable
                 and plugin_setup.hook_available(h)}
-    return TabState(session.participants, tab=meta.get("tab", "harness"),
-                    focus=meta.get("mixed_focus", ""), routable=routable)
+    return TabState(session.participants, routable=routable)
 
 
-def _persist_tabs(store: StateStore, tandem_id: str, tabs: TabState) -> None:
-    """The tab cycle's durable half. `set_meta` replaces the whole blob, so
-    both keys always travel together — writing one alone would drop the
-    other."""
-    store.set_meta(tandem_id, {"tab": tabs.tab, "mixed_focus": tabs.focus})
+def _stamp_off(tandem_id: str) -> None:
+    """Tell the hook the mixed tab is off: written wherever this process
+    runs no mixer over the frame file (startup with the tab disabled or its
+    state unreadable, and every exit). Left saying `mixed`, the file would
+    have the hook block and stash a prompt nothing will ever pick up — and
+    it would do the same to a `claude -r <same id>` run outside tandem,
+    whose session id passes the hook's identity gate. Best-effort by
+    construction (`routefile._write_json` swallows its own errors), so it is
+    safe inside a finally. A SIGKILL'd frame skips the exit stamp; the next
+    `tandem` / `tandem resume` in the directory re-stamps."""
+    routefile.write_frame_state(
+        tandem_id, {"tab": "harness", "focus": "", "routing_ok": False})
 
 
 def _kill(standby) -> None:
@@ -383,7 +332,7 @@ def _switch(
     — a tab press that skips ahead, or a routed turn's target. `route` is
     that turn's request: it decides the model the standby gate demands, and
     rides the carry into the next run as its inject. `tabs` is the tab cycle,
-    settled here (and persisted) once the flip has actually landed.
+    settled here once the flip has actually landed.
 
     The ladder is deliberately blind to all three. A target that refuses to
     launch falls back through the cycle exactly as a Ctrl-] target does, and
@@ -417,11 +366,9 @@ def _switch(
             )
             return code, False
         if tabs is not None:
-            # The flip landed, so the pending move is spent: the tab and
-            # focus it settles into are what the next run must start in, and
-            # the store is the only thing that carries them there.
+            # the flip landed, so the pending move is spent: the tab and
+            # focus it settles into are what the next run starts in
             tabs.settle(new_active)
-            _persist_tabs(store, tandem_id, tabs)
     _report_switch(old, new_active, problems, mem)
     if carry is not None:
         standby = carry.get("standby")

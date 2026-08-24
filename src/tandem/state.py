@@ -26,8 +26,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     native_session_ids TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     last_sync_at TEXT,
-    last_used_at TEXT,
-    meta TEXT NOT NULL DEFAULT '{}'
+    last_used_at TEXT
 );
 CREATE TABLE IF NOT EXISTS sync_cursors (
     tandem_id TEXT NOT NULL,
@@ -100,7 +99,6 @@ class StateStore:
             self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
-        self._ensure_meta_column()
 
     def _schema_stale(self) -> bool:
         """A sessions table without the participants column is a pre-N-harness
@@ -110,18 +108,6 @@ class StateStore:
         except sqlite3.Error:
             return False
         return bool(names) and "participants" not in names
-
-    def _ensure_meta_column(self) -> None:
-        """Additive migration: CREATE TABLE IF NOT EXISTS never retrofits a
-        column onto an existing table, and (unlike a missing participants
-        column) a missing meta column carries no data worth abandoning the
-        DB over — ALTER in place and keep every session."""
-        names = {r[1] for r in self._conn.execute("PRAGMA table_info(sessions)")}
-        if "meta" not in names:
-            with self._conn:
-                self._conn.execute(
-                    "ALTER TABLE sessions ADD COLUMN meta TEXT"
-                    " NOT NULL DEFAULT '{}'")
 
     def close(self) -> None:
         self._conn.close()
@@ -237,25 +223,6 @@ class StateStore:
             self._conn.execute(
                 "UPDATE sessions SET last_sync_at = ? WHERE tandem_id = ?",
                 (_now(), tandem_id),
-            )
-
-    def get_meta(self, tandem_id: str) -> dict:
-        row = self._conn.execute(
-            "SELECT meta FROM sessions WHERE tandem_id = ?", (tandem_id,)
-        ).fetchone()
-        if row is None:
-            return {}
-        try:
-            obj = json.loads(row["meta"])
-        except ValueError:
-            return {}
-        return obj if isinstance(obj, dict) else {}
-
-    def set_meta(self, tandem_id: str, meta: dict) -> None:
-        with self._conn:
-            self._conn.execute(
-                "UPDATE sessions SET meta = ? WHERE tandem_id = ?",
-                (json.dumps(meta), tandem_id),
             )
 
     # -- sync cursors --------------------------------------------------------

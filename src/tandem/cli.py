@@ -736,12 +736,11 @@ def hook_prompt_cmd() -> None:
             target=decision.harness, model=decision.model, prompt=body,
             source=focus, reason=decision.reason)
         routefile.write_route(session.tandem_id, req)
-        # the id proves THIS stash landed — a leftover or a concurrent
-        # second prompt cannot vouch for it. Both slots are asked, not just
-        # the first that answers: a fast frame may have claimed this
-        # request before this verification, and claimed-by-frame IS landed
-        # (demanding "still pending" would run
-        # the prompt here AND there).
+        # the id proves THIS stash landed — a leftover or a concurrent second
+        # prompt cannot vouch for it. Both the pending and the claimed path
+        # are asked: a fast frame may already have claimed this request, and
+        # claimed-by-frame IS landed (demanding "still pending" would run the
+        # prompt here AND there).
         if not any(got is not None and got.id == req.id
                    for got in (routefile.read_pending(session.tandem_id, req.id),
                                routefile.read_claimed(session.tandem_id, req.id))):

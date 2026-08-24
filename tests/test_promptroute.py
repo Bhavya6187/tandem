@@ -18,11 +18,13 @@ def test_prefix_is_first_token_only():
     assert parse_prefix("please ask @codex to fix it", PARTS) is None
 
 
-def test_unknown_at_token_is_passthrough(monkeypatch):
-    # claude file mentions must survive the mixed tab
-    monkeypatch.setattr(promptroute.modelcat, "load_catalog",
-                        lambda: [{"slug": "gpt-5.3-codex", "visibility": "show"}])
-    assert parse_prefix("@src/foo.py explain this", PARTS) is None
+def test_unknown_at_token_is_passthrough():
+    # only a participant's name routes: file mentions, model names and
+    # anything else spelled with an @ are literal prompt text
+    for prompt in ("@src/foo.py explain this", "@CLAUDE.md summarize this",
+                   "@haiku what does this do", "@sol fix the thing",
+                   "@gpt-5.3-codex go"):
+        assert parse_prefix(prompt, PARTS) is None, prompt
 
 
 def test_bare_prefix_with_no_body_is_passthrough():
@@ -39,6 +41,9 @@ def test_harness_colon_model():
     assert d.harness == "opencode"
     assert d.model == "anthropic/claude-sonnet-5"
     assert body == "go"
+    d, body = parse_prefix("@claude:haiku summarize", PARTS)
+    assert d == RouteDecision(harness="claude", model="haiku",
+                              reason="→ claude · haiku")
 
 
 def test_codex_colon_model_resolves_via_catalog(monkeypatch):
@@ -64,41 +69,6 @@ def test_codex_colon_model_verbatim_without_catalog(monkeypatch):
 def test_newline_after_token_still_routes():
     d, body = parse_prefix("@codex\nfix the flaky test", PARTS)
     assert d.harness == "codex" and body == "fix the flaky test"
-
-
-def test_bare_claude_alias_routes_to_claude():
-    d, body = parse_prefix("@haiku summarize the diff", PARTS)
-    assert d == RouteDecision(harness="claude", model="haiku",
-                              reason="→ claude · haiku")
-    assert body == "summarize the diff"
-
-
-def test_claude_file_mentions_pass_through(monkeypatch):
-    # the killer case: every one of these normalizes to a "claude" prefix,
-    # and routing one would run `claude --model CLAUDE.md` on a typed prompt
-    monkeypatch.setattr(promptroute.modelcat, "load_catalog",
-                        lambda: [{"slug": "gpt-5.3-codex", "visibility": "show"}])
-    for prompt in ("@CLAUDE.md summarize this",
-                   "@.claude/settings.json what does this do",
-                   "@claude/agents/foo.md explain"):
-        assert parse_prefix(prompt, PARTS) is None, prompt
-
-
-def test_full_claude_slug_still_routes():
-    d, body = parse_prefix("@claude-sonnet-5 rewrite it", PARTS)
-    assert d == RouteDecision(harness="claude", model="claude-sonnet-5",
-                              reason="→ claude · claude-sonnet-5")
-    assert body == "rewrite it"
-
-
-def test_bare_codex_model_needs_catalog(monkeypatch):
-    monkeypatch.setattr(promptroute.modelcat, "load_catalog", lambda: None)
-    assert parse_prefix("@gpt-5.3-codex go", PARTS) is None
-    monkeypatch.setattr(promptroute.modelcat, "load_catalog",
-                        lambda: [{"slug": "gpt-5.3-codex", "visibility": "show"}])
-    d, _ = parse_prefix("@gpt-5.3-codex go", PARTS)
-    assert d == RouteDecision(harness="codex", model="gpt-5.3-codex",
-                              reason="→ codex · gpt-5.3-codex")
 
 
 def test_route_prompt_stay_is_none():
@@ -169,7 +139,7 @@ class TestCli:
         from tandem import routefile
         env = env_factory(active="claude")
         self._mixed(env, focus="codex")
-        r = self._typed(env, "@haiku summarize the diff", focus="codex")
+        r = self._typed(env, "@claude:haiku summarize the diff", focus="codex")
         assert r.exit_code == 0
         assert "haiku" in json.loads(r.output)["reason"]
         req = routefile.read_pending(env.session.tandem_id)

@@ -72,8 +72,8 @@ mixed is a view + routing mode, not a fourth session.
   plugin has since been removed; with nothing routable at all the focus is
   adopted as-is and the bar's `(no @-routing)` hint stands. Thereafter the
   mixed tab keeps its own focus across visits (leaving and re-entering does
-  not reset it). Focus is saved in session state, and `tandem resume`
-  restores it.
+  not reset it) for as long as the frame process runs; `tandem resume`
+  starts a new process in the harness tab.
 
 ## Route grammar
 
@@ -82,9 +82,14 @@ prompt:
 
 - `@claude` / `@codex` / `@opencode` — pick a harness, keep its current
   model.
-- `@<model>` (e.g. `@gpt-5.3-codex`, `@haiku`) — resolve through modelcat to
-  (harness, exact model).
-- `@harness:model` — explicit combination, for disambiguation.
+- `@harness:model` — the same, started on that model (`@claude:haiku`,
+  `@codex:gpt-5.3-codex`, `@opencode:anthropic/claude-sonnet-5`).
+
+A bare model name (`@haiku`, `@sol`) is not a route. The first cut had one,
+and it came out: resolving it needs a hand-kept claude alias list plus a
+catalog lookup on every prompt, and any file or directory whose name is a
+substring of a model name (`@sol`, `@luna`, `@CLAUDE.md`) was routed instead
+of mentioned. The explicit form reaches every model the bare one could.
 
 Any unrecognized `@token` is literal prompt text and passes through
 untouched — `@src/foo.py …` still works as a claude file mention inside the
@@ -198,5 +203,5 @@ dispatch pipeline is identical for both implementations.
 - **Golden fixtures:** hook block decisions per harness.
 - **Live gate (tmux recipe, established pattern):** claude→`@codex`→
   `@opencode` relay inside the mixed tab; a model-pinned route; unknown-`@`
-  passthrough; flip-failure retry; blocked-prompt residue check;
-  `tandem resume` restoring mixed-tab focus.
+  passthrough; flip-failure retry; blocked-prompt residue check; the
+  mixed tab keeping its focus across an in-process flip.

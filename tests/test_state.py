@@ -232,36 +232,3 @@ def test_list_sessions_is_immune_to_null_last_used(tmp_path):
         store._conn.commit()
         ids = [s.tandem_id for s in store.list_sessions()]
         assert ids == [newer.tandem_id, older.tandem_id]
-
-
-def test_meta_round_trip(tmp_path):
-    with StateStore(tmp_path / "s.db") as store:
-        s = store.create_session("/w", "claude", ["claude", "codex"],
-                                 {"claude": "c1", "codex": None})
-        assert store.get_meta(s.tandem_id) == {}
-        store.set_meta(s.tandem_id, {"tab": "mixed", "mixed_focus": "codex"})
-        assert store.get_meta(s.tandem_id) == {
-            "tab": "mixed", "mixed_focus": "codex"}
-
-
-def test_meta_column_added_to_existing_db(tmp_path):
-    """A pre-mixed-tab DB (no meta column) is migrated in place, keeping
-    its rows — unlike the participants check, which moves the DB aside."""
-    import sqlite3
-    db = tmp_path / "s.db"
-    conn = sqlite3.connect(db)
-    conn.executescript(
-        "CREATE TABLE sessions (tandem_id TEXT PRIMARY KEY, cwd TEXT NOT NULL,"
-        " active TEXT NOT NULL, participants TEXT NOT NULL,"
-        " native_session_ids TEXT NOT NULL DEFAULT '{}',"
-        " created_at TEXT NOT NULL, last_sync_at TEXT, last_used_at TEXT);"
-        "INSERT INTO sessions (tandem_id, cwd, active, participants,"
-        " created_at) VALUES ('t1', '/w', 'claude',"
-        " '[\"claude\", \"codex\"]', '2026-01-01');")
-    conn.commit()
-    conn.close()
-    with StateStore(db) as store:
-        assert store.get_session("t1") is not None
-        assert store.get_meta("t1") == {}
-        store.set_meta("t1", {"tab": "mixed"})
-        assert store.get_meta("t1") == {"tab": "mixed"}

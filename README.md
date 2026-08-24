@@ -76,23 +76,24 @@ thing. A prompt that starts with an `@target` runs that turn somewhere else:
 
 ```text
 @codex rewrite this migration to be idempotent
-@haiku what does this regex do?
+@claude:haiku what does this regex do?
 @codex:gpt-5.6-luna review the diff for races
 ```
 
-Three forms are recognized, and only as the prompt's first token:
+Two forms are recognized, and only as the prompt's first token:
 
 | Form | Example | What it does |
 | --- | --- | --- |
 | `@<cli>` | `@claude`, `@codex`, `@opencode` | Runs the turn there, on the model that CLI is already set to |
-| `@<model>` | `@opus`, `@haiku`, `@gpt-5.6-luna` | Picks the CLI that owns the model and starts it on that model |
-| `@<cli>:<model>` | `@codex:gpt-5.6-luna`, `@opencode:anthropic/claude-sonnet-5` | The explicit form, for names the short ones can't reach |
+| `@<cli>:<model>` | `@claude:haiku`, `@codex:gpt-5.6-luna`, `@opencode:anthropic/claude-sonnet-5` | Runs the turn there, started on that model |
 
-Claude models are named by family alias (`opus`, `sonnet`, `haiku`, `fable`)
-or by full slug (`claude-sonnet-5`). Codex model names resolve against the
-catalog Codex keeps in `~/.codex/models_cache.json`, so `@gpt-5.6-luna` and
-its display name both work. opencode wants provider-qualified names, which
-only the explicit form can carry.
+Claude takes its family aliases (`opus`, `sonnet`, `haiku`, `fable`) or a
+full slug (`claude-sonnet-5`). Codex names resolve against the catalog Codex
+keeps in `~/.codex/models_cache.json`, so `@codex:luna` and the display name
+both work. opencode wants provider-qualified names. A bare model name
+(`@haiku`) is not a route on purpose: it would collide with file and
+directory mentions (`@sol`, `@luna`), and the explicit form reaches every
+model the short one could.
 
 Staying put is free: a prompt with no prefix — or one naming the CLI you are
 already in — runs right there, natively. An `@token` that names nothing
@@ -164,7 +165,7 @@ Don't want the fourth stop? Set `mixed = false` under `[frame]` in
 - **Bring different models to the same problem.** Ask another CLI for a
   second opinion without copying a wall of context between terminals.
 - **Send a single turn to the CLI that suits it.** In the mixed tab,
-  `@codex …` or `@haiku …` runs that one turn there and syncs the reply
+  `@codex …` or `@claude:haiku …` runs that one turn there and syncs the reply
   back — same session, same files, same history.
 - **Keep the native tools you already use.** Claude Code, Codex, and
   opencode retain their own interfaces, commands, keybindings, and MCP

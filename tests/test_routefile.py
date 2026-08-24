@@ -52,20 +52,11 @@ def test_read_missing_is_none():
 
 
 def test_read_corrupt_is_none(home):
-    p = home / "tmp" / "abc123-route.json"
+    p = routefile._pending_path("abc123", "deadbeef1234")
     p.parent.mkdir(parents=True)
     p.write_text("{not json")
     assert routefile.read_pending("abc123") is None
-
-
-def test_read_without_an_id_is_none(home):
-    # the id is the whole protocol; a request that cannot be identified
-    # cannot be claimed or released, so it is not a request
-    p = home / "tmp" / "abc123-route.json"
-    p.parent.mkdir(parents=True)
-    p.write_text('{"target": "codex", "model": "", "prompt": "hi",'
-                 ' "source": "claude", "reason": "x"}')
-    assert routefile.read_pending("abc123") is None
+    assert routefile.read_pending("abc123", "deadbeef1234") is None
 
 
 def test_claim_moves_the_request_to_the_claimed_slot():
@@ -206,47 +197,9 @@ def test_sweep_of_nothing_is_quiet():
 
 def test_sweep_deletes_an_unparseable_file(home):
     # nothing to quote in a note, and leaving it would strand it forever
-    p = home / "tmp" / "abc123-route.json"
+    p = routefile._pending_path("abc123", "deadbeef1234")
     p.parent.mkdir(parents=True)
     p.write_text("{not json")
-    assert routefile.sweep("abc123") == ([], [])
-    assert not p.exists()
-
-
-def test_sweep_still_quotes_a_request_from_before_the_ids(home):
-    """A route file written by a pre-v2 tandem — `state`, no `id` — is one
-    the readers above refuse. The sweep is the last thing that will ever
-    see it, so refusing it there would delete a typed prompt in silence,
-    which is the whole failure this protocol exists to prevent."""
-    p = home / "tmp" / "abc123-route.json"
-    p.parent.mkdir(parents=True)
-    p.write_text('{"target": "codex", "model": "", "prompt": "fix the test",'
-                 ' "source": "claude", "reason": "\u2192 codex",'
-                 ' "state": "dispatched"}')
-    assert routefile.read_pending("abc123") is None    # not routable
-    left, _ = routefile.sweep("abc123")
-    assert len(left) == 1 and left[0].prompt == "fix the test"
-    assert left[0].target == "codex"                   # enough for the note
-    assert not p.exists()
-
-
-def test_sweep_quotes_a_request_missing_everything_but_its_prompt(home):
-    # the id it comes back with is synthetic and goes nowhere: the file is
-    # already deleted, so nothing will ever claim or release this request
-    p = home / "tmp" / "abc123-route.claimed.json"
-    p.parent.mkdir(parents=True)
-    p.write_text('{"prompt": "the only thing left"}')
-    pending, claimed = routefile.sweep("abc123")
-    assert pending == []
-    assert len(claimed) == 1
-    assert claimed[0].prompt == "the only thing left" and claimed[0].target == ""
-    assert not p.exists()
-
-
-def test_sweep_says_nothing_about_a_file_with_no_prompt(home):
-    p = home / "tmp" / "abc123-route.json"
-    p.parent.mkdir(parents=True)
-    p.write_text('{"target": "codex", "state": "pending"}')
     assert routefile.sweep("abc123") == ([], [])
     assert not p.exists()
 

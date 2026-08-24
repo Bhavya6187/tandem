@@ -635,26 +635,15 @@ def test_switch_honors_target_override(sess3, monkeypatch):
         assert store.get_session(sess3.tandem_id).active == "opencode"
 
 
-def test_switch_settles_tabs_and_persists_meta(sess3, monkeypatch):
+def test_switch_settles_tabs(sess3, monkeypatch):
     """The flip landed, so the pending move is spent and the tab/focus it
-    settled into is what the next process must start in."""
+    settled into is what the next run starts in."""
     _flipping_switch(monkeypatch)
     tabs = TabState(sess3.participants, tab="mixed", focus="claude")
     assert tabs.routed("codex") is True
     flip._switch(sess3.tandem_id, fake_runner([]), 0, to="codex", tabs=tabs)
     assert tabs.tab == "mixed" and tabs.focus == "codex"
     assert tabs.pending_target() == ""       # the move was consumed
-    with StateStore() as store:
-        assert store.get_meta(sess3.tandem_id) == {"tab": "mixed",
-                                                   "mixed_focus": "codex"}
-
-
-def test_switch_without_tabs_writes_no_meta(sess, monkeypatch):
-    """The pre-mixed frame is untouched: no tab state, no meta blob."""
-    _flipping_switch(monkeypatch)
-    flip._switch(sess.tandem_id, fake_runner([]), 0)
-    with StateStore() as store:
-        assert store.get_meta(sess.tandem_id) == {}
 
 
 def _model_standby(model, size=10, side="codex", cwd=""):
@@ -772,9 +761,6 @@ def test_the_ladder_settles_the_tab_on_whoever_launched(sess3, monkeypatch):
                  tabs=tabs)
     assert settled == ["codex", "opencode"]   # once per successful switch
     assert tabs.tab == "mixed" and tabs.focus == "opencode"
-    with StateStore() as store:
-        assert store.get_meta(sess3.tandem_id) == {"tab": "mixed",
-                                                   "mixed_focus": "opencode"}
 
 
 def test_ladder_exhaustion_leaves_the_routed_prompt_on_disk(sess3, monkeypatch):
@@ -844,42 +830,15 @@ class _MixedRunner(FakeInteractiveRunner):
 
 
 def test_run_session_threads_the_tab_state_and_the_route(sess, monkeypatch):
-    """The whole loop through `run_session`'s own closure: restore the tab
-    from meta, hand it and the route to the runner, persist what it settled
-    into."""
-    with StateStore() as store:
-        store.set_meta(sess.tandem_id, {"tab": "mixed",
-                                        "mixed_focus": "claude"})
+    """The whole loop through `run_session`'s own closure: build the tab
+    cycle, hand it and the route to the runner, carry the route into the
+    next run."""
     req = RouteRequest("codex", "", "do it", "claude", "→ codex")
     _MixedRunner.route, _MixedRunner.seen_inject = req, []
     seen = _fake_runner_session(monkeypatch, sess, [([], True), ([], False)],
                                 runner=_MixedRunner)
     assert seen == ["claude", "codex"]
     assert _MixedRunner.seen_inject == [None, req]   # delivered to its target
-    with StateStore() as store:
-        assert store.get_meta(sess.tandem_id) == {"tab": "mixed",
-                                                  "mixed_focus": "codex"}
-
-
-def test_a_bar_move_survives_the_session_exit(sess, monkeypatch):
-    """Entering the mixed tab is a *bar* move: no flip, so `_switch` never
-    runs and nothing settles. Only the post-run persist can carry it to the
-    next `tandem resume` — without it the user comes back to the harness tab
-    they explicitly left."""
-
-    class Runner(FakeInteractiveRunner):
-        def run(self):
-            if self.session.active == "codex":
-                # what the pump does on the press: codex is last in the cycle
-                # and the focus is already here, so only the tab changes
-                assert self.tabs.press("codex").kind == "bar"
-            return super().run()
-
-    _fake_runner_session(monkeypatch, sess, [([], True), ([], False)],
-                         runner=Runner)
-    with StateStore() as store:
-        assert store.get_meta(sess.tandem_id) == {"tab": "mixed",
-                                                  "mixed_focus": "codex"}
 
 
 def test_tab_state_computes_which_participants_can_be_routed_from(

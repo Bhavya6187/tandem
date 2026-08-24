@@ -24,6 +24,7 @@ import time
 
 from . import routefile
 from .state import PairedSession
+from .tabs import MIXED, TabState
 
 
 def _debug(msg: str) -> None:
@@ -34,7 +35,6 @@ def _debug(msg: str) -> None:
         _flip_debug("inject " + msg)
     except Exception:
         pass
-from .tabs import MIXED, TabState
 
 
 # Seconds of child-output silence after the first draw that count as "the
@@ -119,12 +119,9 @@ class RouteCoordinator:
         for leftovers, what in ((pending, "never picked up"),
                                 (claimed, "never delivered")):
             for left in leftovers:
-                # a leftover the sweep could only read loosely may have no
-                # target left to name; the prompt is the part that matters
-                where = f" (target {left.target})" if left.target else ""
                 self.notes.append(
                     f"a routed prompt was {what} and was kept: "
-                    f"{left.prompt!r}{where}")
+                    f"{left.prompt!r} (target {left.target})")
 
     def tick(self, monitor) -> None:
         """One mixer tick: republish the frame file the hook reads if the
@@ -309,27 +306,18 @@ class RouteCoordinator:
             self.inject_failed = True
             return
         time.sleep(0.15)   # let the composer ingest the paste
-        # Enter needs both terminal acknowledgement and a durable native
-        # transcript change. A redraw can satisfy the former without the TUI
-        # accepting input, so only the latter permits release.
-        before_enter = control.last_output
         if not control.write(b"\r"):
             _debug("enter write failed; request kept")
             self.inject_failed = True
             return
-        # Checkpoint only after Enter has reached the pty. An identical native
-        # user entry created before submission can never acknowledge this one;
-        # a child that persists synchronously may cause a conservative kept
-        # copy, never a false release.
+        # The only acknowledgement that counts is the prompt itself showing
+        # up as a new user turn in the target's native session. Terminal
+        # output is not evidence: a redraw or a spinner looks the same
+        # whether or not the TUI took the Enter. The checkpoint is taken
+        # after the write, so an identical user entry from before it can
+        # never vouch for this one; a child that persists synchronously can
+        # at worst earn a kept-copy note, never a false release.
         submitted = self.submission_probe(req.prompt)
-        deadline = time.monotonic() + ECHO_WAIT_S
-        while (time.monotonic() < deadline
-               and control.last_output <= before_enter):
-            time.sleep(0.05)
-        if control.last_output <= before_enter or flipping():
-            _debug("enter NOT acknowledged; request kept")
-            self.inject_failed = True
-            return
         deadline = time.monotonic() + SUBMIT_WAIT_S
         while time.monotonic() < deadline and not stop.is_set() and not flipping():
             if submitted():
@@ -385,10 +373,9 @@ class RouteCoordinator:
     def exit_notes(self) -> None:
         """The report line a run owes the user when its injection failed.
 
-        The note carries the prompt itself rather than promising the file:
-        usually the claimed request is still on disk for the next start to
-        surface, but a second routed prompt claimed during this run would
-        have renamed over it. Quoting it here is true either way."""
+        The note carries the prompt itself rather than pointing at the file:
+        the claimed request is still on disk for the next start to surface,
+        but a line the user can read now beats one a session later."""
         req = self.inject
         if req is not None and self.inject_failed:
             self.notes.append(
