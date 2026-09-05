@@ -140,7 +140,10 @@ class TestDeriveLastModel:
         ])
         assert get_adapter("claude").derive_last_model(p) == "claude-fable-5"
 
-    def test_synced_and_sidechain_models_skipped(self, tmp_path):
+    def test_placeholder_and_sidechain_models_skipped(self, tmp_path):
+        # "<synced>" is the placeholder older tandem wrote; "<synthetic>" is
+        # claude's own tag for model-less assistant entries (its API-error
+        # stubs) and what tandem writes now — neither is a model claude ran
         p = self.write(tmp_path, [
             {"type": "assistant", "uuid": "a1",
              "message": {"role": "assistant", "model": "claude-fable-5",
@@ -150,6 +153,9 @@ class TestDeriveLastModel:
                          "content": []}},
             {"type": "assistant", "uuid": "a2",
              "message": {"role": "assistant", "model": "<synced>",
+                         "content": []}},
+            {"type": "assistant", "uuid": "a3",
+             "message": {"role": "assistant", "model": "<synthetic>",
                          "content": []}},
         ])
         assert get_adapter("claude").derive_last_model(p) == "claude-fable-5"

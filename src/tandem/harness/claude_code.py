@@ -127,6 +127,18 @@ _CLAUDE_ENTRY_TYPES = {
 }
 
 
+# claude's own tag for an assistant entry no model produced (its API-error
+# stubs carry it). `claude --resume` (2.1.261) restores the session model from
+# the last assistant entry and warns "Session model X could not be restored"
+# for anything it does not recognise; "<synthetic>" is the one value that scan
+# skips, so rendered entries carry it until claude itself has run and a real
+# model can be copied instead (live-verified 2026-09-05: no warning, synced
+# turns still render and reach the model).
+SYNTHETIC_MODEL = "<synthetic>"
+# what tandem <= 0.5.1 wrote in that slot; still skipped when deriving
+LEGACY_SYNCED_MODEL = "<synced>"
+
+
 class ClaudeCodeAdapter(HarnessAdapter):
     id = "claude"
     display_name = "Claude Code"
@@ -434,7 +446,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
             st["run_msg_id"] = f"msg_tandem_{entry['uuid'][:8]}"
         return {
             "role": "assistant",
-            "model": st.get("model") or "<synced>",
+            "model": st.get("model") or SYNTHETIC_MODEL,
             "id": st["run_msg_id"],
             "type": "message",
             "content": content,
@@ -487,14 +499,15 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
     def derive_last_model(self, transcript: Path) -> str | None:
         """Model of the last main-thread assistant entry with a real model
-        name. Skips the "<synced>" placeholder (pre-fix tandem appends) and
-        sidechain entries (subagents may run on a different model)."""
+        name. Skips tandem's own tags (SYNTHETIC_MODEL now, the older
+        "<synced>"), claude's synthetic stubs, and sidechain entries
+        (subagents may run on a different model)."""
         model = None
         for obj in self._tail_objects(transcript):
             if obj.get("type") != "assistant" or obj.get("isSidechain"):
                 continue
             m = (obj.get("message") or {}).get("model")
-            if m and m != "<synced>":
+            if m and m not in (SYNTHETIC_MODEL, LEGACY_SYNCED_MODEL):
                 model = m
         return model
 

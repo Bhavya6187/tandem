@@ -159,8 +159,12 @@ class TestSyncCodexToClaude:
         assert synced
         assert all(e["message"]["model"] == "claude-fable-5" for e in synced)
 
-    def test_synced_model_placeholder_when_claude_never_ran(self, env_factory):
-        # regression guard for the fresh-shadow case: no real model to copy
+    def test_synthetic_model_tag_when_claude_never_ran(self, env_factory):
+        """Fresh-shadow case: no real model to copy. Entries carry claude's
+        own "<synthetic>" tag, which its --resume model-restore scan skips
+        (live-verified on 2.1.261); the old "<synced>" placeholder drew
+        "Session model <synced> could not be restored" on every zero-turn
+        claude session flipped back into."""
         env = env_factory(active="codex")
         for obj in self.codex_lines():
             write_line(env.source_file, obj)
@@ -168,7 +172,8 @@ class TestSyncCodexToClaude:
         loop.drain()
         synced = [e for e in read_jsonl(env.claude_shadow)
                   if e.get("type") == "assistant"]
-        assert all(e["message"]["model"] == "<synced>" for e in synced)
+        assert synced
+        assert all(e["message"]["model"] == "<synthetic>" for e in synced)
 
     def test_leaf_rederived_from_file(self, env_factory):
         """If claude itself appended entries (it was active earlier), new

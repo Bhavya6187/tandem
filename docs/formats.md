@@ -60,6 +60,16 @@ validation rather than being silently declared compatible.
     tandem drops it like any other non-text assistant block.
 - Resume: `claude --resume <sessionId>` (from the same cwd). A new session
   can be pinned to a chosen id with `claude --session-id <uuid>`.
+  - 2.1.261 restores the session model on resume from the last assistant
+    entry whose `message.model` is a string other than `"<synthetic>"`
+    (claude's own tag on model-less stubs such as API-error messages) and
+    warns `Session model X could not be restored (not a model this version
+    of Claude Code recognizes) — using <default> instead` when that value is
+    not a model it knows. Tandem-rendered assistant entries therefore copy
+    the model claude last used in that transcript, and carry `"<synthetic>"`
+    until claude has run at all (a zero-turn claude flipped back into). The
+    `"<synced>"` placeholder tandem ≤0.5.1 wrote there drew the warning;
+    entries carrying it are still skipped when tandem derives the model.
 - Turn boundary: a `user` entry with string content starts a turn; an
   `assistant` line with `stop_reason: "end_turn"` ends it. The `Stop` hook
   (injectable per-invocation via `--settings '<json>'`) fires at turn end.
