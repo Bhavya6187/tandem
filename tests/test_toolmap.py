@@ -464,6 +464,19 @@ class TestClaudeToolRendering:
         ], ctx)
         assert all(e["message"]["model"] == "claude-fable-5" for e in entries)
 
+    def test_render_uses_claudes_synthetic_tag_when_no_model_is_known(self):
+        # claude --resume (2.1.261) restores the session model from the last
+        # assistant entry and warns "Session model X could not be restored"
+        # for anything it does not recognise; "<synthetic>" is claude's own
+        # tag for model-less assistant entries and the one value its scan
+        # skips, so it is what a shadow with no claude turn yet must carry
+        ctx = _ctx("codex->claude")
+        entries = get_adapter("claude").render_events([
+            AssistantMessage(source="codex", text="hi"),
+            call("Bash", {"command": "ls"}, source="codex", call_id="c9"),
+        ], ctx)
+        assert all(e["message"]["model"] == "<synthetic>" for e in entries)
+
     def test_is_error_flag_rides(self):
         ctx = _ctx("codex->claude")
         entries = get_adapter("claude").render_events([
