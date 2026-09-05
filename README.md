@@ -68,6 +68,14 @@ network calls — set `rate_limits = false` under `[frame]` in
 [Configuration](https://github.com/Bhavya6187/tandem/blob/main/docs/configuration.md)
 for the status bar's other settings.
 
+**0.5.1 keeps up with the current CLIs.** claude 2.1.26x and codex 0.153
+changed their session records, and codex now holds a writer lock on every
+open thread. On those versions 0.5.0 failed `tandem doctor` and every flip
+into claude on the new metadata records, warned that codex was out of range
+at each start, and could lose a claude → codex flip to `already has an
+active writer`. All three are fixed, and codex's list-shaped tool outputs
+now reach the other side as text with their exit codes intact.
+
 ## Why tandem?
 
 - **Keep going when a model hits its limit.** The tab bar shows each
