@@ -2,6 +2,7 @@
 
 import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -380,68 +381,67 @@ def test_gate_rejects_dead_wrong_side_grown_or_memory(monkeypatch):
                  actions=["wrote AGENTS.md"]) is False
 
 
-class BlockingStandby(FakeStandby):
-    """A standby whose kill ladder hangs, standing in for the real one: quit
-    keystrokes plus TERM/KILL timeouts put 0.5-5s between `kill()` and a dead
-    process."""
+class SlowStandby(FakeStandby):
+    """A standby whose kill takes real time, standing in for the real one:
+    quit keystrokes plus the soft/term waits put 0.5-5s between `kill()`
+    and a dead process."""
 
-    def __init__(self, release, **kw):
+    def __init__(self, delay=0.2, **kw):
         super().__init__(**kw)
-        self.release = release
-        self.kill_entered = threading.Event()
+        self.delay = delay
 
     def kill(self):
-        self.kill_entered.set()
-        self.release.wait(10)
+        time.sleep(self.delay)
         super().kill()
 
 
-def test_stale_standby_is_killed_at_the_gate(sess, monkeypatch, capsys):
-    from tandem import flip
-    import tandem.warm as warm
-    _flipping_switch(monkeypatch)
-    monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 999)
-    stale = FakeStandby(side="codex", size=10)   # snapshot != 999 -> stale
-    runs = []
-
-    def run_harness(session):
-        runs.append(session.active)
-        return 0, False
-
-    carry = {"standby": stale}
-    flip._switch(sess.tandem_id, run_harness, 0, carry=carry)
-    for t in carry["reapers"]:   # the reap is off-thread; the exit joins it
-        t.join(timeout=10)
-    assert stale.killed
-    assert carry["standby"] is None
-    assert runs   # the flip still landed, on a cold spawn
-
-
-def test_the_gates_kill_does_not_delay_the_flip(sess, monkeypatch, capsys):
-    """The teardown of a stale standby costs seconds of quit-key ladder, and
-    it lands on exactly the flips warmup exists to make instant. So the gate
-    hands the kill to a reaper thread and re-enters immediately; the session's
-    exit is what joins it."""
+def test_a_stale_standby_for_the_launched_side_is_dead_before_the_relaunch(
+    sess, monkeypatch, capsys
+):
+    """The stale standby resumed the very session the cold spawn is about to
+    resume, and codex (0.153+) holds a per-thread writer lock for as long as
+    the process lives: a relaunch that overlaps the kill ladder fails with
+    `thread ... already has an active writer` and ends the session. So the
+    gate reaps a same-side standby inline, however many ladder seconds that
+    costs, and only then re-enters."""
     import tandem.warm as warm
     monkeypatch.setattr(warm, "_shadow_size", lambda session, side: 999)
-    release = threading.Event()
-    stale = BlockingStandby(release, side="codex", size=10)
+    stale = SlowStandby(side="codex", size=10)   # snapshot != 999 -> stale
     adopted = []
+    dead_at_launch = []
 
     class Runner(_adopting_runner(adopted, stale)):
         def run(self):
             if self.session.active == "codex":
-                # the post-flip run: the harness is already launching while
-                # the stale standby is still going down the ladder
-                assert stale.kill_entered.wait(10)
-                assert not stale.killed
-                release.set()
+                dead_at_launch.append(stale.killed)
             return super().run()
 
     _fake_runner_session(monkeypatch, sess, [([], True), ([], False)],
                          runner=Runner)
-    assert adopted == [None, None]   # stale: never handed to the next run
-    assert stale.killed              # run_session's exit joined the reaper
+    assert adopted == [None, None]    # stale: never handed to the next run
+    assert dead_at_launch == [True]   # and gone before the relaunch began
+
+
+def test_a_stale_standby_for_another_side_still_goes_down_off_thread(
+    sess, monkeypatch, capsys
+):
+    """Warmed for a side the flip is not landing on, it holds nothing the
+    relaunch needs, so the ladder must not delay the flip: the kill stays on
+    a reaper thread that the session's exit joins."""
+    _flipping_switch(monkeypatch)
+    stale = SlowStandby(side="claude", size=10)   # the flip lands on codex
+    alive_at_launch = []
+
+    def run_harness(session):
+        alive_at_launch.append(stale.alive())
+        return 0, False
+
+    carry = {"standby": stale}
+    flip._switch(sess.tandem_id, run_harness, 0, carry=carry)
+    assert alive_at_launch == [True]   # the flip did not wait
+    for t in carry["reapers"]:
+        t.join(timeout=10)
+    assert stale.killed
 
 
 def test_plain_exit_kills_the_leftover_standby(sess, monkeypatch, capsys):
