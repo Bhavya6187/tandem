@@ -31,8 +31,8 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
     # The standby travels across flips here: popped for adoption by the
     # next run, refilled from the runner that just ended. Injected test
     # runners never touch it. `reapers` collects the threads tearing down
-    # standbys the gate rejected — the flip does not wait for them, this
-    # function's finally does.
+    # standbys the gate rejected for the wrong side — the flip does not
+    # wait for those, this function's finally does.
     carry: dict = {"standby": None, "reapers": []}
     if run_harness is None:
 
@@ -104,9 +104,10 @@ def _reap(standby, carry: dict) -> None:
     session's exit can join it.
 
     The kill ladder is slow by construction — quit keystrokes, then the
-    unconditional soft/term waits — so killing a stale standby inline would
-    put seconds between the user's Ctrl-] and the next harness starting,
-    on precisely the flips warmup exists to speed up. The child is
+    unconditional soft/term waits — so killing a stale standby inline puts
+    seconds between the user's Ctrl-] and the next harness starting, on
+    precisely the flips warmup exists to speed up. Only affordable when the
+    standby and the relaunch share no session (see `_switch`); the child is
     already out of the carry, so nothing can adopt it while it dies."""
     thread = threading.Thread(
         target=_kill, args=(standby,), name="tandem-warm-reap", daemon=True
@@ -226,8 +227,11 @@ def _switch(
     and the state it snapshotted are finally comparable against what the
     next run will actually launch. A stale one is killed here and nowhere
     else — the runner silently ignores an adoptee it cannot use, so a wrong
-    side that survived this gate would leak — but killed on a reaper thread,
-    since the ladder's own timeouts would otherwise be charged to the flip."""
+    side that survived this gate would leak. One warmed for the side about
+    to launch dies inline, before the relaunch: it holds that side's session
+    open, and codex refuses a second writer on a thread. One warmed for any
+    other side dies on a reaper thread, since the ladder's own timeouts
+    would otherwise be charged to the flip for nothing."""
     with StateStore() as store:
         session = store.get_session(tandem_id)
         if session is None:
@@ -264,7 +268,18 @@ def _switch(
             _flip_debug(f"standby-gate side={new_active} fresh={fresh}")
             if not fresh:
                 carry["standby"] = None
-                _reap(standby, carry)   # off-thread: the flip must not wait
+                if standby.recipe.side == new_active:
+                    # It resumed the very session the cold spawn is about
+                    # to resume, and codex (0.153+) holds a per-thread
+                    # writer lock for as long as the process lives: a
+                    # relaunch that overlaps its ladder fails with
+                    # `thread ... already has an active writer` and ends
+                    # the session. Killed inline — the ladder's seconds
+                    # are the price of a flip that lands at all.
+                    _kill(standby)
+                    _flip_debug(f"standby-reaped side={new_active} inline")
+                else:
+                    _reap(standby, carry)   # off-thread: nothing in common
     code, flip, launched = _try_enter(tandem_id, run_harness)
     if launched:
         return code, flip
