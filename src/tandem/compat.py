@@ -2,7 +2,7 @@
 
 Both session formats are internal to their CLIs and drift between releases.
 Tandem pins the ranges it was built against; outside a range we warn and
-require `tandem doctor` before enabling sync (see cli.py).
+recommend `tandem doctor` before trusting sync (see cli.py).
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ class CompatRange:
 
 # Format observations in docs/formats.md correspond to these versions.
 COMPAT: dict[str, CompatRange] = {
-    "claude": CompatRange(tested="2.1.220", min_version=(2, 0), max_exclusive=(3,)),
-    "codex": CompatRange(tested="0.145.0", min_version=(0, 140), max_exclusive=(0, 150)),
+    "claude": CompatRange(tested="2.1.261", min_version=(2, 0), max_exclusive=(3,)),
+    "codex": CompatRange(tested="0.153.4", min_version=(0, 140), max_exclusive=(0, 160)),
     # Floor-only by operator decision (spec: Compat gate). Pre-1.18 opencode
     # predates SQLite session storage and genuinely cannot work.
     "opencode": CompatRange(tested="1.18.15", min_version=(1, 18)),

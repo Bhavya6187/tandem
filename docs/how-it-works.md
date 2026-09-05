@@ -133,8 +133,8 @@ tandem pins what it was built against (observed formats documented in
 
 | CLI | Tested | Accepted range |
 | --- | --- | --- |
-| Claude Code | 2.1.220 | ≥ 2.0, < 3 |
-| Codex CLI | 0.145.0 | ≥ 0.140, < 0.150 |
+| Claude Code | 2.1.261 | ≥ 2.0, < 3 |
+| Codex CLI | 0.153.4 | ≥ 0.140, < 0.160 |
 | opencode | 1.18.15 | ≥ 1.18 (no ceiling) |
 
 Above a range's ceiling, tandem warns and asks you to run `tandem doctor`

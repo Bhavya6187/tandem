@@ -1,6 +1,7 @@
 """Claude Code adapter.
 
-Session format observed on claude 2.1.220 (docs/formats.md):
+Session format observed on claude 2.1.220, rechecked on 2.1.261
+(docs/formats.md):
 - transcript: ~/.claude/projects/<munged-cwd>/<sessionId>.jsonl
 - entries chained by uuid/parentUuid; types: user, assistant, attachment,
   queue-operation, last-prompt, summary, system
@@ -116,9 +117,13 @@ _CLAUDE_ENTRY_TYPES = {
     "user", "assistant", "attachment", "system", "summary",
     "queue-operation", "last-prompt", "progress", "file-history-snapshot",
     "mode",  # {"type":"mode","mode":"normal",...} observed on --resume runs
-    # uuid-less metadata entries claude 2.1.220 interleaves with conversation
+    # uuid-less session metadata claude interleaves with the conversation;
+    # none of it is portable content. 2.1.220 batch, then the 2.1.26x batch
+    # (session latch, remote-bridge identity, accumulated cost/timing, a
+    # user-set title).
     "permission-mode", "ai-title", "file-history-delta", "pr-link",
     "relocated", "worktree-state",
+    "atis-latch", "bridge-session", "cost-state", "custom-title",
 }
 
 
@@ -153,6 +158,10 @@ class ClaudeCodeAdapter(HarnessAdapter):
             etype = e.get("type")
             if etype not in _CLAUDE_ENTRY_TYPES:
                 problems.append(f"line {i}: unknown entry type {etype!r}")
+                if e.get("uuid"):
+                    # still a chain participant: one unknown type must not
+                    # cascade into a dangling-parent problem per later entry
+                    seen_uuids.add(e["uuid"])
                 continue
             if etype in ("user", "assistant"):
                 convo += 1

@@ -1,6 +1,7 @@
 """Codex CLI adapter.
 
-Session format observed on codex-cli 0.145.0 (docs/formats.md):
+Session format observed on codex-cli 0.145.0, rechecked on 0.153.4
+(docs/formats.md):
 - rollout: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuidv7>.jsonl
 - each line {timestamp, type, payload}; model-facing history is the
   response_item lines, UI history is the event_msg lines
@@ -76,7 +77,23 @@ class _CodexUsageMeter(UsageMeter):
 _CODEX_LINE_TYPES = {
     "session_meta", "response_item", "event_msg", "turn_context",
     "world_state", "compacted",
+    "token_usage_record",  # 0.153.4 per-response accounting (not model history)
 }
+
+
+def output_text(output: Any) -> str:
+    """Flatten a `*_output` payload to the text the model saw. Codex writes
+    either a plain string or (0.153: about half the time) a list of
+    `{"type": "input_text", "text": ...}` blocks — consecutive chunks of one
+    output, so they concatenate without a separator."""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list):
+        return "".join(
+            b["text"] for b in output
+            if isinstance(b, dict) and isinstance(b.get("text"), str)
+        )
+    return "" if output is None else str(output)
 
 
 class CodexAdapter(HarnessAdapter):
@@ -298,13 +315,11 @@ class CodexAdapter(HarnessAdapter):
                 call_id = payload.get("call_id")
                 pending = ctx.pending_calls.get(call_id or "", {})
                 structured = pending.pop("_structured", None) if pending else None
-                output = payload.get("output", "")
-                if not isinstance(output, str):
-                    output = str(output)
                 return [
                     ToolResult(
                         source="codex", timestamp=ts, turn_index=ctx.turn_index,
-                        call_id=call_id, output=output, structured=structured,
+                        call_id=call_id, output=output_text(payload.get("output")),
+                        structured=structured,
                     )
                 ]
             return [sysev(f"response_item:{ptype}")]

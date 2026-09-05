@@ -128,7 +128,7 @@ def test_resolution_admits_above_ceiling_with_warning(tmp_path, monkeypatch, cap
     resolution keeps it — otherwise the next codex release would hard-brick
     tandem until a compat bump ships."""
     monkeypatch.setenv("TANDEM_HOME", str(tmp_path))
-    _fake_versions(monkeypatch, {"claude": "2.1.220", "codex": "0.150.0",
+    _fake_versions(monkeypatch, {"claude": "2.1.220", "codex": "0.160.0",
                                  "opencode": None})
     usable, _ = _resolve_participants()
     assert usable == ["claude", "codex"]
