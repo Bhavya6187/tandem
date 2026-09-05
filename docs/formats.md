@@ -6,14 +6,21 @@ database) the CLIs wrote. Versions observed:
 
 | CLI | version | session storage |
 | --- | --- | --- |
-| Claude Code (`claude`) | 2.1.220 | `~/.claude/projects/<munged-cwd>/<sessionId>.jsonl` |
-| Codex CLI (`codex`) | 0.145.0 | `~/.codex/sessions/YYYY/MM/DD/rollout-<YYYY-MM-DDThh-mm-ss>-<uuidv7>.jsonl` |
+| Claude Code (`claude`) | 2.1.261 | `~/.claude/projects/<munged-cwd>/<sessionId>.jsonl` |
+| Codex CLI (`codex`) | 0.153.4 | `~/.codex/sessions/YYYY/MM/DD/rollout-<YYYY-MM-DDThh-mm-ss>-<uuidv7>.jsonl` |
 | opencode (`opencode`) | 1.18.15 | one SQLite database, the path `opencode db path` prints (see below) |
 
 Env overrides honored: `CLAUDE_CONFIG_DIR` (claude home), `CODEX_HOME` (codex
 home), `OPENCODE_DB` (opencode database), `TANDEM_HOME` (tandem state).
 
-## Claude Code transcript (claude 2.1.220)
+Rechecked 2026-09-05 on claude 2.1.261 / codex 0.153.4 (a live paired
+session plus a four-turn claude→codex→claude→codex→claude probe): the
+conversation-bearing shapes below are unchanged; the additions are marked
+"2.1.26x" / "0.153". Codex's accepted range runs through 0.159; 0.160+
+warns until rechecked. Unknown top-level record types still fail
+validation rather than being silently declared compatible.
+
+## Claude Code transcript (claude 2.1.220, rechecked 2.1.261)
 
 - One JSONL file per session, named `<sessionId>.jsonl` (sessionId is a
   UUIDv4). Project directory name = cwd with every character outside
@@ -42,13 +49,22 @@ home), `OPENCODE_DB` (opencode database), `TANDEM_HOME` (tandem state).
     metadata (permission mode, AI-generated title, linked PR, worktree
     moves, file-backup tracking). Not conversation content; claude resumes
     transcripts containing them without complaint.
+  - 2.1.26x adds four more uuid-less metadata records: `atis-latch`
+    (`atis`, `sessionId`), `bridge-session` (`bridgeSessionId`,
+    `lastSequenceNum`, owner account/org — routine per-session identity,
+    `lastSequenceNum` constant 0), `cost-state` (accumulated cost, timing,
+    line counts, `modelUsage`) and `custom-title` (`customTitle`, set when
+    the user renames a session). Same handling as the batch above.
+  - 2.1.26x can put a `fallback` block (`{from: {model}, to: {model}}`) in
+    an assistant message when the model is switched mid-session. No prose;
+    tandem drops it like any other non-text assistant block.
 - Resume: `claude --resume <sessionId>` (from the same cwd). A new session
   can be pinned to a chosen id with `claude --session-id <uuid>`.
 - Turn boundary: a `user` entry with string content starts a turn; an
   `assistant` line with `stop_reason: "end_turn"` ends it. The `Stop` hook
   (injectable per-invocation via `--settings '<json>'`) fires at turn end.
 
-## Codex rollout (codex-cli 0.145.0)
+## Codex rollout (codex-cli 0.145.0, rechecked 0.153.4)
 
 - One JSONL file per session under a date-sharded dir; the session id
   (UUIDv7) is embedded in the filename. `~/.codex/session_index.jsonl` maps
@@ -70,9 +86,15 @@ home), `OPENCODE_DB` (opencode database), `TANDEM_HOME` (tandem state).
     - `function_call` — `{name, arguments: <json string>, call_id}` (e.g.
       `exec_command`).
     - `function_call_output` — `{call_id, output}` (chunked shell output with
-      exit code header).
+      exit code header). `output` is a string, or (0.153, roughly half of
+      all outputs) a list of `{type: "input_text", text}` blocks that are
+      consecutive chunks of one output — flatten by concatenation. Same
+      for `custom_tool_call_output`.
     - `custom_tool_call` / `custom_tool_call_output` — `apply_patch` with
-      `input` = patch text (`*** Begin Patch ...`).
+      `input` = patch text (`*** Begin Patch ...`). 0.153 code mode uses the
+      same pair with `name: "exec"` and JavaScript in `input` (plus `id`,
+      `status`, `internal_chat_message_metadata_passthrough`, all inert);
+      nested tool calls live inside that outer call/output.
   - `event_msg` — the **UI-facing** stream. `payload.type`: `task_started`
     (`turn_id`), `user_message`, `agent_message` (`phase`), `token_count`,
     `patch_apply_end` (`{stdout, success, changes: {path: {type, content}}}`),
@@ -89,6 +111,11 @@ home), `OPENCODE_DB` (opencode database), `TANDEM_HOME` (tandem state).
       grepping for these literals gets back, not a rejection.
   - `turn_context` — per turn: cwd, approval_policy, sandbox_policy, model.
   - `world_state` — environment snapshot.
+  - `token_usage_record` (0.153) — per-response accounting: thread/turn/
+    response ids plus `usage`, `turn_token_usage`, `thread_token_usage`.
+    Not model history. `event_msg/token_count` still appears and remains
+    the usage meter's source — never sum the two. `event_msg/
+    thread_settings_applied` is likewise bookkeeping.
 - Resume: `codex resume <session-id>` (interactive) and
   `codex exec resume <session-id> "<prompt>"` (one-shot). Turn-complete
   notification hook: `-c 'notify=["/bin/sh","-c","..."]'` per invocation.

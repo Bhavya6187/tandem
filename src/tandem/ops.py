@@ -24,6 +24,7 @@ from pathlib import Path
 
 from . import paths
 from .harness import get_adapter
+from .harness.codex import output_text
 from .runner import TailLoop, await_codex_rollout
 from .state import PairedSession, StateStore
 from .sync import SyncEngine, SyncSetupError
@@ -492,18 +493,6 @@ _PATCH_TARGET_RE = re.compile(
     r"""\*\*\* (?:Add|Update|Delete) File: (.+?)(?=\\n|[\n"']|$)""")
 
 
-def _output_text(output) -> str:
-    """Flatten a custom_tool_call_output payload: codex writes either a plain
-    string or a list of {"type": "input_text", "text": …} blocks."""
-    if isinstance(output, str):
-        return output
-    if isinstance(output, list):
-        return "\n".join(
-            b["text"] for b in output
-            if isinstance(b, dict) and isinstance(b.get("text"), str))
-    return ""
-
-
 def blocked_write_paths(sub_path: Path, *, since: int = 0) -> list[str]:
     """Paths whose apply_patch the sandbox rejected during this run, in event
     order. Anything unreadable or unexpected yields [] — detection is
@@ -565,7 +554,7 @@ def blocked_write_paths(sub_path: Path, *, since: int = 0) -> list[str]:
                 continue
             # ... and one grep for both literals passes that gate on its own,
             # so the marker must also sit where codex puts it: line-anchored.
-            if not _PATCH_REJECTED_RE.search(_output_text(p.get("output"))):
+            if not _PATCH_REJECTED_RE.search(output_text(p.get("output"))):
                 continue
             add(_PATCH_TARGET_RE.findall(src))
     return rejected
