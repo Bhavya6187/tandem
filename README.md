@@ -76,6 +76,14 @@ at each start, and could lose a claude → codex flip to `already has an
 active writer`. All three are fixed, and codex's list-shaped tool outputs
 now reach the other side as text with their exit codes intact.
 
+**0.5.2 stops claude complaining about synced turns.** claude 2.1.261
+restores a session's model on resume from its last assistant entry, and a
+claude session that had never run a turn of its own (claude → codex →
+opencode → claude) opened with `Session model <synced> could not be
+restored … using fable instead`. Synced entries now carry claude's own
+`<synthetic>` tag until claude has run, which its resume skips; the synced
+turns still render and still reach the model.
+
 ## Why tandem?
 
 - **Keep going when a model hits its limit.** The tab bar shows each

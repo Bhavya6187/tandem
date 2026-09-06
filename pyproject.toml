@@ -1,6 +1,6 @@
 [project]
 name = "tandem-cli"
-version = "0.5.1"
+version = "0.5.2"
 description = "Run Claude Code, Codex CLI, and opencode in one shared coding session with live trace sync."
 readme = "README.md"
 license = "MIT"
