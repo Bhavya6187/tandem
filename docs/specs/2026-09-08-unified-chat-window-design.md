@@ -3,13 +3,14 @@
 Status: spec approved in brainstorm 2026-09-07/08, awaiting operator review.
 Supersedes the flip-and-inject dispatch of the parked mixed-tab routing spec
 (`docs/specs/2026-08-21-mixed-tab-routing-design.md`); reuses its prefix
-grammar.
+grammar with the sigil changed from `@` to `/` (decided 2026-09-10: `@` is
+the file-mention sigil in all three TUIs and still means that headless).
 
 ## Goal
 
 One window, one composer, three harnesses. The user types a prompt; it runs
 on the harness that ran the last one, unless the prompt starts with
-`@claude`, `@codex`, or `@opencode`, in which case it runs there and that
+`/claude`, `/codex`, or `/opencode`, in which case it runs there and that
 harness becomes the new default. Every turn executes inside the harness's
 own engine (its tools, permissions, hooks, MCP servers, instructions files,
 session store) and is rendered by tandem in a shared conversation view.
@@ -74,33 +75,52 @@ Routed turns must not pay a native-TUI boot or a pty handover.
 
 Four units. Each has one job, one interface, and can be tested alone.
 
-### 1. Composer and prefix grammar (`chat/composer.py`, `promptroute.py`)
+### 1. Composer, prefix grammar, and slash pass-through (`chat/composer.py`, `promptroute.py`)
 
 Single-line editor at the bottom row: cursor movement, backspace, history
 (up/down), Enter submits, Ctrl-L repaints, Ctrl-C ladder (see Errors).
 Bracketed paste is accepted; newlines inside a paste stay in the prompt and
 the row shows the first line plus `(+N lines)`.
 
-Grammar (lifted from the parked branch, `promptroute.py` + its tests):
+Grammar (lifted from the parked branch, `promptroute.py` + its tests,
+sigil swapped to `/`):
 
 ```text
-prompt   := prefix? text
-prefix   := "@" harness (":" model)? (whitespace | end)
+prompt   := route? text
+route    := "/" harness (":" model)? (whitespace | end)
 harness  := "claude" | "codex" | "opencode"
 model    := [A-Za-z0-9._/-]+
 ```
 
-- The prefix is recognized only at the start of the prompt. `@claude`
-  inside prose or `@CLAUDE.md` anywhere is literal text.
-- `@codex fix the tests` → runs on codex, codex becomes the default.
-- `@codex` alone → codex becomes the default, no turn.
-- `@codex:gpt-5.5 …` → runs on codex with that model and pins it for codex
-  until changed. `@codex:default` clears the pin. `@codex:sol` resolves
+- The route is recognized only at the start of the prompt and only for
+  the three harness names, followed by whitespace, end of input, or
+  `:model`. `/codex/README.md …` is not a route (a slash follows the
+  name); `/claude` inside prose is literal text.
+- `/codex fix the tests` → runs on codex, codex becomes the default.
+- `/codex` alone → codex becomes the default, no turn.
+- `/codex:gpt-5.5 …` → runs on codex with that model and pins it for codex
+  until changed. `/codex:default` clears the pin. `/codex:sol` resolves
   through the codex catalog (`modelcat.py`) as on the parked branch;
   claude models pass through (`haiku`, `sonnet`, full ids); opencode takes
   `provider/model`.
 - The default harness is `session.active`. Model pins are per (session,
   harness) in a new `chat_pins` table (see State).
+
+Slash pass-through: any other `/word` at the start of a prompt is not
+tandem's. It is sent to the current harness unchanged, so the harness's
+own slash commands and skills keep working (claude `-p` runs skills and
+the built-ins it supports from prompt text; codex and opencode behavior is
+confirmed at implementation and documented). Tandem's own window commands
+(`/quit`, `/status`) are the only other reserved names and are listed in
+the docs. No known harness command uses the three harness names; the
+tandem plugin's commands are namespaced under `tandem:`.
+
+File mentions: `@path` is never interpreted by tandem. The prompt reaches
+the harness verbatim. Headless claude expands `@file` mentions itself
+(verified 2026-09-10: `claude -p "@mention.txt …"` answered from the file
+in one turn with no tool call). Codex and opencode receive the mention as
+text and read the file with a tool, which is an accepted v1 degradation
+for opencode, whose TUI would have sent a file part.
 
 ### 2. Runtime clients (`chat/runtime/{claude,codex,opencode}.py`)
 
@@ -317,8 +337,10 @@ claude_setting_sources = ["user", "project", "local"]
   question, interrupt, crash mid-turn, malformed line; codex adds the
   writer-lock error and `thread/start` id capture; opencode adds
   `permission.asked` and the server-restart path.
-- **Grammar** table tests, including `@CLAUDE.md` and mid-prose mentions
-  as non-routes, `@codex:default` clearing a pin, bare prefixes.
+- **Grammar** table tests: the three routes with and without `:model`,
+  bare routes, `/codex:default` clearing a pin, `/codex/README.md` and
+  mid-prose `/codex` as non-routes, other `/word` prompts passing through
+  unchanged, and `@path` mentions left verbatim.
 - **Dispatcher** with the existing `conftest.Env`: drain / fast-forward /
   set_active order, queueing, echo suppression, the same-thread guard,
   failure-still-drains; modeled on the `run_oneoff` tests.
@@ -341,6 +363,6 @@ claude_setting_sources = ["user", "project", "local"]
 - Rename foreign tool names during translation: a model reading synced
   `bash` / `exec` calls tried to call `bash` on claude (spike). Belongs to
   `toolmap.py`.
-- The automatic router, behind the "no prefix" branch of the grammar.
+- The automatic router, behind the "no route" branch of the grammar.
 - A native-TUI flip from inside the chat window.
 - Collapsible tool output (requires a virtual scrollback).
