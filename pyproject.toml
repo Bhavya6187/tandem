@@ -36,7 +36,7 @@ Issues = "https://github.com/Bhavya6187/tandem/issues"
 tandem = "tandem.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "datamodel-code-generator>=0.26"]
 
 [build-system]
 requires = ["hatchling>=1.26"]
