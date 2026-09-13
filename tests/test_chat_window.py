@@ -83,6 +83,27 @@ def test_esc_during_approval_denies_and_interrupts(env_factory):
     assert got["c"] == "deny" and d.interrupts == 1
 
 
+def test_ctrl_c_during_approval_denies_and_interrupts(env_factory):
+    """A worker waiting on an approval is parked in the answers queue, not in
+    a turn: interrupting it has to answer first — deny, exactly as Esc does —
+    or the worker never wakes and every later prompt queues behind it."""
+    env = env_factory(); w, d, out, answers = make_window(env)
+    got = []
+    # daemon: a regression parks this worker forever, and that must fail the
+    # assertion below rather than wedge the interpreter at exit
+    t = threading.Thread(target=lambda: got.append(answers.approve(ApprovalRequest("command", "rm x"))), daemon=True)
+    t.start(); time.sleep(0.05)
+    w.handle_event(ApprovalRequest("command", "rm x")); d.busy = True
+    assert w.handle_input(b"\x03") is True                        # first press: interrupt, not quit
+    t.join(2)
+    assert got == ["deny"] and w.composer.mode == "prompt" and d.interrupts == 1
+
+    second = []                                                   # the window is usable again
+    t2 = blocks_until_answered(answers, ApprovalRequest("command", "rm y"), second)
+    w.handle_event(ApprovalRequest("command", "rm y")); w.handle_input(b"n"); t2.join(2)
+    assert second == ["deny"]
+
+
 def test_esc_then_a_key_in_one_chunk_resolves_exactly_once(env_factory):
     """One read can carry two answer keys: the composer only leaves answer
     mode when the window says so, so `\\x1by` yields Cancel + Answer. The

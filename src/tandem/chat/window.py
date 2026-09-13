@@ -163,6 +163,18 @@ class Window:
 
     # -- input (main thread) ---------------------------------------------------
 
+    def _deny_pending(self) -> bool:
+        """Answer an approval or question the user is walking away from, and
+        say whether there was one. A runtime waiting on an answer is parked in
+        the answers queue, not inside an interruptible turn: interrupting one
+        without answering it leaves the worker asleep forever and every later
+        prompt queued behind it. Deny first, then interrupt."""
+        if self.composer.mode == "prompt":
+            return False
+        self.composer.end_answer()
+        self.answers.resolve("deny")
+        return True
+
     def handle_input(self, data: bytes) -> bool:
         for action in self.composer.feed(data):
             if isinstance(action, Submit):
@@ -182,23 +194,24 @@ class Window:
                     self.composer.end_answer()
                     self.answers.resolve(action.text)
             elif isinstance(action, Cancel):
-                if self.composer.mode != "prompt":
-                    self.composer.end_answer()
-                    self.answers.resolve("deny")
+                if self._deny_pending():
                     self.dispatcher.interrupt()
                     self.screen.note("denied · interrupting…")
             elif isinstance(action, Interrupt):
-                if self.dispatcher.busy:
+                denied = self._deny_pending()
+                if denied or self.dispatcher.busy:
                     self.dispatcher.interrupt()
-                    self.screen.note("interrupting…")
+                    self.screen.note(("denied · " if denied else "") + "interrupting…")
             elif isinstance(action, CtrlC):
                 now = time.monotonic()
                 if now - self._ctrlc_at < 2.0:
                     return False
                 self._ctrlc_at = now
-                if self.dispatcher.busy:
+                denied = self._deny_pending()
+                if denied or self.dispatcher.busy:
                     self.dispatcher.interrupt()
-                    self.screen.note("interrupting… (Ctrl-C again to quit)")
+                    self.screen.note(("denied · " if denied else "")
+                                     + "interrupting… (Ctrl-C again to quit)")
                 else:
                     self.screen.note("Ctrl-C again to quit")
             elif isinstance(action, Repaint):
