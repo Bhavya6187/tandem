@@ -1,4 +1,6 @@
 import json
+import os
+import signal
 import sys
 import threading
 import time
@@ -136,6 +138,27 @@ def test_crash_is_failed_with_stderr(env, monkeypatch):
     out = env.runtime.run_turn(env.session, "sid-1", "hi", "", rec.emit, rec)
     assert out.status == "failed"
     assert "boom" in out.error
+    assert rec.events[-1] == TurnFinished("failed", "")
+
+
+def test_child_death_during_approval_returns_an_outcome(env):
+    """`_approval` blocks for however long the human takes, and claude can die in
+    that window (rate-limited out, OOM-killed, killed by hand). The write of the
+    control_response then breaks, which must not escape as an exception: the
+    caller is owed a TurnOutcome and the window is owed a terminal event."""
+    rt = env.runtime
+
+    class KillsTheChild(Recorder):
+        def approve(self, req):
+            proc = rt._proc                     # deliberate: stands in for an external kill
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=5)                # dead read end, so the write is deterministic
+            return super().approve(req)
+
+    rec = KillsTheChild("allow")
+    out = rt.run_turn(env.session, "sid-1", "make x", "", rec.emit, rec)
+    assert out.status == "failed"
+    assert "claude exited" in out.error
     assert rec.events[-1] == TurnFinished("failed", "")
 
 

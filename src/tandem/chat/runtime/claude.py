@@ -176,16 +176,23 @@ class ClaudeRuntime:
         reader.start()
 
         def send(obj: dict) -> None:
+            # a child that died while we were blocked on an approval leaves a
+            # broken pipe (or a stdin closed under us by close()); either way the
+            # stdout loop is about to hit EOF and the turn ends through the
+            # `outcome is None` path below, which owes the window a TurnFinished
             with self._lock:
                 if proc.stdin and not proc.stdin.closed:
-                    proc.stdin.write(json.dumps(obj) + "\n")
-                    proc.stdin.flush()
+                    try:
+                        proc.stdin.write(json.dumps(obj) + "\n")
+                        proc.stdin.flush()
+                    except (OSError, ValueError):
+                        pass
 
-        send({"type": "user",
-              "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
-              "parent_tool_use_id": None, "session_id": native_id})
         outcome: TurnOutcome | None = None
         try:
+            send({"type": "user",
+                  "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
+                  "parent_tool_use_id": None, "session_id": native_id})
             for line in proc.stdout:
                 try:
                     m = json.loads(line)
