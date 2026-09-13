@@ -41,6 +41,13 @@ except ImportError:      # pragma: no cover
 
 _SHELL_RE = re.compile(r"""^\S*(?:zsh|bash|sh)\s+-l?c\s+(['"])(.*)\1\s*$""", re.S)
 
+_REQUEST_MODELS = {
+    "item/commandExecution/requestApproval": cp.CommandExecutionRequestApprovalParams,
+    "item/fileChange/requestApproval": cp.FileChangeRequestApprovalParams,
+    "item/permissions/requestApproval": cp.PermissionsRequestApprovalParams,
+    "item/tool/requestUserInput": cp.ToolRequestUserInputParams,
+}
+
 
 def strip_shell(command: str) -> str:
     """`/bin/zsh -lc 'echo hi'` -> `echo hi`: the TUI shows the inner command."""
@@ -121,22 +128,40 @@ class CodexRuntime:
 
     # -- protocol ------------------------------------------------------------
 
-    def _server_request(self, m: dict, send, answers: Answers) -> None:
+    def _server_request(self, m: dict, send, emit: Callable[[LiveEvent], None],
+                        answers: Answers) -> None:
         method, rid = m["method"], m["id"]
         params = m.get("params") or {}
+        model = _REQUEST_MODELS.get(method)
+        if model is None:
+            send({"jsonrpc": "2.0", "id": rid, "result": {}})
+            return
+        try:
+            p = model.model_validate(params)
+        except ValidationError as exc:
+            # unlike a notification, a request can never be dropped: the
+            # app-server blocks on it until it is answered. codex reads an
+            # error as a decline, and an empty answer set is the only honest
+            # reply to a question we could not read. The human is not asked
+            # to rule on a request we cannot show them.
+            emit(Failure(f"codex sent a request tandem cannot parse: "
+                         f"{method}: {first_line(str(exc))}"))
+            if method == "item/tool/requestUserInput":
+                send({"jsonrpc": "2.0", "id": rid, "result": {"answers": {}}})
+            else:
+                send({"jsonrpc": "2.0", "id": rid,
+                      "error": {"code": -32001, "message": "tandem cannot parse this request"}})
+            return
         if method == "item/commandExecution/requestApproval":
-            p = cp.CommandExecutionRequestApprovalParams.model_validate(params)
             choice = answers.approve(ApprovalRequest("command", first_line(strip_shell(p.command or ""))))
             send({"jsonrpc": "2.0", "id": rid,
                   "result": {"decision": _decision(choice, params.get("availableDecisions"))}})
         elif method == "item/fileChange/requestApproval":
-            p = cp.FileChangeRequestApprovalParams.model_validate(params)
             detail = getattr(p, "reason", None) or "apply file changes"
             choice = answers.approve(ApprovalRequest("file_change", first_line(detail)))
             send({"jsonrpc": "2.0", "id": rid,
                   "result": {"decision": _decision(choice, params.get("availableDecisions"))}})
         elif method == "item/permissions/requestApproval":
-            p = cp.PermissionsRequestApprovalParams.model_validate(params)
             detail = getattr(p, "reason", None) or "additional permissions"
             choice = answers.approve(ApprovalRequest("permission", first_line(detail)))
             if choice == "deny":
@@ -145,15 +170,12 @@ class CodexRuntime:
                 send({"jsonrpc": "2.0", "id": rid,
                       "result": {"permissions": params.get("permissions") or {},
                                  "scope": "session" if choice == "always" else "turn"}})
-        elif method == "item/tool/requestUserInput":
-            p = cp.ToolRequestUserInputParams.model_validate(params)
+        else:                       # item/tool/requestUserInput
             answered = {}
             for q in p.questions or []:
                 options = tuple(str(getattr(o, "label", None) or o) for o in (q.options or []))
                 answered[q.id] = {"answers": [answers.answer(QuestionRequest(q.question, options))]}
             send({"jsonrpc": "2.0", "id": rid, "result": {"answers": answered}})
-        else:
-            send({"jsonrpc": "2.0", "id": rid, "result": {}})
 
     def _parse(self, model, params: dict, method: str, emit: Callable[[LiveEvent], None]):
         """Validate a notification against the pinned models, or report the
@@ -175,7 +197,7 @@ class CodexRuntime:
         if method is None:
             return None
         if "id" in m:
-            self._server_request(m, send, answers)
+            self._server_request(m, send, emit, answers)
             return None
         params = m.get("params") or {}
         if method == "item/agentMessage/delta":
@@ -352,7 +374,16 @@ class CodexRuntime:
             r = self._call(proc, q, "turn/start", turn.model_dump(by_alias=True, exclude_none=True), emit, answers)
             if "error" in r:
                 return fail(str(r["error"].get("message", r["error"])))
-            self._turn_id = cp.TurnStartResponse.model_validate(r["result"]).turn.id
+            try:
+                self._turn_id = cp.TurnStartResponse.model_validate(r.get("result")).turn.id
+            except ValidationError as exc:
+                # only turn.id is load-bearing here (interrupt needs it), so a
+                # response that drifts elsewhere still starts a usable turn
+                self._turn_id = ((r.get("result") or {}).get("turn") or {}).get("id")
+                if not self._turn_id:
+                    return fail("turn/start returned no turn id")
+                emit(Failure(f"codex sent a response tandem cannot parse: "
+                             f"turn/start: {first_line(str(exc))}"))
             while True:
                 m = q.get()
                 if m is None:

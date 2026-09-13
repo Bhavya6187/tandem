@@ -9,6 +9,7 @@ goes to $FAKE_REPLY_OUT. Scenario from $FAKE_CODEX_SCENARIO:
   crash     exits 2 after turn/start with "kaboom" on stderr
   interrupt streams a delta, waits for turn/interrupt, completes as interrupted
   question  asks a requestUserInput question and echoes the answer
+  thinturn  like approve but the turn/start result carries only {"turn": {"id"}}
 """
 import json
 import os
@@ -68,7 +69,10 @@ def main():
             thread_id = "thread-new"
             out({"jsonrpc": "2.0", "id": rid, "result": {"thread": {"id": thread_id, "cwd": m["params"].get("cwd"), "turns": []}, "model": "gpt-fake"}})
         elif meth == "turn/start":
-            out({"jsonrpc": "2.0", "id": rid, "result": {"turn": {"id": TURN, "items": [], "itemsView": "notLoaded", "status": "inProgress", "error": None, "startedAt": None, "completedAt": None, "durationMs": None}}})
+            if scenario == "thinturn":
+                out({"jsonrpc": "2.0", "id": rid, "result": {"turn": {"id": TURN}}})
+            else:
+                out({"jsonrpc": "2.0", "id": rid, "result": {"turn": {"id": TURN, "items": [], "itemsView": "notLoaded", "status": "inProgress", "error": None, "startedAt": None, "completedAt": None, "durationMs": None}}})
             if scenario == "crash":
                 sys.stderr.write("kaboom\n"); sys.exit(2)
             notify("turn/started", {"threadId": thread_id, "turn": {"id": TURN, "items": [], "itemsView": "notLoaded", "status": "inProgress", "error": None, "startedAt": 1, "completedAt": None, "durationMs": None}})

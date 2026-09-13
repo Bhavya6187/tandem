@@ -188,6 +188,49 @@ def test_unparsable_turn_completed_still_ends_the_turn():
     assert isinstance(rec.events[0], Failure)
 
 
+def test_unparsable_approval_request_is_declined_not_dropped():
+    """A request is never dropped the way a notification is: the app-server
+    blocks until it is answered, and codex reads a JSON-RPC error as a decline.
+    The human is not asked to rule on a request tandem cannot show them."""
+    rec = Recorder("allow"); rt = CodexRuntime(ChatConfig()); sent = []
+    got = rt.handle({"method": "item/commandExecution/requestApproval", "id": 5,
+                     "params": {"threadId": "t", "turnId": "turn-1", "command": "ls"}},
+                    sent.append, rec.emit, rec)
+    assert got is None
+    assert sent == [{"jsonrpc": "2.0", "id": 5,
+                     "error": {"code": -32001, "message": "tandem cannot parse this request"}}]
+    assert rec.approvals == []
+    assert rec.kinds() == ["Failure"]
+    assert rec.events[0].message.startswith(
+        "codex sent a request tandem cannot parse: item/commandExecution/requestApproval: ")
+
+
+def test_unparsable_user_input_request_answers_nothing():
+    rec = Recorder(answer="blue"); rt = CodexRuntime(ChatConfig()); sent = []
+    got = rt.handle({"method": "item/tool/requestUserInput", "id": 6,
+                     "params": {"threadId": "t", "turnId": "turn-1"}},
+                    sent.append, rec.emit, rec)
+    assert got is None
+    assert sent == [{"jsonrpc": "2.0", "id": 6, "result": {"answers": {}}}]
+    assert rec.questions == []
+    assert rec.kinds() == ["Failure"]
+    assert rec.events[0].message.startswith(
+        "codex sent a request tandem cannot parse: item/tool/requestUserInput: ")
+
+
+def test_thin_turn_start_response_falls_back_to_the_dict(env, monkeypatch):
+    """Only turn.id is load-bearing in the turn/start response, so a result
+    that drifts elsewhere still starts a usable turn."""
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "thinturn")
+    rec = Recorder("allow")
+    out = env.runtime.run_turn(env.session, "t", "go", "", rec.emit, rec)
+    assert out.status == "completed"
+    assert isinstance(rec.events[0], Failure)
+    assert rec.events[0].message.startswith("codex sent a response tandem cannot parse: turn/start: ")
+    assert rec.kinds()[1:] == ["ToolStarted", "ToolOutput", "ToolFinished", "TextDelta",
+                               "LimitsUpdate", "TurnFinished"]
+
+
 def test_golden_lines_drive_the_handler():
     rec = Recorder("allow"); sent = []
     rt = CodexRuntime(ChatConfig())
