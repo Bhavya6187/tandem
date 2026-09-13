@@ -9,8 +9,10 @@ output tail, and a status row when it ends — nothing is redrawn later.
 The cursor lives in the region while a turn streams and in the composer
 while the window waits for input. `_col` tracks where the region's bottom
 row was left so a return from the composer resumes mid-line. Widths are
-counted in characters (the bar's one-cell-per-glyph rule applies to what
-tandem prints; model text is whatever it is and the terminal wraps it)."""
+counted in terminal cells by `_cells`: the styled painters hand `print`
+strings that already carry SGR wrappers, which move the cursor by nothing,
+and a W/F glyph moves it by two. Every newline is CRLF — the window runs
+the tty raw, so the terminal returns no carriage of its own."""
 
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ from .events import (ApprovalRequest, Failure, QuestionRequest, TextDelta, Think
 from .runtime import first_line, summarize_args
 
 _CSI = "\x1b["
-_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_CSI_RE = re.compile(r"\x1b\[[0-9:;<=>?]*[ -/]*[@-~]")
 # Every styled painter hands `print` a pre-wrapped string, so the column has
 # to be counted in cells, not characters: an SGR sequence advances the cursor
 # by nothing, and a W/F glyph (CJK, most emoji) by two.

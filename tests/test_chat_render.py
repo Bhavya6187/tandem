@@ -42,6 +42,7 @@ def test_leave_resets_everything(screen):
     s.enter(); out.text(clear=True); s.leave()
     t = out.text()
     assert "\x1b[r" in t and "\x1b[?2004l" in t
+    assert t.endswith("\r\n") and not re.search(r"(?<!\r)\n", t)
 
 
 def test_print_tracks_the_column_and_returns_to_the_region_after_the_bottom_paint(screen):
@@ -79,7 +80,7 @@ def test_turn_and_tool_rows(screen):
     assert "l3" not in t
     assert "    … +2 lines\r\n    ok · exit 0\r\n" in t
     assert "\r\n  completed · 1000↑ 200↓\r\n" in t
-    assert not re.search(r"(?<!\\r)\\n", t)   # raw tty: never a bare LF
+    assert not re.search(r"(?<!\r)\n", t)   # raw tty: never a bare LF
 
 
 def test_failed_tool_flushes_the_held_output_past_the_cap(screen):
@@ -121,12 +122,14 @@ def test_col_counts_cells_not_escape_bytes(screen):
     s.enter()
     s.print("\x1b[2mhmm\x1b[0m")          # 3 cells, not 11 characters
     assert s._col == 3
+    s.print("\x1b[38:2::1:2:3mrgb\x1b[0m")  # colon-delimited SGR, also 3 cells
+    assert s._col == 6
     s.print("漢字")                        # two cells apiece
-    assert s._col == 7
+    assert s._col == 10
     s.paint_bottom("bar", "> x", 3, focus_composer=True)
     out.text(clear=True)
     s.print("!")
-    assert out.text().startswith("\x1b[21;8H!")
+    assert out.text().startswith("\x1b[21;11H!")
 
 
 def test_styled_row_does_not_break_early():
