@@ -77,6 +77,44 @@ def normalize_refs(o) -> None:
             normalize_refs(v)
 
 
+def ref_targets(o, out: set[str]) -> None:
+    """Collect every `#/definitions/Name` a normalized fragment points at."""
+    if isinstance(o, dict):
+        ref = o.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/definitions/"):
+            out.add(ref[len("#/definitions/"):])
+        for v in o.values():
+            ref_targets(v, out)
+    elif isinstance(o, list):
+        for v in o:
+            ref_targets(v, out)
+
+
+def reachable(defs: dict, roots: list[str]) -> dict:
+    """`defs` pruned to the roots plus what they reach through `$ref`.
+
+    Without this every merged definition would be emitted, so the module
+    would carry the whole app-server protocol instead of WANTED's closure.
+    """
+    seen: set[str] = set()
+    dangling: set[str] = set()
+    queue = list(roots)
+    while queue:
+        name = queue.pop()
+        if name in seen or name in dangling:
+            continue
+        if name not in defs:
+            dangling.add(name)
+            continue
+        seen.add(name)
+        targets: set[str] = set()
+        ref_targets(defs[name], targets)
+        queue.extend(targets)
+    if dangling:
+        sys.exit(f"reachable definitions point at missing names: {sorted(dangling)}")
+    return {k: v for k, v in defs.items() if k in seen}
+
+
 def merge(schema_dir: Path) -> tuple[dict, str]:
     defs: dict = {}
     digest = hashlib.sha256()
@@ -98,6 +136,7 @@ def merge(schema_dir: Path) -> tuple[dict, str]:
     missing = [w for w in WANTED if w not in defs]
     if missing:
         sys.exit(f"schema is missing wanted definitions: {missing}")
+    defs = reachable(defs, WANTED)
     root = {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "title": "CodexProtocolRoot", "type": "object",
