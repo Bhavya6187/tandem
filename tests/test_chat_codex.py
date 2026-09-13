@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tandem.chat.events import (ApprovalRequest, LimitsUpdate, QuestionRequest, TextDelta,
-                                ToolFinished, ToolOutput, ToolStarted, TurnFinished)
+from tandem.chat.events import (ApprovalRequest, Failure, LimitsUpdate, QuestionRequest,
+                                TextDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished)
 from tandem.chat.runtime.codex import CodexRuntime, strip_shell
 from tandem.config import ChatConfig
 
@@ -160,6 +160,32 @@ def test_question_round_trip(env, monkeypatch):
     assert out.status == "completed"
     assert rec.questions == [QuestionRequest("Which color?", ("red", "blue"))]
     assert TextDelta("you chose blue") in rec.events
+
+
+def test_unknown_item_type_is_reported_not_raised():
+    """Every ThreadItem discriminator is a closed Literal over the variants the
+    pinned schema knows, so a codex release that adds one must cost the window
+    a line, not the turn: no ValidationError may escape `handle`."""
+    rec = Recorder(); rt = CodexRuntime(ChatConfig()); sent = []
+    got = rt.handle({"method": "item/started",
+                     "params": {"threadId": "t", "turnId": "turn-1", "startedAtMs": 1,
+                                "item": {"type": "quantumThing", "id": "x-1"}}},
+                    sent.append, rec.emit, rec)
+    assert got is None and sent == []
+    assert rec.kinds() == ["Failure"]
+    assert rec.events[0].message.startswith("codex sent a message tandem cannot parse: item/started: ")
+
+
+def test_unparsable_turn_completed_still_ends_the_turn():
+    """A required field that drifts out of `turn/completed` must not strand the
+    turn: the status is read off the dict so run_turn's loop still terminates."""
+    rec = Recorder(); rt = CodexRuntime(ChatConfig()); sent = []
+    got = rt.handle({"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+                    sent.append, rec.emit, rec)
+    assert got is not None and got.status == "completed" and got.error == ""
+    assert rec.kinds() == ["Failure", "TurnFinished"]
+    assert rec.events[-1] == TurnFinished("completed", "")
+    assert isinstance(rec.events[0], Failure)
 
 
 def test_golden_lines_drive_the_handler():

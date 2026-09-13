@@ -25,6 +25,8 @@ import threading
 from collections import deque
 from typing import Callable
 
+from pydantic import ValidationError
+
 from ...ratelimit import Window, format_windows, window_label
 from ..events import (Answers, ApprovalRequest, Failure, LimitsUpdate, LiveEvent,
                       QuestionRequest, TextDelta, ThinkingDelta, ToolFinished, ToolOutput,
@@ -153,6 +155,19 @@ class CodexRuntime:
         else:
             send({"jsonrpc": "2.0", "id": rid, "result": {}})
 
+    def _parse(self, model, params: dict, method: str, emit: Callable[[LiveEvent], None]):
+        """Validate a notification against the pinned models, or report the
+        drift and drop the line. Every ThreadItem discriminator is a closed
+        Literal over the 19 variants codex 0.153.4 knows, so a release that
+        adds a twentieth — or drops a required field — must cost the window
+        one line, never the whole turn."""
+        try:
+            return model.model_validate(params)
+        except ValidationError as exc:
+            emit(Failure(f"codex sent a message tandem cannot parse: "
+                         f"{method}: {first_line(str(exc))}"))
+            return None
+
     def handle(self, m: dict, send: Callable[[dict], None], emit: Callable[[LiveEvent], None],
                answers: Answers) -> TurnOutcome | None:
         """One server line that is not the response being waited for."""
@@ -164,7 +179,9 @@ class CodexRuntime:
             return None
         params = m.get("params") or {}
         if method == "item/agentMessage/delta":
-            n = cp.AgentMessageDeltaNotification.model_validate(params)
+            n = self._parse(cp.AgentMessageDeltaNotification, params, method, emit)
+            if n is None:
+                return None
             self._streamed_text.add(n.itemId)
             emit(TextDelta(n.delta))
         elif method == "item/reasoning/summaryTextDelta":
@@ -175,7 +192,10 @@ class CodexRuntime:
             self._streamed_output.add(item_id)
             emit(ToolOutput(item_id, delta))
         elif method == "item/started":
-            it = item_of(cp.ItemStartedNotification.model_validate(params))
+            n = self._parse(cp.ItemStartedNotification, params, method, emit)
+            if n is None:
+                return None
+            it = item_of(n)
             kind = it.type
             if kind == "commandExecution":
                 emit(ToolStarted(it.id, "exec", first_line(strip_shell(it.command or ""))))
@@ -189,7 +209,10 @@ class CodexRuntime:
             elif kind == "contextCompaction":
                 emit(ToolStarted(it.id, "compaction", "context compaction"))
         elif method == "item/completed":
-            it = item_of(cp.ItemCompletedNotification.model_validate(params))
+            n = self._parse(cp.ItemCompletedNotification, params, method, emit)
+            if n is None:
+                return None
+            it = item_of(n)
             kind = it.type
             if kind == "commandExecution":
                 if it.id not in self._streamed_output and it.aggregatedOutput:
@@ -209,7 +232,9 @@ class CodexRuntime:
                 if it.id not in self._streamed_text and it.text:
                     emit(TextDelta(it.text))
         elif method == "thread/tokenUsage/updated":
-            n = cp.ThreadTokenUsageUpdatedNotification.model_validate(params)
+            n = self._parse(cp.ThreadTokenUsageUpdatedNotification, params, method, emit)
+            if n is None:
+                return None
             total = n.tokenUsage.total
             parts = []
             window = getattr(n.tokenUsage, "modelContextWindow", None)
@@ -231,15 +256,22 @@ class CodexRuntime:
             err = params.get("error") or {}
             emit(Failure(str(err.get("message") or err)))
         elif method == "turn/completed":
-            n = cp.TurnCompletedNotification.model_validate(params)
-            raw = str(n.turn.status)
+            n = self._parse(cp.TurnCompletedNotification, params, method, emit)
+            if n is not None:
+                raw, err = str(n.turn.status), n.turn.error
+                detail = str(getattr(err, "message", err)) if err is not None else ""
+            else:
+                # the turn is over either way, so this one line is read off the
+                # dict: dropping it would strand run_turn's loop on a dead queue
+                turn = params.get("turn")
+                turn = turn if isinstance(turn, dict) else {}
+                err = turn.get("error")
+                raw = str(turn.get("status") or "")
+                detail = str(err.get("message") or err) if isinstance(err, dict) else ""
             status = "interrupted" if self._interrupted or raw == "interrupted" else (
                 "failed" if raw == "failed" else "completed")
-            error = ""
-            if status == "failed" and n.turn.error is not None:
-                error = str(getattr(n.turn.error, "message", n.turn.error))
             emit(TurnFinished(status, self._usage))
-            return TurnOutcome(status, error)
+            return TurnOutcome(status, detail if status == "failed" else "")
         return None
 
     # -- process -------------------------------------------------------------
