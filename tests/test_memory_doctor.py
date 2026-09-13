@@ -178,3 +178,19 @@ def test_adapter_validate_transcript_dispatch(tmp_path, monkeypatch):
     problems = get_adapter("claude").validate_transcript(
         env.claude_shadow, env.session.native_id("claude"))
     assert problems == []
+
+
+def test_doctor_reports_the_codex_protocol_pin(env_factory, monkeypatch):
+    from tandem import doctor
+    from tandem.compat import COMPAT
+
+    env = env_factory()
+    report = doctor.run_doctor(env.store, env.session)
+    msgs = [c.message for c in report.checks]
+    line = next(m for m in msgs if m.startswith("chat: codex protocol models"))
+    assert f"generated from {COMPAT['codex'].tested}" in line
+    assert next(c for c in report.checks if c.message == line).status == "ok"
+    monkeypatch.setattr(doctor, "_codex_protocol_version", lambda: "0.1.0")
+    report = doctor.run_doctor(env.store, env.session)
+    warn = next(c for c in report.checks if c.message.startswith("chat: codex protocol models"))
+    assert warn.status == "warn" and "0.1.0" in warn.message

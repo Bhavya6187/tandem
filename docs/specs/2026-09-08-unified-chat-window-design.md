@@ -91,13 +91,21 @@ sigil swapped to `/`):
 prompt   := route? text
 route    := "/" harness (":" model)? (whitespace | end)
 harness  := "claude" | "codex" | "opencode"
-model    := [A-Za-z0-9._/-]+
+model    := token ("/" token)*      -- the slashed form: opencode only
+token    := [A-Za-z0-9._-]+
 ```
 
 - The route is recognized only at the start of the prompt and only for
   the three harness names, followed by whitespace, end of input, or
   `:model`. `/codex/README.md …` is not a route (a slash follows the
   name); `/claude` inside prose is literal text.
+- A model token carries no slash either, with one exception: opencode
+  names its models `provider/modelID` and the id may itself carry slashes
+  (`openrouter/anthropic/claude-sonnet-4`), because opencode splits on
+  the first one only. So the slashed form is a route for opencode alone;
+  for claude and codex a slash after the model means the whole thing is a
+  path, not a route — `/claude:haiku/x` is ordinary text, exactly like
+  `/codex/README.md`.
 - `/codex fix the tests` → runs on codex, codex becomes the default.
 - `/codex` alone → codex becomes the default, no turn.
 - `/codex:gpt-5.5 …` → runs on codex with that model and pins it for codex

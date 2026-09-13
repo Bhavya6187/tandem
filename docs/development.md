@@ -45,6 +45,10 @@ commit.
   resolution, and plugin install.
 - `src/tandem/state.py`, `compat.py`, `config.py`, `doctor.py` — the
   SQLite state store, pinned version ranges, `config.toml`, health checks.
+- `src/tandem/chat/` + `src/tandem/promptroute.py` — the unified window:
+  `promptroute.py` (the `/` grammar), `chat/runtime/` (one headless client
+  per harness; `codex_protocol.py` is generated), `chat/dispatch.py`,
+  `chat/render.py`, `chat/composer.py`, `chat/window.py`.
 
 ## Extending tandem
 
@@ -96,3 +100,25 @@ class TraceConverter(Protocol):
 `ReferenceConverter` implements it via a normalized event model
 (`tandem/events.py`) derived from the observed formats. Pass your own
 converter to `SyncEngine(store, session, source, target, converter=...)`.
+
+## Rechecking the codex protocol
+
+`src/tandem/chat/runtime/codex_protocol.py` is generated from the schema
+the installed `codex` dumps (`codex app-server generate-json-schema`), and
+`tests/test_codex_protocol.py` pins its header to `COMPAT["codex"].tested`.
+When codex moves:
+
+1. `git -C ~/git/codex fetch --tags` and read the diff between the old and
+   new tags for `codex-rs/app-server-protocol/schema/json`,
+   `codex-rs/tui/src/history_cell` and `codex-rs/tui/src/exec_cell` — the
+   protocol and the rendering rules tandem copies.
+2. Install the new codex, run `uv run python tools/gen_codex_protocol.py`,
+   read the generated diff (that diff is the drift report), and update
+   `runtime/codex.py` / `render.py` for anything the diff changed.
+3. Bump `COMPAT["codex"]` (tested and ceiling), run the suite, then
+   `tools/live_gate_chat.py`, and record the result in
+   `docs/formats.md`.
+
+The opencode and claude clients are hand-written against
+`~/git/opencode/packages/sdk/openapi.json` and the Agent SDK source; their
+golden lines live in `tests/golden/chat/`.

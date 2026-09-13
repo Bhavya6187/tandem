@@ -108,6 +108,35 @@ the key and nothing survives the flip — between flips a tandem session is
 exactly one harness process. `warm = false` restores the fully serial
 flip, which is slower but does the same thing.
 
+## [chat] — the unified window
+
+`tandem chat` runs every prompt headless inside the harness that ran the
+last one, unless the prompt starts with `/claude`, `/codex`, or
+`/opencode` (optionally `/codex:gpt-5.5` to pin a model for that harness,
+`/codex:default` to clear it). A bare route switches the default without a
+turn. Any other leading `/word` is passed to the current harness as its
+own slash command, and `@path` mentions reach it untouched.
+
+```toml
+[chat]
+tool_output_lines = 8        # lines of tool output shown per call (rest elided)
+history_turns = 50           # turns painted from the transcript at startup
+show_thinking = false        # reasoning summaries, dimmed
+claude_setting_sources = ["user", "project", "local"]   # what headless claude loads
+# codex_approval_policy = "on-request"   # default: inherit ~/.codex/config.toml
+# codex_sandbox = "workspace-write"      # default: inherit
+```
+
+Keys: Enter sends; Esc interrupts the running turn; Ctrl-C once interrupts,
+twice within two seconds quits; Ctrl-L repaints. An approval prompt takes
+`y`, `a` (allow for the rest of the session), or `n`; a question takes its
+option number or typed text.
+
+Headless claude and codex app-server skip the folder-trust prompts their
+TUIs show; opencode's default config auto-allows `bash` and only asks when
+your opencode config says so. The bar's rate-limit polling follows
+`[frame] rate_limits`.
+
 ## Environment variables
 
 Not config keys, but honored everywhere: `TANDEM_HOME` relocates

@@ -183,3 +183,31 @@ validation rather than being silently declared compatible.
 - Resume: `opencode -s <id>` (id must exist; no directory match);
   one-off: `opencode run -s <id> "<prompt>"`. No per-invocation
   turn-complete hook — tandem fs-watches the `-wal` file.
+
+## Chat window live gate (claude 2.1.265 / codex 0.153.4 / opencode 1.18.20)
+
+`tools/live_gate_chat.py` drives `tandem chat` in tmux on a private socket:
+a three-harness relay (claude → codex → opencode → claude) where each harness
+is asked to name the previous one's word and to run a shell command, so
+every step is its own cross-harness sync check — a harness can only name
+that word if the turn was translated into its own native session file
+first, and the file it touches proves the command really ran. codex and
+claude are expected to ask for approval; opencode's default config
+auto-allows `bash`, and the script tolerates either. Record each run here
+as `date · versions · PASS/FAIL · notes`.
+
+- 2026-09-13 · spike relay, headless via the raw protocols (pre-window) · PASS ·
+  see `docs/specs/2026-09-08-unified-chat-window-design.md`, Decisions.
+- 2026-09-13 · claude 2.1.265 / codex 0.153.4 / opencode 1.18.20 · FAIL (5) ·
+  codex could not authenticate (`Your access token could not be refreshed
+  because your refresh token was already used`). Plain `codex exec` fails
+  identically, so this is an account that needs `codex login`, not a tandem
+  fault. Everything not downstream of codex passed: window up, claude's turn,
+  the claude approval row and its `y`, the command claude ran, and the
+  two-Ctrl-C exit with status 0. The two opencode failures cascade from the
+  failed codex turn — a turn that dies after its prompt is recorded still
+  syncs that lone user message outward, and an opencode shadow ending on a
+  user message is rejected by `validate_transcript`, so no later opencode
+  turn can start in that session. The same script with the codex step removed
+  (claude → opencode → claude) passed every step. Re-run once codex is
+  signed in.

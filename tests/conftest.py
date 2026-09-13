@@ -80,11 +80,18 @@ class Env:
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
         # hermetic version checks: run_doctor must not shell out to real CLIs
+        from tandem import compat as compat_mod
         from tandem.compat import COMPAT
         from tandem.harness.claude_code import ClaudeCodeAdapter
         from tandem.harness.codex import CodexAdapter
         from tandem.harness.opencode import OpencodeAdapter
 
+        # doctor's codex-protocol check asks compat directly rather than
+        # through an adapter, so the adapter pins below do not cover it
+        monkeypatch.setattr(
+            compat_mod, "detect_cli_version",
+            lambda binary: COMPAT[binary].tested if binary in COMPAT else None,
+        )
         monkeypatch.setattr(
             ClaudeCodeAdapter, "detect_version", lambda self: COMPAT["claude"].tested
         )
