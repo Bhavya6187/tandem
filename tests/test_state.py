@@ -1,3 +1,5 @@
+import sqlite3
+
 from tandem.state import StateStore
 
 
@@ -232,3 +234,39 @@ def test_list_sessions_is_immune_to_null_last_used(tmp_path):
         store._conn.commit()
         ids = [s.tandem_id for s in store.list_sessions()]
         assert ids == [newer.tandem_id, older.tandem_id]
+
+
+def test_chat_pins_round_trip(tmp_path):
+    with make_store(tmp_path) as store:
+        s = store.create_session("/proj", "claude", ["claude", "codex"],
+                                 {"claude": "c", "codex": "x"})
+        assert store.get_pin(s.tandem_id, "codex") == ""
+        store.set_pin(s.tandem_id, "codex", "gpt-5.5")
+        assert store.get_pin(s.tandem_id, "codex") == "gpt-5.5"
+        store.set_pin(s.tandem_id, "codex", "gpt-5.4")       # overwrite
+        assert store.get_pin(s.tandem_id, "codex") == "gpt-5.4"
+        assert store.get_pin(s.tandem_id, "claude") == ""    # per harness
+        store.set_pin(s.tandem_id, "codex", "")              # clear
+        assert store.get_pin(s.tandem_id, "codex") == ""
+
+
+def test_chat_pins_table_added_to_existing_db(tmp_path):
+    """An older state.db without chat_pins is extended in place, not moved aside."""
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE sessions (tandem_id TEXT PRIMARY KEY, cwd TEXT NOT NULL,"
+        " active TEXT NOT NULL, participants TEXT NOT NULL,"
+        " native_session_ids TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,"
+        " last_sync_at TEXT, last_used_at TEXT);"
+    )
+    conn.execute(
+        "INSERT INTO sessions VALUES"
+        " ('abc', '/p', 'claude', '[\"claude\"]', '{}', 'now', NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+    with StateStore(db_path=db) as store:
+        assert store.get_session("abc") is not None          # not moved aside
+        store.set_pin("abc", "claude", "haiku")
+        assert store.get_pin("abc", "claude") == "haiku"

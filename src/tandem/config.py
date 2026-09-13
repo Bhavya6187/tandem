@@ -3,7 +3,8 @@
 [subagents] controls codex subagent routing; [claude] / [codex] hold an
 `args` list appended to every interactive launch of that harness; [frame]
 holds the meta-harness flip keybind, its status bar toggle, the
-pipelined-flip toggle, and the bar's rate-limit poll toggle.
+pipelined-flip toggle, and the bar's rate-limit poll toggle; [chat]
+tunes the unified chat window.
 
 Unknown keys are ignored and every error yields defaults — configuration
 must never be the reason a launch breaks or subagent routing stops (the
@@ -147,3 +148,46 @@ def load_harnesses() -> list[str]:
             seen.add(h)
             out.append(h)
     return out or list(SUPPORTED_HARNESSES)
+
+
+_SETTING_SOURCES = ("user", "project", "local")
+
+
+@dataclass(frozen=True)
+class ChatConfig:
+    """[chat]: the unified window. Every field forgiving, like the rest."""
+    tool_output_lines: int = 8          # tail printed per tool call
+    history_turns: int = 50             # turns painted at startup
+    show_thinking: bool = False
+    claude_setting_sources: tuple[str, ...] = _SETTING_SOURCES
+    codex_approval_policy: str = ""     # "" = inherit ~/.codex/config.toml
+    codex_sandbox: str = ""             # "" = inherit
+
+
+def load_chat_config() -> ChatConfig:
+    raw = _read_config().get("chat")
+    if not isinstance(raw, dict):
+        return ChatConfig()
+    d = ChatConfig()
+
+    def pick(key: str, kind: type, default):
+        v = raw.get(key, default)
+        # bool is an int subclass: a `true` must not pass as an int
+        if not isinstance(v, kind) or (kind is int and isinstance(v, bool)):
+            return default
+        return v
+
+    sources = raw.get("claude_setting_sources")
+    if isinstance(sources, list):
+        kept = tuple(s for s in sources if isinstance(s, str) and s in _SETTING_SOURCES)
+        sources = kept or d.claude_setting_sources
+    else:
+        sources = d.claude_setting_sources
+    return ChatConfig(
+        tool_output_lines=max(0, pick("tool_output_lines", int, d.tool_output_lines)),
+        history_turns=max(0, pick("history_turns", int, d.history_turns)),
+        show_thinking=pick("show_thinking", bool, d.show_thinking),
+        claude_setting_sources=sources,
+        codex_approval_policy=pick("codex_approval_policy", str, d.codex_approval_policy),
+        codex_sandbox=pick("codex_sandbox", str, d.codex_sandbox),
+    )

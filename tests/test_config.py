@@ -1,8 +1,10 @@
 """config.toml: defaults on missing/broken file, validated values."""
 
 from tandem.config import (
+    ChatConfig,
     FrameConfig,
     SubagentsConfig,
+    load_chat_config,
     load_frame_config,
     load_harness_args,
     load_subagents_config,
@@ -194,3 +196,24 @@ def test_frame_rate_limits_garbage_falls_back_to_default(tmp_path, monkeypatch):
     # string must read as the default, not as "on"
     _write_config(tmp_path, monkeypatch, '[frame]\nrate_limits = "off"\n')
     assert load_frame_config().rate_limits is True
+
+
+def test_chat_config_defaults_when_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+    assert load_chat_config() == ChatConfig()
+
+
+def test_chat_config_reads_and_validates(tmp_path, monkeypatch):
+    _write_config(
+        tmp_path, monkeypatch,
+        '[chat]\ntool_output_lines = 3\nhistory_turns = "lots"\nshow_thinking = true\n'
+        'claude_setting_sources = ["user", "bogus"]\ncodex_approval_policy = "never"\n'
+        'codex_sandbox = 7\n',
+    )
+    cfg = load_chat_config()
+    assert cfg.tool_output_lines == 3
+    assert cfg.history_turns == 50            # wrong type -> default
+    assert cfg.show_thinking is True
+    assert cfg.claude_setting_sources == ("user",)   # unknown names dropped
+    assert cfg.codex_approval_policy == "never"
+    assert cfg.codex_sandbox == ""            # wrong type -> default

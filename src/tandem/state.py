@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
     PRIMARY KEY (tandem_id, source, target),
     FOREIGN KEY (tandem_id) REFERENCES sessions (tandem_id)
 );
+CREATE TABLE IF NOT EXISTS chat_pins (
+    tandem_id TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    model TEXT NOT NULL,
+    PRIMARY KEY (tandem_id, harness)
+);
 """
 
 
@@ -259,3 +265,28 @@ class StateStore:
                  cursor.byte_offset, cursor.line_index, cursor.turn_index,
                  json.dumps(cursor.pending), cursor.failed_turns, _now()),
             )
+
+    # -- chat model pins -----------------------------------------------------
+
+    def get_pin(self, tandem_id: str, harness: str) -> str:
+        """The model pinned for `harness` in the chat window, "" for none."""
+        row = self._conn.execute(
+            "SELECT model FROM chat_pins WHERE tandem_id = ? AND harness = ?",
+            (tandem_id, harness),
+        ).fetchone()
+        return row["model"] if row else ""
+
+    def set_pin(self, tandem_id: str, harness: str, model: str) -> None:
+        """Pin `model` for `harness`; an empty model clears the pin."""
+        with self._conn:
+            if model:
+                self._conn.execute(
+                    "INSERT INTO chat_pins (tandem_id, harness, model) VALUES (?, ?, ?)"
+                    " ON CONFLICT (tandem_id, harness) DO UPDATE SET model = excluded.model",
+                    (tandem_id, harness, model),
+                )
+            else:
+                self._conn.execute(
+                    "DELETE FROM chat_pins WHERE tandem_id = ? AND harness = ?",
+                    (tandem_id, harness),
+                )
