@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 
 from tandem.state import StateStore
 
@@ -270,3 +271,31 @@ def test_chat_pins_table_added_to_existing_db(tmp_path):
         assert store.get_session("abc") is not None          # not moved aside
         store.set_pin("abc", "claude", "haiku")
         assert store.get_pin("abc", "claude") == "haiku"
+
+
+def test_store_is_usable_from_a_worker_thread(tmp_path):
+    """The chat dispatcher does a turn's bookkeeping on its own thread while
+    the window keeps reading on the main one: one store, both threads."""
+    with StateStore(db_path=tmp_path / "s.db") as store:
+        s = store.create_session(
+            "/proj", "claude", ["claude", "codex"], {"claude": "c", "codex": None},
+        )
+        errors = []
+
+        def worker():
+            try:
+                store.set_native_session_id(s.tandem_id, "codex", "x-id")
+                cursor = store.get_cursor(s.tandem_id, "codex", "claude")
+                cursor.byte_offset = 12
+                store.save_cursor(cursor)
+                store.set_active(s.tandem_id, "codex")
+            except Exception as exc:
+                errors.append(repr(exc))
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join(5)
+        assert not t.is_alive() and errors == []
+        assert store.get_session(s.tandem_id).native_id("codex") == "x-id"
+        assert store.get_session(s.tandem_id).active == "codex"
+        assert store.get_cursor(s.tandem_id, "codex", "claude").byte_offset == 12
