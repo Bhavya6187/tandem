@@ -35,6 +35,15 @@ from .render import Screen
 from .runtime.factory import make_runtimes
 
 HINT = "/claude /codex /opencode route"
+WINDOW_COMMANDS = ("/quit", "/status")
+
+
+def window_command(text: str) -> str:
+    """Tandem's own two, recognized as a whole leading word — `/quitter` is
+    somebody else's. Everything else the composer submits belongs to the
+    harness, slash commands included."""
+    head = text.strip().split(maxsplit=1)
+    return head[0] if head and head[0] in WINDOW_COMMANDS else ""
 
 
 class WindowAnswers:
@@ -89,6 +98,18 @@ class Window:
         meter = self.meters.get(default)
         usage = meter.state.get("text", "") if meter is not None else ""
         return self.bar.line(False, usage, self.usage_state.get("limits") or {})
+
+    def status_line(self) -> str:
+        """What `/status` prints: the session this window is driving, where
+        the next bare prompt goes, and the model pins that would ride with it."""
+        parts = [f"session {self.session.tandem_id}",
+                 f"default {self.dispatcher.default}",
+                 "participants " + ", ".join(self.session.participants)]
+        pins = [f"{h}={self.dispatcher.pin(h)}" for h in self.session.participants
+                if self.dispatcher.pin(h)]
+        if pins:
+            parts.append("pins: " + ", ".join(pins))
+        return " · ".join(parts)
 
     def paint(self) -> None:
         text, col = self.composer.line(self.screen.cols)
@@ -204,6 +225,12 @@ class Window:
     def handle_input(self, data: bytes) -> bool:
         for action in self.composer.feed(data):
             if isinstance(action, Submit):
+                command = window_command(action.text)
+                if command == "/quit":
+                    return False
+                if command == "/status":
+                    self.screen.note(self.status_line())
+                    continue
                 note = self.dispatcher.submit(action.text)
                 if note.startswith("error: "):
                     self.screen.failure(Failure(note[7:]))

@@ -29,9 +29,11 @@ class StubDispatcher:
     def __init__(self):
         self.submitted, self.pumps, self.interrupts = [], 0, 0
         self.busy, self.default, self.note = False, "claude", ""
+        self.pins = {}
     def submit(self, text): self.submitted.append(text); return self.note
     def pump(self): self.pumps += 1
     def interrupt(self): self.interrupts += 1
+    def pin(self, harness): return self.pins.get(harness, "")
     def close(self): pass
 
 
@@ -73,6 +75,41 @@ def test_submit_and_notes(env_factory):
     assert "queued → codex" in out.text()
     d.note = "error: nope"; w.handle_input(b"/x\r")
     assert "error: nope" in out.text()
+
+
+class TestWindowCommands:
+    """`/quit` and `/status` are tandem's own and never reach a harness; every
+    other leading `/word` is the harness's own slash command."""
+
+    def test_quit_exits_the_loop(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        assert w.handle_input(b"/quit\r") is False
+        assert d.submitted == []
+
+    def test_quit_with_trailing_words_still_quits(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        assert w.handle_input(b"/quit now\r") is False
+        assert d.submitted == []
+
+    def test_a_word_starting_with_quit_is_the_harnesss(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        assert w.handle_input(b"/quitter\r") is True
+        assert d.submitted == ["/quitter"]
+
+    def test_status_prints_a_note_and_runs_nothing(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        assert w.handle_input(b"/status\r") is True
+        assert d.submitted == []
+        line = out.text()
+        assert f"session {env.session.tandem_id}" in line
+        assert "default claude" in line and "participants claude, codex" in line
+        assert "pins:" not in line                       # none set
+
+    def test_status_lists_the_model_pins(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        d.pins = {"codex": "gpt-5.5"}
+        w.handle_input(b"/status\r")
+        assert "pins: codex=gpt-5.5" in out.text()
 
 
 def test_approval_round_trip(env_factory):

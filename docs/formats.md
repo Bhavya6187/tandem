@@ -10,6 +10,12 @@ database) the CLIs wrote. Versions observed:
 | Codex CLI (`codex`) | 0.153.4 | `~/.codex/sessions/YYYY/MM/DD/rollout-<YYYY-MM-DDThh-mm-ss>-<uuidv7>.jsonl` |
 | opencode (`opencode`) | 1.18.15 | one SQLite database, the path `opencode db path` prints (see below) |
 
+The versions above are the ones the formats were last re-observed on. The
+chat window (`tandem chat`) was built and gated against claude 2.1.265 and
+opencode 1.18.20 — the versions `compat.py` pins — without a format
+recheck; nothing in it depends on a format change, and the shapes below
+have not been re-read on those releases.
+
 Env overrides honored: `CLAUDE_CONFIG_DIR` (claude home), `CODEX_HOME` (codex
 home), `OPENCODE_DB` (opencode database), `TANDEM_HOME` (tandem state).
 

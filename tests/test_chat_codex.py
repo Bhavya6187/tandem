@@ -11,7 +11,7 @@ import pytest
 
 from tandem.chat.events import (ApprovalRequest, Failure, LimitsUpdate, QuestionRequest,
                                 TextDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished)
-from tandem.chat.runtime.codex import CodexRuntime, strip_shell
+from tandem.chat.runtime.codex import CodexRuntime, _decision, strip_shell
 from tandem.config import ChatConfig
 
 FAKE = Path(__file__).parent / "fakes" / "fake_codex_appserver.py"
@@ -93,6 +93,58 @@ def test_always_and_deny_decisions(env, monkeypatch):
     assert ToolFinished("call-1", False, "declined") in rec.events
 
 
+def test_the_decision_table():
+    """What each answer means on the wire, against what the app-server says it
+    will accept. `acceptForSession` and `decline` are not always on offer."""
+    assert _decision("allow", ["accept", "acceptForSession", "decline", "cancel"]) == "accept"
+    assert _decision("always", ["accept", "acceptForSession", "decline"]) == "acceptForSession"
+    assert _decision("always", ["accept", "cancel"]) == "accept"        # not offered
+    assert _decision("deny", ["accept", "decline", "cancel"]) == "decline"
+    assert _decision("deny", ["accept", "cancel"]) == "cancel"          # decline not offered
+    assert _decision("deny", None) == "decline"                         # nothing declared
+
+
+@pytest.mark.parametrize("choice,decision,status", [
+    ("allow", "accept", True), ("deny", "decline", False)])
+def test_file_change_approval(env, monkeypatch, choice, decision, status):
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "filechange")
+    rec = Recorder(choice)
+    out = env.runtime.run_turn(env.session, "t", "patch it", "", rec.emit, rec)
+    assert out.status == "completed"
+    assert rec.approvals == [ApprovalRequest("file_change", "write outside the workspace")]
+    assert json.loads((env.tmp / "reply.json").read_text()) == {"decision": decision}
+    assert ToolFinished("call-1", status, "") in rec.events
+    assert TextDelta("DONE") in rec.events
+
+
+def test_permissions_approval_allows_for_the_turn(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "permission")
+    rec = Recorder("allow")
+    out = env.runtime.run_turn(env.session, "t", "go", "", rec.emit, rec)
+    assert out.status == "completed"
+    assert rec.approvals == [ApprovalRequest("permission", "network access")]
+    assert json.loads((env.tmp / "reply.json").read_text()) == {
+        "permissions": {"network": {"allowAll": True}}, "scope": "turn"}
+
+
+def test_permissions_approval_always_is_session_scoped(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "permission")
+    rec = Recorder("always")
+    env.runtime.run_turn(env.session, "t", "go", "", rec.emit, rec)
+    assert json.loads((env.tmp / "reply.json").read_text())["scope"] == "session"
+
+
+def test_permissions_denial_is_a_json_rpc_error(env, monkeypatch):
+    """A permissions request has no `decision` field to say no with: codex
+    reads the JSON-RPC error as the refusal."""
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "permission")
+    rec = Recorder("deny")
+    out = env.runtime.run_turn(env.session, "t", "go", "", rec.emit, rec)
+    assert out.status == "completed"
+    assert json.loads((env.tmp / "reply.json").read_text()) == {
+        "error": {"code": -32001, "message": "denied in tandem chat"}}
+
+
 def test_fresh_thread_start_returns_the_new_id(env, monkeypatch):
     monkeypatch.setenv("FAKE_CODEX_SCENARIO", "fresh")
     rec = Recorder("allow")
@@ -101,6 +153,18 @@ def test_fresh_thread_start_returns_the_new_id(env, monkeypatch):
     assert env.params("thread/start") == {"cwd": env.session.cwd}
     assert env.params("thread/resume") is None
     assert env.params("turn/start")["threadId"] == "thread-new"
+
+
+def test_a_turn_that_fails_keeps_the_thread_it_just_started(env, monkeypatch):
+    """thread/start minted a real thread before turn/start failed. Dropping
+    its id orphans the thread and mints another on every retry — and the
+    rollout codex wrote for it is never adopted as the session's own."""
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "freshfail")
+    rec = Recorder()
+    out = env.runtime.run_turn(env.session, None, "go", "", rec.emit, rec)
+    assert out.status == "failed" and "model unavailable" in out.error
+    assert out.native_id == "thread-new"
+    assert rec.kinds() == ["Failure", "TurnFinished"]
 
 
 def test_writer_lock_is_reported_not_retried(env, monkeypatch):

@@ -258,7 +258,11 @@ submit(prompt)
 Same-thread guard: before a codex turn, any codex process the dispatcher
 itself started for this thread must be dead (it always is after a normal
 turn; the guard covers a crashed client). A lock held by a process tandem
-did not start is reported, never killed.
+did not start is reported, never killed. As built the guard needs no code:
+one turn runs at a time and `run_turn`'s `finally` takes its app-server
+down the kill ladder before it returns, so no codex process tandem started
+can still hold the thread when the next turn resumes it; a lock held by
+anything else surfaces as the "open in another process" failure.
 
 One turn at a time across all harnesses, matching tandem's model. Esc
 interrupts the running turn; the queue is not flushed by an interrupt.

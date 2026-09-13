@@ -551,6 +551,33 @@ def test_a_completed_turn_gets_no_closing_note(setup):
     assert not any("the turn on" in t for t in shadow_texts(env.codex_shadow))
 
 
+def test_a_quarantined_entry_is_reported(setup, monkeypatch):
+    """An entry the converter cannot translate is quarantined and replaced by a
+    placeholder — the drain does not fail, so nothing else says it happened."""
+    real = dispatch.ops.sync_after_turn
+
+    def bumping(store, session, target, **kw):
+        cursor = store.get_cursor(session.tandem_id, target, "codex")
+        cursor.failed_turns += 2
+        store.save_cursor(cursor)
+        return real(store, session, target, **kw)
+
+    monkeypatch.setattr(dispatch.ops, "sync_after_turn", bumping)
+    env, d, rts, events = setup
+    d.submit("hello")
+    wait_idle(events)
+    notes = [e.message for e in events if isinstance(e, Failure)]
+    assert notes == ["2 entries quarantined while syncing claude → codex; "
+                     "see `tandem doctor`"]
+
+
+def test_a_clean_drain_reports_no_quarantine(setup):
+    env, d, rts, events = setup
+    d.submit("hello")
+    wait_idle(events)
+    assert [e for e in events if isinstance(e, Failure)] == []
+
+
 class TestClose:
     """`close()` is the window's last act before the state store closes under
     it: a worker still inside sync_after_turn writes to a closed sqlite

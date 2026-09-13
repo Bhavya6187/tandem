@@ -349,7 +349,11 @@ class CodexRuntime:
         def fail(message: str) -> TurnOutcome:
             emit(Failure(message))
             emit(TurnFinished("failed", ""))
-            return TurnOutcome("failed", message)
+            # new_id is set once thread/start minted a thread: a failure after
+            # that still owes the dispatcher the id, or the thread (and the
+            # rollout codex wrote for it) is orphaned and the next turn mints
+            # another one
+            return TurnOutcome("failed", message, native_id=new_id)
 
         try:
             r = self._call(proc, q, "initialize",

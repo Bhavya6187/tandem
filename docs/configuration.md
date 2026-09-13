@@ -114,8 +114,11 @@ flip, which is slower but does the same thing.
 last one, unless the prompt starts with `/claude`, `/codex`, or
 `/opencode` (optionally `/codex:gpt-5.5` to pin a model for that harness,
 `/codex:default` to clear it). A bare route switches the default without a
-turn. Any other leading `/word` is passed to the current harness as its
-own slash command, and `@path` mentions reach it untouched.
+turn. Tandem's own window commands are `/quit` (leave the window, as two
+Ctrl-Cs do) and `/status` (print the session id, the default harness, the
+participants and any model pins); every other leading `/word` goes to the
+current harness as its own slash command, and `@path` mentions reach it
+untouched.
 
 ```toml
 [chat]

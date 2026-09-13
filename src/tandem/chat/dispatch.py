@@ -170,6 +170,21 @@ class Dispatcher:
         except Exception as exc:                       # validation must never take the window down
             return [f"validation error: {exc}"]
 
+    def _failed_turns(self, harness: str) -> dict[str, int]:
+        return {t: self.store.get_cursor(self.session.tandem_id, harness, t).failed_turns
+                for t in self.session.targets_for(harness)}
+
+    def _report_quarantine(self, harness: str, before: dict[str, int]) -> None:
+        """An entry the converter cannot translate is quarantined and replaced
+        by a placeholder: the drain succeeds, so the window is the only place
+        that can say a turn arrived incomplete on the other side."""
+        for target, after in self._failed_turns(harness).items():
+            grew = after - before.get(target, 0)
+            if grew > 0:
+                self.emit(Failure(
+                    f"{grew} entr{'y' if grew == 1 else 'ies'} quarantined while "
+                    f"syncing {harness} → {target}; see `tandem doctor`"))
+
     def _start(self, item: Pending) -> None:
         """Call with _lock held: the flags and the thread it hands them to
         must be claimed by one caller only."""
@@ -213,8 +228,10 @@ class Dispatcher:
             # outward as-is it leaves every other session ending on a user
             # message, which opencode's dry-resume check rejects — wedging
             # every later turn there. Close it in the shadows as we sync.
+            quarantine_pre = self._failed_turns(harness)
             ops.sync_after_turn(self.store, self.session, harness,
                                 close_note=_close_note(harness, outcome))
+            self._report_quarantine(harness, quarantine_pre)
             self.store.touch_used(self.session.tandem_id)
             meter = self.meters.get(harness)
             if meter is not None:

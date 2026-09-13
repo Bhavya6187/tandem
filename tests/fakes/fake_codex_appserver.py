@@ -3,13 +3,16 @@
 Records argv to $FAKE_ARGV_OUT and every request's params (one JSON object
 per line: {"method":…, "params":…}) to $FAKE_PARAMS_OUT; the approval reply
 goes to $FAKE_REPLY_OUT. Scenario from $FAKE_CODEX_SCENARIO:
-  approve   (default) resume -> turn -> command approval -> DONE
-  fresh     like approve but expects thread/start (no threadId)
-  lock      thread/resume fails with "already has an active writer"
-  crash     exits 2 after turn/start with "kaboom" on stderr
-  interrupt streams a delta, waits for turn/interrupt, completes as interrupted
-  question  asks a requestUserInput question and echoes the answer
-  thinturn  like approve but the turn/start result carries only {"turn": {"id"}}
+  approve    (default) resume -> turn -> command approval -> DONE
+  fresh      like approve but expects thread/start (no threadId)
+  freshfail  thread/start succeeds, then turn/start fails
+  lock       thread/resume fails with "already has an active writer"
+  crash      exits 2 after turn/start with "kaboom" on stderr
+  interrupt  streams a delta, waits for turn/interrupt, completes as interrupted
+  question   asks a requestUserInput question and echoes the answer
+  thinturn   like approve but the turn/start result carries only {"turn": {"id"}}
+  filechange asks item/fileChange/requestApproval (reply id 8), then DONE
+  permission asks item/permissions/requestApproval (reply id 9), then DONE
 """
 import json
 import os
@@ -43,6 +46,22 @@ def item(kind, **fields):
     return {"type": kind, "id": fields.pop("id", "call-1"), **fields}
 
 
+def reply_out(m):
+    with open(os.environ.get("FAKE_REPLY_OUT", os.devnull), "w") as f:
+        json.dump(m.get("result") or {"error": m.get("error")}, f)
+
+
+def finish(thread_id, text="DONE"):
+    notify("item/started", {"threadId": thread_id, "turnId": TURN, "startedAtMs": 3,
+                            "item": item("agentMessage", id="msg-1", text="", phase="final_answer")})
+    notify("item/agentMessage/delta", {"threadId": thread_id, "turnId": TURN, "itemId": "msg-1", "delta": text})
+    notify("item/completed", {"threadId": thread_id, "turnId": TURN, "completedAtMs": 4,
+                              "item": item("agentMessage", id="msg-1", text=text, phase="final_answer")})
+    notify("turn/completed", {"threadId": thread_id, "turn": {
+        "id": TURN, "items": [], "itemsView": "summary", "status": "completed",
+        "error": None, "startedAt": 1, "completedAt": 5, "durationMs": 4}})
+
+
 def main():
     if os.environ.get("FAKE_ARGV_OUT"):
         with open(os.environ["FAKE_ARGV_OUT"], "w") as f:
@@ -69,6 +88,10 @@ def main():
             thread_id = "thread-new"
             out({"jsonrpc": "2.0", "id": rid, "result": {"thread": {"id": thread_id, "cwd": m["params"].get("cwd"), "turns": []}, "model": "gpt-fake"}})
         elif meth == "turn/start":
+            if scenario == "freshfail":
+                out({"jsonrpc": "2.0", "id": rid,
+                     "error": {"code": -32000, "message": "model unavailable"}})
+                continue
             if scenario == "thinturn":
                 out({"jsonrpc": "2.0", "id": rid, "result": {"turn": {"id": TURN}}})
             else:
@@ -79,6 +102,21 @@ def main():
             if scenario == "interrupt":
                 notify("item/started", {"threadId": thread_id, "turnId": TURN, "startedAtMs": 1, "item": item("agentMessage", id="msg-1", text="", phase="final_answer")})
                 notify("item/agentMessage/delta", {"threadId": thread_id, "turnId": TURN, "itemId": "msg-1", "delta": "partial"})
+                continue
+            if scenario == "filechange":
+                notify("item/started", {"threadId": thread_id, "turnId": TURN, "startedAtMs": 1, "item": item(
+                    "fileChange", id="call-1", status="inProgress",
+                    changes=[{"path": "/p/x.py", "kind": {"type": "update"}, "diff": "@@"}])})
+                out({"jsonrpc": "2.0", "id": 8, "method": "item/fileChange/requestApproval", "params": {
+                    "threadId": thread_id, "turnId": TURN, "itemId": "call-1", "startedAtMs": 1,
+                    "reason": "write outside the workspace",
+                    "availableDecisions": ["accept", "acceptForSession", "decline", "cancel"]}})
+                continue
+            if scenario == "permission":
+                out({"jsonrpc": "2.0", "id": 9, "method": "item/permissions/requestApproval", "params": {
+                    "threadId": thread_id, "turnId": TURN, "itemId": "call-1", "startedAtMs": 1,
+                    "cwd": "/p", "reason": "network access",
+                    "permissions": {"network": {"allowAll": True}}}})
                 continue
             if scenario == "question":
                 out({"jsonrpc": "2.0", "id": 7, "method": "item/tool/requestUserInput", "params": {
@@ -102,9 +140,19 @@ def main():
             notify("item/started", {"threadId": thread_id, "turnId": TURN, "startedAtMs": 1, "item": item("agentMessage", id="msg-1", text="", phase="final_answer")})
             notify("item/agentMessage/delta", {"threadId": thread_id, "turnId": TURN, "itemId": "msg-1", "delta": f"you chose {answer}"})
             notify("turn/completed", {"threadId": thread_id, "turn": {"id": TURN, "items": [], "itemsView": "summary", "status": "completed", "error": None, "startedAt": 1, "completedAt": 2, "durationMs": 1}})
+        elif rid == 8 and ("result" in m or "error" in m):    # the file-change reply
+            reply_out(m)
+            decision = (m.get("result") or {}).get("decision")
+            notify("item/completed", {"threadId": thread_id, "turnId": TURN, "completedAtMs": 2, "item": item(
+                "fileChange", id="call-1",
+                status="completed" if decision in ("accept", "acceptForSession") else "declined",
+                changes=[{"path": "/p/x.py", "kind": {"type": "update"}, "diff": "@@"}])})
+            finish(thread_id)
+        elif rid == 9 and ("result" in m or "error" in m):    # the permissions reply
+            reply_out(m)
+            finish(thread_id)
         elif rid == 0 and ("result" in m or "error" in m):   # the approval reply
-            with open(os.environ.get("FAKE_REPLY_OUT", os.devnull), "w") as f:
-                json.dump(m.get("result") or {"error": m.get("error")}, f)
+            reply_out(m)
             decision = (m.get("result") or {}).get("decision")
             if decision in ("accept", "acceptForSession"):
                 notify("item/commandExecution/outputDelta", {"threadId": thread_id, "turnId": TURN, "itemId": "call-1", "delta": "hello\n"})
