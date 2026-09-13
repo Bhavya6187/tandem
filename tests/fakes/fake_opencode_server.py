@@ -7,6 +7,9 @@ Scenario (constructor arg or $FAKE_OPENCODE_SCENARIO):
   question    asks one question, echoes the answer as text
   abort       streams "partial" then waits for POST .../abort
   error       emits session.error and answers the POST with 500
+  malformed   pushes an event tandem cannot read, then finishes the turn normally
+  sse_drop    like tool, but the first /event stream is chunked HTTP/1.1 and is cut
+              after one event (an IncompleteRead client-side, like a serve restart)
 """
 from __future__ import annotations
 
@@ -28,6 +31,8 @@ class FakeOpencode:
         self.question_replies: list[dict] = []
         self.posts: list[dict] = []
         self.aborted = threading.Event()
+        self.dropped = threading.Event()       # the sse_drop stream was cut
+        self.drop_once = self.scenario == "sse_drop"
         self._reply = threading.Event()
         self._answered = threading.Event()
         fake = self
@@ -46,13 +51,26 @@ class FakeOpencode:
                     return self._json(200, {"healthy": True, "version": "fake"})
                 if self.path == "/event":
                     q: queue.Queue = queue.Queue(); fake.clients.append(q)
-                    self.send_response(200); self.send_header("content-type", "text/event-stream"); self.end_headers()
+                    drop, fake.drop_once = fake.drop_once, False
+                    if drop:                    # the real serve streams chunked HTTP/1.1
+                        self.protocol_version = "HTTP/1.1"
+                        self.send_response(200); self.send_header("content-type", "text/event-stream")
+                        self.send_header("transfer-encoding", "chunked"); self.end_headers()
+                    else:
+                        self.send_response(200); self.send_header("content-type", "text/event-stream")
+                        self.end_headers()
                     try:
                         while True:
                             ev = q.get()
                             if ev is None:
                                 return
-                            self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode()); self.wfile.flush()
+                            payload = f"data: {json.dumps(ev)}\n\n".encode()
+                            if drop:            # one chunk, then the body stops mid-stream
+                                self.wfile.write(b"%x\r\n" % len(payload) + payload + b"\r\n")
+                                self.wfile.flush(); self.close_connection = True
+                                fake.clients.remove(q); fake.dropped.set()
+                                return
+                            self.wfile.write(payload); self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):
                         return
                 self._json(404, {"error": "no"})
@@ -101,6 +119,12 @@ class FakeOpencode:
             self.aborted.wait(10)
             self.push("session.status", {"sessionID": SID, "status": {"type": "idle"}})
             return 200, {"info": info, "parts": [{"type": "text", "text": "partial"}]}
+        if self.scenario == "malformed":
+            self.push("permission.asked", "junk")       # properties is not an object
+            self.part({"id": "prt_t", "type": "text", "text": ""})
+            self.push("message.part.delta", {"sessionID": SID, "messageID": "msg_a", "partID": "prt_t", "field": "text", "delta": "DONE"})
+            self.push("session.idle", {"sessionID": SID})
+            return 200, {"info": info, "parts": [{"type": "text", "text": "DONE"}]}
         if self.scenario == "question":
             self.push("question.asked", {"id": "que_1", "sessionID": SID, "questions": [
                 {"question": "Which color?", "header": "Color", "options": [{"label": "red"}, {"label": "blue"}]}]})

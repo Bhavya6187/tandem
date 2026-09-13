@@ -116,6 +116,25 @@ def test_session_error_fails_the_turn(fake):
     assert any(isinstance(e, Failure) for e in rec.events)
 
 
+def test_malformed_event_costs_a_line_not_the_turn(fake):
+    f = fake("malformed"); rec = Recorder()
+    out = OpencodeRuntime(ChatConfig(), base_url=f.base_url).run_turn(SESSION, SID, "go", "", rec.emit, rec)
+    assert out.status == "completed"
+    assert rec.kinds() == ["Failure", "TextDelta", "TurnFinished"]
+    assert rec.events[0].message.startswith("opencode event tandem cannot handle: AttributeError")
+
+
+def test_sse_drop_mid_turn_leaves_the_next_turn_live(fake):
+    f = fake("sse_drop"); rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
+    first = Recorder()
+    assert rt.run_turn(SESSION, SID, "one", "", first.emit, first).status == "completed"
+    assert f.dropped.is_set()                   # the stream was cut mid-turn, not at EOF
+    second = Recorder()
+    assert rt.run_turn(SESSION, SID, "two", "", second.emit, second).status == "completed"
+    assert TextDelta("DONE") in second.events   # the reader re-subscribed, the window still paints
+    rt.close()
+
+
 def test_events_for_other_sessions_are_ignored(fake):
     rec = Recorder(); rt = OpencodeRuntime(ChatConfig(), base_url="http://127.0.0.1:1")
     st = TurnState(session_id="ses_mine")

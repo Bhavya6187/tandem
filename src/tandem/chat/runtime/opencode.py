@@ -67,6 +67,7 @@ class OpencodeRuntime:
         self._stderr: deque[str] = deque(maxlen=20)
         self._events: queue.Queue = queue.Queue()
         self._sse_started = False
+        self._sse_token = 0                      # which reader owns the registration
         self._sse_ready = threading.Event()      # /event is subscribed, events cannot be missed
         self._turn_active = threading.Event()
         self._session_id: str | None = None
@@ -140,40 +141,58 @@ class OpencodeRuntime:
                 return
             self._sse_started = True
             self._sse_ready.clear()
-            base = self.base_url
-        threading.Thread(target=self._sse_reader, args=(base,),
+            self._sse_token += 1
+            base, token = self.base_url, self._sse_token
+        threading.Thread(target=self._sse_reader, args=(base, token),
                          name="tandem-chat-opencode-sse", daemon=True).start()
 
-    def _sse_reader(self, base: str) -> None:
+    def _unregister(self, token: int) -> None:
+        """Caller holds the lock. Hand the registration back unless a newer
+        reader already took it, so the next turn opens its own stream."""
+        if self._sse_token == token:
+            self._sse_started = False
+            self._sse_ready.clear()
+
+    def _sse_reader(self, base: str, token: int) -> None:
         u = urlparse(base)
-        while True:
-            conn = None
-            try:
-                conn = http.client.HTTPConnection(u.hostname, u.port, timeout=None)
-                conn.request("GET", "/event")
-                resp = conn.getresponse()
-                self._sse_ready.set()       # the subscriber is registered before the headers
-                for raw in resp:
-                    line = raw.decode(errors="replace").rstrip("\n")
-                    if line.startswith("data:"):
+        try:
+            while True:
+                conn = None
+                try:
+                    conn = http.client.HTTPConnection(u.hostname, u.port, timeout=None)
+                    conn.request("GET", "/event")
+                    resp = conn.getresponse()
+                    self._sse_ready.set()   # the subscriber is registered before the headers
+                    for raw in resp:
+                        line = raw.decode(errors="replace").rstrip("\n")
+                        if line.startswith("data:"):
+                            try:
+                                self._events.put(json.loads(line[5:].strip()))
+                            except ValueError:
+                                continue
+                except Exception:
+                    # a server restarting or gone (OSError), a chunked body cut
+                    # mid-stream (http.client's IncompleteRead): either way this
+                    # stream is over and the reconnect is ruled on below
+                    pass
+                finally:
+                    self._sse_ready.clear()     # nothing is subscribed until the reconnect
+                    if conn is not None:
                         try:
-                            self._events.put(json.loads(line[5:].strip()))
-                        except ValueError:
-                            continue
-            except OSError:
-                pass                        # server restarting or gone: ruled on below
-            finally:
-                if conn is not None:
-                    conn.close()
-            with self._lock:
-                # a stream that ended is worth reconnecting only while a turn is
-                # still listening to it; idle, this thread ends and the next
-                # turn's _start_sse opens a fresh one
-                if not (self._turn_active.is_set() and self.base_url == base):
-                    self._sse_started = False
-                    self._sse_ready.clear()
-                    return
-            time.sleep(0.5)
+                            conn.close()
+                        except Exception:
+                            pass
+                with self._lock:
+                    # a stream that ended is worth reconnecting only while a turn
+                    # is still listening to it; idle, this thread hands the
+                    # registration back and ends
+                    if not (self._turn_active.is_set() and self.base_url == base):
+                        self._unregister(token)
+                        return
+                time.sleep(0.5)
+        finally:
+            with self._lock:        # no reader may die still holding the registration
+                self._unregister(token)
 
     # -- replies ---------------------------------------------------------------
 
@@ -255,6 +274,17 @@ class OpencodeRuntime:
             st.failed = str(err.get("message") or err)
             emit(Failure(st.failed))
 
+    def _handle(self, ev, st: TurnState, emit: Callable[[LiveEvent], None],
+                answers: Answers) -> None:
+        """One streamed event. A line tandem cannot read — a non-object
+        `properties`, a pattern that is not a string, a release that reshapes a
+        field — costs the window that line, never the turn."""
+        try:
+            self.handle_event(ev, st, emit, answers)
+        except Exception as exc:
+            emit(Failure(f"opencode event tandem cannot handle: "
+                         f"{type(exc).__name__}: {first_line(str(exc))}"))
+
     # -- turn ------------------------------------------------------------------
 
     def run_turn(self, session, native_id: str | None, prompt: str, model: str,
@@ -300,13 +330,14 @@ class OpencodeRuntime:
                     ev = self._events.get(timeout=0.25)
                 except queue.Empty:
                     continue
-                self.handle_event(ev, st, emit, answers)
+                self._handle(ev, st, emit, answers)
             deadline = time.monotonic() + 0.3     # trailing events still in flight on the SSE thread
             while time.monotonic() < deadline:
                 try:
-                    self.handle_event(self._events.get(timeout=0.05), st, emit, answers)
+                    ev = self._events.get(timeout=0.05)
                 except queue.Empty:
                     continue
+                self._handle(ev, st, emit, answers)
         finally:
             self._turn_active.clear()
         usage = ""
