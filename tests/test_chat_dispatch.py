@@ -151,6 +151,45 @@ def test_prompts_queue_while_busy(setup):
     assert d.default == "codex"
 
 
+def test_pump_from_inside_the_idle_emit_starts_the_queued_turn(env_factory):
+    """The window pumps on Idle, and Idle is emitted from the worker thread
+    before it returns. Even at its most synchronous — pump() called straight
+    out of the emit callback — the queue must move, so `busy` cannot be the
+    worker's liveness."""
+    env = env_factory(active="claude")
+    events = []
+    gate = threading.Event()
+    rts = {"claude": FakeRuntime("claude", env, block=gate),
+           "codex": FakeRuntime("codex", env)}
+    holder = {}
+
+    def emit(event):
+        events.append(event)
+        if isinstance(event, Idle):
+            holder["dispatcher"].pump()
+
+    d = Dispatcher(env.store, env.session, rts, emit, Answers())
+    holder["dispatcher"] = d
+    try:
+        assert d.submit("first") == ""
+        assert d.submit("/codex second") == "queued → codex"
+        gate.set()
+        wait_idle(events, 2)                       # no pump() from the test
+    finally:
+        d.close()
+    assert rts["claude"].calls == [(env.session.native_id("claude"), "first", "")]
+    assert rts["codex"].calls == [(env.session.native_id("codex"), "second", "")]
+    assert [e.harness for e in events if isinstance(e, TurnStarted)] == ["claude", "codex"]
+    assert not d.busy and not d.queue
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and any(
+        t.name == "tandem-chat-turn" for t in threading.enumerate()
+    ):
+        time.sleep(0.01)
+    assert [t.name for t in threading.enumerate() if t.name == "tandem-chat-turn"] == []
+
+
 def test_route_error_is_a_note_and_runs_nothing(setup):
     env, d, rts, events = setup
     note = d.submit("/opencode do it")

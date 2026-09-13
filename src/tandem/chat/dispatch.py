@@ -43,6 +43,7 @@ class Dispatcher:
         self.queue: deque[Pending] = deque()
         self._thread: threading.Thread | None = None
         self._current: str | None = None
+        self._running = False
 
     @property
     def default(self) -> str:
@@ -50,7 +51,10 @@ class Dispatcher:
 
     @property
     def busy(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        # an explicit flag, not the worker's liveness: the turn clears it
+        # before emitting Idle, so a pump() driven by that Idle always sees
+        # the dispatcher free and starts the next queued turn
+        return self._running
 
     def pin(self, harness: str) -> str:
         return self.store.get_pin(self.session.tandem_id, harness)
@@ -122,6 +126,7 @@ class Dispatcher:
 
     def _start(self, item: Pending) -> None:
         self._current = item.harness
+        self._running = True
         self._thread = threading.Thread(target=self._run, args=(item,),
                                         name="tandem-chat-turn", daemon=True)
         self._thread.start()
@@ -158,5 +163,10 @@ class Dispatcher:
         except Exception as exc:                       # a runtime bug must not kill the window
             self.emit(Failure(f"{harness}: {type(exc).__name__}: {exc}"))
         finally:
+            # free before the announcement: a window that pumps straight out
+            # of this Idle — even synchronously, on this thread — must find
+            # the dispatcher idle, or the queued turn stalls until the next
+            # submit and then runs out of order
             self._current = None
+            self._running = False
             self.emit(Idle())
