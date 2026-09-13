@@ -651,3 +651,13 @@ def test_bar_line_armed_state_ignores_limits():
 def test_bar_paint_carries_limits():
     bar = StatusBar(rows=40, cols=60, active="claude", others=["codex"])
     assert "7d 12%".encode() in bar.paint(armed=False, limits={"codex": "7d 12%"})
+
+
+def test_status_bar_hint_replaces_the_flip_trailer():
+    from tandem.frame import StatusBar
+
+    bar = StatusBar(rows=24, cols=80, active="codex", others=["claude"], hint="/claude routes")
+    text = bar.line(False)
+    assert text.rstrip().endswith("/claude routes")
+    assert "flips" not in text
+    assert StatusBar(rows=24, cols=80, active="codex", others=[]).line(False).rstrip().endswith("^] flips")

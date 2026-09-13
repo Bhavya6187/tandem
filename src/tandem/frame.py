@@ -226,7 +226,7 @@ class StatusBar:
     normal-buffer scrolling above the bar."""
 
     def __init__(self, rows: int, cols: int, active: str, others: list[str],
-                 key_label: str = "^]"):
+                 key_label: str = "^]", hint: str | None = None):
         self.rows = rows
         self.cols = cols
         self.active = active
@@ -234,8 +234,10 @@ class StatusBar:
         # The bar is the only place the keybind is advertised, so it has to
         # name the key actually bound — `[frame] flip_key` rebinds it, and a
         # bar still saying ^] would send the user pressing a key that goes
-        # straight through to the harness.
+        # straight through to the harness. The chat window has no flip key
+        # and passes its own trailer as `hint`.
         self.key_label = key_label
+        self.hint = hint
 
     def resize(self, rows: int, cols: int) -> None:
         self.rows = rows
@@ -265,7 +267,8 @@ class StatusBar:
                 return f"{name} {glyph}" + (f" {' · '.join(bits)}" if bits else "")
             slots = [slot(self.active, "●", stats)]
             slots += [slot(o, "○", []) for o in self.others]
-            return f" {' │ '.join(slots)}   {self.key_label} flips"
+            trailer = self.hint if self.hint is not None else f"{self.key_label} flips"
+            return f" {' │ '.join(slots)}   {trailer}"
 
         # Elision order when the row is too narrow: the ↑↓ totals first, the
         # rate limits second, the ctx figure third — the numbers that decide a
