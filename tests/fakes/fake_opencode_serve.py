@@ -1,4 +1,6 @@
-"""`opencode serve --port N --hostname H` stand-in: serves FakeOpencode on the given port until killed."""
+"""`opencode serve --port N --hostname H` stand-in: serves FakeOpencode on the
+given port until killed. With $FAKE_OPENCODE_UNHEALTHY=1 it binds and answers
+but never reports healthy — a serve that spawns and hangs."""
 import argparse
 import sys
 import time

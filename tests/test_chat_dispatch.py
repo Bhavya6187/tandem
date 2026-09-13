@@ -4,6 +4,7 @@ bookkeeping wrapped around a streaming runtime."""
 import json
 import threading
 import time
+from collections import deque
 
 import pytest
 
@@ -548,6 +549,80 @@ def test_a_completed_turn_gets_no_closing_note(setup):
     d.submit("hello there")
     wait_idle(events)
     assert not any("the turn on" in t for t in shadow_texts(env.codex_shadow))
+
+
+class TestClose:
+    """`close()` is the window's last act before the state store closes under
+    it: a worker still inside sync_after_turn writes to a closed sqlite
+    connection, and its events post to a wake pipe whose fds have been reused."""
+
+    def _wait_for(self, predicate, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not predicate():
+            time.sleep(0.01)
+        assert predicate()
+
+    def test_close_interrupts_the_turn_and_joins_its_worker(self, env_factory):
+        env = env_factory(active="claude")
+        events = []
+        gate = threading.Event()
+        rts = {"claude": FakeRuntime("claude", env, block=gate),
+               "codex": FakeRuntime("codex", env)}
+        d = Dispatcher(env.store, env.session, rts, events.append, Answers())
+        d.submit("slow")
+        self._wait_for(lambda: rts["claude"].calls != [])
+        started = time.monotonic()
+        d.close()                                   # interrupt releases the gate
+        assert time.monotonic() - started < 9.0
+        assert rts["claude"].interrupts == 1
+        assert d._thread is not None and not d._thread.is_alive()
+
+    def test_a_closed_dispatcher_starts_nothing_more(self, env_factory):
+        env = env_factory(active="claude")
+        events = []
+        rts = {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env)}
+        d = Dispatcher(env.store, env.session, rts, events.append, Answers())
+        d.close()
+        assert d.submit("late") == "closed"
+        d.pump()
+        assert rts["claude"].calls == [] and d.queue == deque()
+
+    def test_close_wakes_a_worker_parked_on_an_approval(self, env_factory):
+        """Quitting with an approval on screen leaves the runtime parked in the
+        answers queue, where an interrupt cannot reach it — close() would then
+        join for its full timeout. It answers deny first, as Esc does."""
+        from tandem.chat.events import ApprovalRequest
+        from tandem.chat.window import WindowAnswers
+
+        env = env_factory(active="claude")
+        answered = []
+
+        class AsksRuntime:
+            harness = "claude"
+
+            def run_turn(self, session, native_id, prompt, model, emit, answers):
+                answered.append(answers.approve(ApprovalRequest("command", "rm -rf ~/")))
+                emit(TurnFinished("interrupted", ""))
+                return TurnOutcome("interrupted")
+
+            def interrupt(self): pass
+
+            def close(self): pass
+
+        events = []
+        rt = AsksRuntime()
+        posted = []
+        d = Dispatcher(env.store, env.session, {"claude": rt, "codex": rt},
+                       events.append, WindowAnswers(posted.append))
+        d.submit("ask me")
+        # the request is on screen: approve() has dropped its stale values and
+        # is waiting on the queue, exactly as it is when the user quits
+        self._wait_for(lambda: posted != [])
+        started = time.monotonic()
+        d.close()
+        assert time.monotonic() - started < 9.0
+        assert answered == ["deny"]
+        assert not d._thread.is_alive()
 
 
 class TestFreshlyPairedSession:

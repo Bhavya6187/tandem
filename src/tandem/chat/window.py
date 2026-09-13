@@ -256,8 +256,13 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
     rows, cols = _winsize(stdin_fd)
     events: queue.Queue = queue.Queue()
     wake_r, wake_w = os.pipe()
+    closing = False
 
     def post(ev: LiveEvent) -> None:
+        # nothing is painted after the loop ends, and the wake fds are closed
+        # (and reused by whatever opens next) once close() returns
+        if closing:
+            return
         events.put(ev)
         try:
             os.write(wake_w, b"E")
@@ -319,7 +324,8 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
             if not ready:
                 win.paint()                              # the bar's rate-limit figures refresh on their own clock
     finally:
-        dispatcher.close()
+        closing = True                               # post() is a no-op from here
+        dispatcher.close()                           # returns with the worker joined
         if poller is not None:
             poller.stop()
         screen.leave()

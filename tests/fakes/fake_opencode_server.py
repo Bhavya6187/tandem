@@ -33,6 +33,9 @@ class FakeOpencode:
         self.aborted = threading.Event()
         self.dropped = threading.Event()       # the sse_drop stream was cut
         self.drop_once = self.scenario == "sse_drop"
+        # $FAKE_OPENCODE_UNHEALTHY=1: the port binds and answers, but the
+        # readiness probe never says yes — a serve that spawns and hangs
+        self.unhealthy = os.environ.get("FAKE_OPENCODE_UNHEALTHY") == "1"
         self._reply = threading.Event()
         self._answered = threading.Event()
         fake = self
@@ -48,6 +51,8 @@ class FakeOpencode:
 
             def do_GET(self):
                 if self.path == "/global/health":
+                    if fake.unhealthy:
+                        return self._json(503, {"healthy": False})
                     return self._json(200, {"healthy": True, "version": "fake"})
                 if self.path == "/event":
                     q: queue.Queue = queue.Queue(); fake.clients.append(q)

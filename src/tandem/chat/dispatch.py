@@ -61,6 +61,7 @@ class Dispatcher:
         self._thread: threading.Thread | None = None
         self._current: str | None = None
         self._running = False
+        self._closed = False
 
     @property
     def default(self) -> str:
@@ -99,6 +100,8 @@ class Dispatcher:
                 return f"default → {harness}" + (f" · {model}" if model else "")
         item = Pending(harness, self.pin(harness), prompt)
         with self._lock:
+            if self._closed:
+                return "closed"
             # a waiting queue means a pump is still owed: jumping it would
             # run the prompts out of the order they were typed
             if self._running or self.queue:
@@ -109,7 +112,7 @@ class Dispatcher:
 
     def pump(self) -> None:
         with self._lock:
-            if not self._running and self.queue:
+            if not self._closed and not self._running and self.queue:
                 self._start(self.queue.popleft())
 
     def interrupt(self) -> None:
@@ -118,13 +121,34 @@ class Dispatcher:
             self.runtimes[current].interrupt()
 
     def close(self) -> None:
+        """Stop taking work, end the running turn, and do not return until its
+        worker is gone. The window closes the state store and the wake pipe
+        the moment this returns: a worker still inside sync_after_turn would
+        write to a closed sqlite connection, and its events would post to
+        reused fds. Never holds the lock across the join — the worker's own
+        finally takes it."""
         with self._lock:
+            self._closed = True
             self.queue.clear()
+            thread = self._thread
+        self.interrupt()
+        # A runtime parked on an unanswered approval is asleep in the answers
+        # queue, where interrupt cannot reach it; the window's Ctrl-C ladder
+        # denies first for the same reason. Nothing will ask again, so a
+        # value left behind answers nobody.
+        resolve = getattr(self.answers, "resolve", None)
+        if resolve is not None:
+            try:
+                resolve("deny")
+            except Exception:
+                pass
         for rt in self.runtimes.values():
             try:
                 rt.close()
             except Exception:
                 pass
+        if thread is not None:
+            thread.join(timeout=10.0)
 
     # -- the turn ------------------------------------------------------------
 

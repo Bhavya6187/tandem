@@ -82,7 +82,20 @@ class OpencodeRuntime:
         except Exception:
             return False
 
-    def ensure_server(self, cwd: str) -> str:
+    def _forget(self, proc: subprocess.Popen) -> None:
+        """A server that never answered must not be remembered: left alive
+        with base_url set, every later ensure_server short-circuits on it and
+        each opencode turn costs another health poll plus a failed POST for
+        the life of the window. Dropped here, the next turn spawns a fresh
+        one — restarted once, then reported, as the spec says."""
+        terminate(proc)
+        with self._lock:
+            if self._proc is proc:
+                self._proc = None
+                self.base_url = None
+                self._sse_started = False
+
+    def ensure_server(self, cwd: str, health_timeout: float = 10.0) -> str:
         if self._injected:
             return self.base_url
         with self._lock:
@@ -112,14 +125,17 @@ class OpencodeRuntime:
 
         self._drain = threading.Thread(target=drain, name="tandem-chat-opencode-stderr", daemon=True)
         self._drain.start()
-        deadline = time.monotonic() + 10.0
+        deadline = time.monotonic() + health_timeout
         while time.monotonic() < deadline:
             if proc.poll() is not None:
+                self._forget(proc)
                 raise RuntimeError("opencode serve exited: " + "\n".join(self._stderr))
             if self._healthy():
                 return self.base_url
             time.sleep(0.1)
-        raise RuntimeError("opencode serve did not become healthy within 10s")
+        self._forget(proc)
+        raise RuntimeError(
+            f"opencode serve did not become healthy within {health_timeout:g}s")
 
     def _http(self, method: str, path: str, body=None, timeout: float = 600.0):
         u = urlparse(self.base_url)

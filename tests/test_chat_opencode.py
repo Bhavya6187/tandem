@@ -180,6 +180,29 @@ def test_ensure_server_spawns_and_polls_health(tmp_path):
     assert rt._proc is None or rt._proc.poll() is not None
 
 
+def test_a_server_that_never_becomes_healthy_is_killed_and_retried(tmp_path, monkeypatch):
+    """Left alive with base_url set, every later ensure_server short-circuits
+    on it: each opencode turn would cost another 10 s poll plus a failed POST
+    for the life of the window. The spec's rule is one restart, then reported."""
+    from tandem.chat.runtime import opencode as oc
+
+    killed = []
+    real_terminate = oc.terminate
+    monkeypatch.setattr(oc, "terminate",
+                        lambda proc, **kw: (killed.append(proc), real_terminate(proc, **kw))[1])
+    monkeypatch.setenv("FAKE_OPENCODE_UNHEALTHY", "1")
+    rt = OpencodeRuntime(ChatConfig(), binary=[sys.executable, str(FAKE_SERVE)])
+    with pytest.raises(RuntimeError, match="did not become healthy"):
+        rt.ensure_server(str(tmp_path), health_timeout=1.0)
+    assert rt._proc is None and rt.base_url is None
+    assert killed and killed[0].poll() is not None          # the child is gone, not orphaned
+
+    monkeypatch.delenv("FAKE_OPENCODE_UNHEALTHY")
+    base = rt.ensure_server(str(tmp_path))                  # the next turn tries again
+    assert base and rt._proc is not None and rt._proc.poll() is None
+    rt.close()
+
+
 def test_factory_builds_one_runtime_per_participant():
     from tandem.chat.runtime.factory import make_runtimes
     session = SimpleNamespace(participants=["claude", "codex", "opencode"], cwd="/p")
