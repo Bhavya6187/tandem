@@ -184,7 +184,7 @@ class Composer:
                     return
             return
         if (self.mode == "question" and self.pending is not None and self.pending.options
-                and not self.buf and text.strip().isdigit()):
+                and not self.buf and text.strip().isdecimal()):
             n = int(text.strip())
             if 1 <= n <= len(self.pending.options):
                 actions.append(Answer(self.pending.options[n - 1]))

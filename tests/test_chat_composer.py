@@ -113,3 +113,11 @@ def test_question_mode_digit_and_free_text():
     assert feed(c, "9") == [] and c.text == "9"    # no option 9: it is text
     feed(c, "x")
     assert feed(c, "\r") == [Answer("9x")]
+
+
+def test_question_mode_non_decimal_digit_is_text():
+    c = Composer()
+    c.begin_question(QuestionRequest("Which?", ("red", "blue")))
+    assert feed(c, "²") == [] and c.text == "²"    # a "digit" int() cannot read
+    c.begin_question(QuestionRequest("Which?", ("red", "blue")))
+    assert feed(c, "2") == [Answer("blue")]        # a real one still picks
