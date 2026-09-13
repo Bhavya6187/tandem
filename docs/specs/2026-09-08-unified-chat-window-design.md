@@ -51,7 +51,9 @@ Routed turns must not pay a native-TUI boot or a pty handover.
   tandem's declared dependencies stay `click`, `pydantic`, `watchdog`,
   `pexpect`. The SDK source (0.2.152 at spike time) is the reference spec
   for the claude wire protocol; codex is JSON-RPC over stdio and opencode
-  is HTTP + SSE, both `stdlib`.
+  is HTTP + SSE, both `stdlib`. A dev-only code generator produces the
+  codex protocol models from the open-source schema (see Reference
+  sources); it never ships in the wheel.
 - **Raw ANSI renderer on the main screen**, same discipline as the frame:
   a scroll region above a fixed bottom block, so native scrollback and the
   mouse wheel keep working and nothing has to emulate a terminal.
@@ -354,6 +356,87 @@ claude_setting_sources = ["user", "project", "local"]
   app-server v2 methods, opencode HTTP paths); `tandem doctor` reports
   them. Tested at spike time: claude 2.1.263, codex 0.153.4, opencode
   1.18.20.
+
+## Reference sources and protocol generation
+
+Two of the three harnesses are open source and checked out locally, and the
+third ships its client SDK as source. The chat window's clients, renderer,
+tests, and compat rechecks are written against those sources at the tag
+matching the installed binary, not against observed behavior alone.
+
+### Codex — `~/git/codex` (tags `rust-v<version>`)
+
+The checkout may sit on any branch; a recheck works from the tag that
+matches `codex --version` (`git fetch --tags`, then a worktree at
+`rust-v0.153.4` or whatever is installed).
+
+| what | where |
+|---|---|
+| protocol types (v2) | `codex-rs/app-server-protocol/src/protocol/v2/`, README `codex-rs/app-server/README.md` |
+| checked-in JSON schema (generator input) | `codex-rs/app-server-protocol/schema/json/` — request params live in `ClientRequest.json` definitions, notifications in `ServerNotification.json`, server requests in `ServerRequest.json`, approvals and user-input as standalone `*Params.json` / `*Response.json` |
+| reference clients | `sdk/python/src/openai_codex/client.py` + `_message_router.py` (a synchronous stdio JSON-RPC client in Python — the loop our client mirrors; the package itself is not a dependency, it bundles the codex binary); `codex-rs/app-server-client/` (the in-process client the TUI and `codex exec` share); `codex-rs/app-server-test-client/src/request_user_input.rs` (interactive user-input handling) |
+| rendering conventions | `codex-rs/tui/src/history_cell/{exec,patches,approvals,request_user_input,plans,messages}.rs`, `codex-rs/tui/src/exec_cell/{render,live_output}.rs` with `exec_cell/snapshots/`, `diff_render.rs`, `markdown_render.rs` — the rules tandem's codex rows copy (command summary, output truncation, diff and approval layout) |
+| real protocol sequences | `codex-rs/app-server/tests/suite/v2/` (`initialize.rs`, `command_exec.rs`, `compaction.rs`, …) — the fake app-server in tandem's tests is scripted from these |
+| session format and writer lock | `codex-rs/rollout/src/{recorder,writer_lock}.rs`, `codex-rs/protocol/src/` |
+
+### Opencode — `~/git/opencode` (tags `v<version>`)
+
+The checkout is ahead of the installed 1.18.20; references are read at the
+matching tag.
+
+| what | where |
+|---|---|
+| HTTP API and event stream | `packages/opencode/src/server/` (`server.ts`, `event.ts`, `routes/`); `packages/sdk/openapi.json` is the codegen input and matches the live `GET /doc` |
+| sessions, permissions, questions | `packages/opencode/src/session/`, `packages/opencode/src/permission/`, `packages/opencode/src/question/` (event names and reply shapes) |
+| headless consumer of the same events | `packages/opencode/src/cli/cmd/run/{stream.transport,session-data}.ts` — `opencode run` renders the session event stream without the TUI, the closest analogue to tandem's client |
+| rendering conventions | `packages/tui/src/routes/session/{index,permission}.tsx` and the shared `packages/session-ui/` components |
+
+### Claude — Agent SDK source
+
+Claude Code is closed. The `claude-agent-sdk` package (0.2.152 at spike
+time) is installed into a scratch venv when needed and read, never
+depended on: `_internal/transport/subprocess_cli.py` for the argv and the
+stdio framing, `_internal/query.py` for the control-request handling
+(`can_use_tool`, `interrupt`, hooks) that our client mirrors.
+
+### Generated codex protocol models
+
+`tools/gen_codex_protocol.py` turns the checked-in schema into the pydantic
+models the codex client uses. Tandem already depends on pydantic v2, so
+runtime dependencies stay unchanged; `datamodel-code-generator` is a
+dev-only tool dependency invoked by the script.
+
+- Input: `--codex-src` (default `~/git/codex`) at the tag matching
+  `compat.py`'s tested codex version. The script merges the `definitions`
+  of `ClientRequest.json`, `ServerRequest.json`, `ServerNotification.json`
+  and the standalone approval / user-input files into one schema whose
+  root references only the definitions tandem consumes: initialize,
+  thread start / resume, turn start / interrupt, the text user input, the
+  four server requests and their responses, the notification params for
+  item started / completed, agent-message delta, command-output delta,
+  turn started / completed, token usage, rate limits, and the thread-item
+  variants those carry (user message, agent message, reasoning, command
+  execution, file change, context compaction, MCP tool call). Only
+  reachable models are emitted.
+- Output: `src/tandem/chat/runtime/codex_protocol.py`, committed, with a
+  header recording the codex tag and the schema directory's content hash.
+  Models ignore unknown fields so upstream additions do not break parsing;
+  requests are built with `model_dump(by_alias=True, exclude_none=True)`.
+- Tests: `tests/test_codex_protocol.py` asserts the header's tag equals
+  the tested codex version in `compat.py` and validates a set of
+  live-captured messages (from the spike) against the models. Drift shows
+  up as a failing pin, and the regenerated file's diff is the drift report.
+- Recheck recipe, added to `docs/development.md`: fetch tags, worktree at
+  the new tag, rerun the generator, read the diff alongside
+  `git diff <old>..<new> -- codex-rs/app-server-protocol/schema/json
+  codex-rs/tui/src/history_cell codex-rs/tui/src/exec_cell`, update the
+  client and renderer, rerun the fake-server tests and the live gate, bump
+  the compat ceiling.
+
+Opencode's types are few (message parts, permission, question, the
+session-status events) and are hand-written against `openapi.json` at the
+matching tag; running the same generator over that file is a possible
+later step, not part of v1.
 
 ## Follow-ups (not in this spec)
 
