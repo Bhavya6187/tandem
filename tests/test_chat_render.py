@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from tandem.chat.events import (ApprovalRequest, Failure, QuestionRequest, TextDelta, ThinkingDelta,
@@ -57,7 +59,7 @@ def test_print_tracks_the_column_and_returns_to_the_region_after_the_bottom_pain
 def test_exactly_full_line_breaks_before_the_next_chunk(screen):
     s, out = screen
     s.enter(); s.print("x" * 40)
-    assert s._col == 0 and out.text().endswith("x" * 40 + "\n")
+    assert s._col == 0 and out.text().endswith("x" * 40 + "\r\n")
 
 
 def test_turn_and_tool_rows(screen):
@@ -71,12 +73,68 @@ def test_turn_and_tool_rows(screen):
     s.tool_finished(ToolFinished("c1", True, "exit 0"))
     s.turn_finished(TurnFinished("completed", "1000↑ 200↓"))
     t = out.text()
-    assert "you → codex · gpt-5.5  review it\n" in t
-    assert "codex\nLooks fine." in t
-    assert "  ▸ exec pytest -q\n    l1\n    l2\n" in t
+    assert "you → codex · gpt-5.5  review it\r\n" in t
+    assert "codex\r\nLooks fine." in t
+    assert "  ▸ exec pytest -q\r\n    l1\r\n    l2\r\n" in t
     assert "l3" not in t
-    assert "    … +2 lines\n    ok · exit 0\n" in t
-    assert "\n  completed · 1000↑ 200↓\n" in t
+    assert "    … +2 lines\r\n    ok · exit 0\r\n" in t
+    assert "\r\n  completed · 1000↑ 200↓\r\n" in t
+    assert not re.search(r"(?<!\\r)\\n", t)   # raw tty: never a bare LF
+
+
+def test_failed_tool_flushes_the_held_output_past_the_cap(screen):
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.tool_started(ToolStarted("c1", "exec", "pytest -q"))
+    s.tool_output(ToolOutput("c1", "l1\nl2\nl3\nl4\nl5\n"))
+    s.tool_finished(ToolFinished("c1", False, "exit 1"))
+    t = out.text()
+    assert "    l1\r\n    l2\r\n    l3\r\n    l4\r\n    l5\r\n    error · exit 1\r\n" in t
+    assert "lines" not in t
+
+
+def test_successful_tool_only_counts_what_it_dropped(screen):
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.tool_started(ToolStarted("c1", "exec", "pytest -q"))
+    s.tool_output(ToolOutput("c1", "l1\nl2\nl3\nl4\nl5\n"))
+    s.tool_finished(ToolFinished("c1", True, "exit 0"))
+    t = out.text()
+    assert "    l1\r\n    l2\r\n    … +3 lines\r\n    ok · exit 0\r\n" in t
+    assert "l3" not in t
+
+
+def test_a_failed_tool_counts_output_beyond_the_held_buffer(screen):
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.tool_started(ToolStarted("c1", "exec", "pytest -q"))
+    s.tool_output(ToolOutput("c1", "\n".join(f"l{i}" for i in range(1, 210))))
+    s.tool_finished(ToolFinished("c1", False, "exit 1"))
+    t = out.text()
+    assert "    l202\r\n" in t          # the last line the buffer held
+    assert "l203" not in t
+    assert "    … +7 lines\r\n    error · exit 1\r\n" in t
+
+
+def test_col_counts_cells_not_escape_bytes(screen):
+    s, out = screen
+    s.enter()
+    s.print("\x1b[2mhmm\x1b[0m")          # 3 cells, not 11 characters
+    assert s._col == 3
+    s.print("漢字")                        # two cells apiece
+    assert s._col == 7
+    s.paint_bottom("bar", "> x", 3, focus_composer=True)
+    out.text(clear=True)
+    s.print("!")
+    assert out.text().startswith("\x1b[21;8H!")
+
+
+def test_styled_row_does_not_break_early():
+    out = Out()
+    s = Screen(out, 24, 40, ChatConfig(), color=True)
+    s.enter()
+    s.print(s._dim("x" * 39))
+    assert s._col == 39
 
 
 def test_speaker_label_is_printed_once_per_turn(screen):
@@ -85,7 +143,7 @@ def test_speaker_label_is_printed_once_per_turn(screen):
     s.turn_started(TurnStarted("claude", "", "hi"))
     s.text_delta(TextDelta("a")); s.text_delta(TextDelta("b"))
     s.tool_started(ToolStarted("c", "Bash", "ls"))
-    assert out.text().count("\nclaude\n") == 1
+    assert out.text().count("\r\nclaude\r\n") == 1
 
 
 def test_thinking_hidden_unless_configured():
@@ -104,9 +162,9 @@ def test_prompts_and_failures(screen):
     s.question(QuestionRequest("Which color?", ("red", "blue")))
     s.failure(Failure("codex thread is open in another process"))
     t = out.text()
-    assert "  ▸ Allow command: rm -rf build   [y]es [a]lways [n]o\n" in t
-    assert "  ? Which color?\n    1. red\n    2. blue\n" in t
-    assert "error: codex thread is open in another process\n" in t
+    assert "  ▸ Allow command: rm -rf build   [y]es [a]lways [n]o\r\n" in t
+    assert "  ? Which color?\r\n    1. red\r\n    2. blue\r\n" in t
+    assert "error: codex thread is open in another process\r\n" in t
 
 
 def test_bottom_block_rows_and_cursor(screen):
@@ -149,5 +207,5 @@ def test_history_paints_normalized_events(screen):
         ToolResult(source="claude", call_id="1", output="12 passed\nmore"),
     ], source="claude")
     t = out.text()
-    assert "you → claude  fix it\n" in t and "claude\nDone.\n" in t
-    assert "  ▸ Bash pytest\n    12 passed\n" in t
+    assert "you → claude  fix it\r\n" in t and "claude\r\nDone.\r\n" in t
+    assert "  ▸ Bash pytest\r\n    12 passed\r\n" in t

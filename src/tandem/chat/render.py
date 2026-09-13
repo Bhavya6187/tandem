@@ -14,7 +14,9 @@ tandem prints; model text is whatever it is and the terminal wraps it)."""
 
 from __future__ import annotations
 
+import re
 from typing import Callable
+from unicodedata import east_asian_width
 
 from ..events import AssistantMessage, ToolCall, ToolResult, UserMessage
 from .events import (ApprovalRequest, Failure, QuestionRequest, TextDelta, ThinkingDelta,
@@ -22,6 +24,16 @@ from .events import (ApprovalRequest, Failure, QuestionRequest, TextDelta, Think
 from .runtime import first_line, summarize_args
 
 _CSI = "\x1b["
+_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+# Every styled painter hands `print` a pre-wrapped string, so the column has
+# to be counted in cells, not characters: an SGR sequence advances the cursor
+# by nothing, and a W/F glyph (CJK, most emoji) by two.
+_ERROR_BUFFER_LINES = 200
+
+
+def _cells(text: str) -> int:
+    return sum(2 if east_asian_width(ch) in ("W", "F") else 1
+               for ch in _CSI_RE.sub("", text))
 
 
 class Screen:
@@ -37,6 +49,7 @@ class Screen:
         self._speaker_shown = False
         self._turn_harness = ""
         self._tool_lines: dict[str, int] = {}
+        self._tool_held: dict[str, list[str]] = {}
         self._tool_dropped: dict[str, int] = {}
 
     @property
@@ -56,7 +69,7 @@ class Screen:
         self._col, self._focus = 0, "region"
 
     def leave(self) -> None:
-        self._w(f"{_CSI}r{_CSI}?2004l{_CSI}{self.rows};1H\n")
+        self._w(f"{_CSI}r{_CSI}?2004l{_CSI}{self.rows};1H\r\n")
 
     def resize(self, rows: int, cols: int) -> None:
         self.rows, self.cols = max(4, rows), max(10, cols)
@@ -70,22 +83,25 @@ class Screen:
             self._focus = "region"
 
     def print(self, text: str) -> None:
-        """Append to the region, tracking the bottom-row column."""
+        """Append to the region, tracking the bottom-row column.
+
+        Every newline is CRLF: the window runs the tty raw, so OPOST/ONLCR is
+        off and a bare LF would drop a row without returning the carriage."""
         if not text:
             return
         self._goto_region()
         segments = text.split("\n")
         for i, seg in enumerate(segments):
             if i:
-                self._w("\n")
+                self._w("\r\n")
                 self._col = 0
             if seg:
                 self._w(seg)
-                self._col += len(seg)
+                self._col += _cells(seg)
                 if self._col >= self.cols:
                     # the terminal's pending-wrap state does not survive a
                     # cursor move, so end the line here rather than guess
-                    self._w("\n")
+                    self._w("\r\n")
                     self._col = 0
 
     def line(self, text: str = "") -> None:
@@ -109,7 +125,7 @@ class Screen:
     def turn_started(self, ev: TurnStarted) -> None:
         self._turn_harness = ev.harness
         self._speaker_shown = False
-        self._tool_lines.clear(); self._tool_dropped.clear()
+        self._tool_lines.clear(); self._tool_held.clear(); self._tool_dropped.clear()
         label = f"you → {ev.harness}" + (f" · {ev.model}" if ev.model else "")
         self.line()
         if "\n" in ev.prompt:
@@ -130,23 +146,38 @@ class Screen:
     def tool_started(self, ev: ToolStarted) -> None:
         self._ensure_speaker()
         self._tool_lines[ev.call_id] = 0
+        self._tool_held[ev.call_id] = []
         self._tool_dropped[ev.call_id] = 0
         self.line(self._dim(f"  ▸ {ev.tool} {ev.summary}".rstrip()))
 
     def tool_output(self, ev: ToolOutput) -> None:
+        """Print the head of the output up to the cap and hold the rest: a
+        call that turns out to have failed gets its tail flushed by
+        tool_finished, where the lines the user actually needs are. The hold
+        is bounded — past _ERROR_BUFFER_LINES the overflow is only counted."""
         cap = self.cfg.tool_output_lines
         for raw in ev.text.splitlines():
             if self._tool_lines.get(ev.call_id, 0) < cap:
                 self._tool_lines[ev.call_id] = self._tool_lines.get(ev.call_id, 0) + 1
                 self.line(self._dim("    " + raw))
             else:
-                self._tool_dropped[ev.call_id] = self._tool_dropped.get(ev.call_id, 0) + 1
+                held = self._tool_held.setdefault(ev.call_id, [])
+                if len(held) < _ERROR_BUFFER_LINES:
+                    held.append(raw)
+                else:
+                    self._tool_dropped[ev.call_id] = self._tool_dropped.get(ev.call_id, 0) + 1
 
     def tool_finished(self, ev: ToolFinished) -> None:
-        dropped = self._tool_dropped.pop(ev.call_id, 0)
+        held = self._tool_held.pop(ev.call_id, [])
+        beyond = self._tool_dropped.pop(ev.call_id, 0)
         self._tool_lines.pop(ev.call_id, None)
-        if dropped:
-            self.line(self._dim(f"    … +{dropped} lines"))
+        if not ev.ok:
+            for raw in held:
+                self.line(self._dim("    " + raw))
+            held = []
+        hidden = len(held) + beyond
+        if hidden:
+            self.line(self._dim(f"    … +{hidden} lines"))
         status = "ok" if ev.ok else "error"
         self.line(self._dim(f"    {status}" + (f" · {ev.summary}" if ev.summary else "")))
 
