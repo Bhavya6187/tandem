@@ -527,3 +527,24 @@ def test_shadow_append_readonly_raises_not_busy(mini_db):
         pytest.fail("readonly error was mislabelled ShadowBusy")
     finally:
         os.chmod(mini_db, 0o644)
+
+
+def test_a_lone_synced_user_message_wedges_until_the_turn_is_closed(mini_db):
+    """The failed-turn shape, in the store that actually rejects it: sync
+    landed the prompt and no reply ever followed. Until the turn is closed
+    the session fails its dry-resume check outright — which is what wedged
+    every later turn in the pair."""
+    from tandem.events import UserMessage
+
+    sid = _insert_session(mini_db)
+    adapter = opencode.OpencodeAdapter()
+    ctx = _render_ctx(sid)
+    adapter.shadow_append(mini_db, adapter.render_events(
+        [UserMessage(source="user", turn_index=1, text="[via codex] break it")],
+        ctx))
+    assert any("completed" in p for p in adapter.validate_transcript(mini_db, sid))
+
+    adapter.shadow_append(mini_db, adapter.render_placeholder(
+        "[tandem] the turn on codex ended: failed: boom", ctx))
+    assert adapter.validate_transcript(mini_db, sid) == []
+    assert adapter.session_status(sid) == "waiting"

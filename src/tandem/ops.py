@@ -45,14 +45,17 @@ def source_transcript(session: PairedSession, source: str) -> Path | None:
 
 def drain_source(
     store: StateStore, session: PairedSession, source: str,
-    *, flush_dangling: bool = False,
+    *, flush_dangling: bool = False, close_note: str | None = None,
 ) -> int:
     """Translate any unsynced tail of `source` into EVERY other participant.
     One engine+loop per (source, target) direction; per-direction cursors
     keep progress independent. Returns total lines consumed across targets.
     With flush_dangling=True, close any still-unpaired tool calls with
     placeholder results afterwards (required when the source is being handed
-    off: both replay APIs reject a dangling call)."""
+    off: both replay APIs reject a dangling call). With `close_note` set, a
+    direction whose last synced event is still the user's prompt gets that
+    note appended too — a turn that ended in failure recorded the prompt and
+    no reply, and a shadow left on a user message is not resumable."""
     transcript = source_transcript(session, source)
     if transcript is None:
         return 0
@@ -69,6 +72,8 @@ def drain_source(
             raise SyncSetupError("; ".join(loop.errors))
         if flush_dangling:
             engine.flush_dangling(loop.ctx, loop.cursor)
+        if close_note:
+            engine.close_dangling_turn(loop.ctx, loop.cursor, close_note)
     return total
 
 
@@ -228,13 +233,20 @@ def adopt_native_id(store: StateStore, session: PairedSession, harness: str,
     return session
 
 
-def sync_after_turn(store: StateStore, session: PairedSession, target: str) -> None:
+def sync_after_turn(store: StateStore, session: PairedSession, target: str,
+                    *, close_note: str | None = None) -> None:
     """After a turn on `target`: translate it into every other participant
     with echo suppression (see the module docstring). Each recipient that was
     fully synced before the drain fast-forwards its own outgoing cursors past
     the copy — otherwise its next drain translates them straight back,
     duplicating call ids and text. A recipient with an unsynced tail (a
-    concurrent writer) is left alone so a live turn is never swallowed."""
+    concurrent writer) is left alone so a live turn is never swallowed.
+
+    `close_note` is for a turn that did not complete: the harness recorded
+    the user's prompt and never answered it, so every recipient whose copy
+    ends there gets the note appended as its own placeholder. It rides inside
+    the drain, before the fast-forward above, so the recipients that echo-
+    suppress cover the note too."""
     echo_pre: dict[str, tuple[int | None, dict[str, int]]] = {}
     for side in session.targets_for(target):
         size = _file_size(source_transcript(session, side))
@@ -244,7 +256,8 @@ def sync_after_turn(store: StateStore, session: PairedSession, target: str) -> N
         }
         echo_pre[side] = (size, offsets)
 
-    drain_source(store, session, target, flush_dangling=True)
+    drain_source(store, session, target, flush_dangling=True,
+                 close_note=close_note)
 
     for side, (pre_size, offsets) in echo_pre.items():
         if pre_size is None:

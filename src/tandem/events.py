@@ -98,6 +98,11 @@ class SessionContext(BaseModel):
     harness_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
     source_session_id: str | None = None
     target_session_id: str | None = None
+    # kind of the last normalized event synced in this direction, so a
+    # handoff can tell an answered turn from one left hanging on the user's
+    # prompt. None means "nothing pending" (a fresh direction, or a turn
+    # closed out of band).
+    last_kind: str | None = None
 
     @field_validator("direction")
     @classmethod

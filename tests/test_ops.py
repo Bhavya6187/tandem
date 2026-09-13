@@ -394,3 +394,33 @@ class TestFanOut:
         contents = [json.dumps(e) for e in read_jsonl(env.claude_shadow)]
         assert any("[via codex] hello from codex" in c for c in contents)
         assert any("[via codex] Hi!" in c for c in contents)
+
+
+class TestCloseNote:
+    """`close_note` closes a turn the harness never finished; a turn that
+    ended with a reply is left exactly as it was."""
+
+    def test_close_note_after_a_completed_turn_appends_nothing(self, env_factory):
+        env = env_factory(active="claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
+        write_line(env.claude_shadow, claude_user("all good?"))
+        write_line(env.claude_shadow, claude_assistant([{"type": "text", "text": "yes"}]))
+
+        ops.sync_after_turn(env.store, env.session, "claude",
+                            close_note="[tandem] the turn on claude ended: failed")
+
+        texts = shadow_texts(env.codex_shadow)
+        assert texts[-1] == "[via claude-code] yes"
+        assert not any("ended: failed" in t for t in texts)
+
+    def test_close_note_closes_a_turn_that_never_got_a_reply(self, env_factory):
+        env = env_factory(active="claude")
+        ops.fast_forward_all(env.store, env.session, "claude")
+        write_line(env.claude_shadow, claude_user("all good?"))
+
+        ops.sync_after_turn(env.store, env.session, "claude",
+                            close_note="[tandem] the turn on claude ended: failed")
+
+        texts = shadow_texts(env.codex_shadow)
+        assert texts[-2] == "[via claude-code] all good?"
+        assert texts[-1] == "[tandem] the turn on claude ended: failed"

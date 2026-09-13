@@ -18,10 +18,12 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .. import ops
+from ..constants import TURN_ENDED_NOTE
 from ..harness import get_adapter
 from ..promptroute import RouteError, parse_route
 from ..sync import SyncSetupError
-from .events import Answers, Failure, Idle, LiveEvent, TurnFinished, TurnStarted
+from .events import (Answers, Failure, Idle, LiveEvent, TurnFinished, TurnOutcome,
+                     TurnStarted)
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,15 @@ class Pending:
     harness: str
     model: str
     prompt: str
+
+
+def _close_note(harness: str, outcome: TurnOutcome) -> str | None:
+    """The note that closes an unanswered turn in the other sessions, or None
+    when the turn completed and owes them nothing."""
+    if outcome.status == "completed":
+        return None
+    note = TURN_ENDED_NOTE.format(harness=harness, status=outcome.status)
+    return f"{note}: {outcome.error}" if outcome.error else note
 
 
 class Dispatcher:
@@ -168,7 +179,13 @@ class Dispatcher:
                 self.session = ops.adopt_native_id(self.store, session, harness, outcome.native_id)
             # the target stays the default even after a failure: its file holds the partial turn
             self._set_default(harness)
-            ops.sync_after_turn(self.store, self.session, harness)
+            # A turn that did not complete can have recorded the prompt and no
+            # answer (a model call that 401s does exactly that). Synced
+            # outward as-is it leaves every other session ending on a user
+            # message, which opencode's dry-resume check rejects — wedging
+            # every later turn there. Close it in the shadows as we sync.
+            ops.sync_after_turn(self.store, self.session, harness,
+                                close_note=_close_note(harness, outcome))
             self.store.touch_used(self.session.tandem_id)
             meter = self.meters.get(harness)
             if meter is not None:

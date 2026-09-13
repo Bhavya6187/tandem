@@ -10,22 +10,41 @@ import pytest
 from tandem.chat import dispatch
 from tandem.chat.dispatch import Dispatcher
 from tandem.chat.events import Failure, Idle, TextDelta, TurnFinished, TurnOutcome, TurnStarted
+from tandem.harness import get_adapter
 from tandem.sync import SyncSetupError
 from tandem.util import read_jsonl
 
-from conftest import claude_assistant, claude_user, codex_turn, write_line
+from conftest import claude_assistant, claude_user, codex_turn, shadow_texts, write_line
+
+
+def claude_texts(path):
+    """Plain text of every claude conversation entry, in file order."""
+    out = []
+    for e in read_jsonl(path):
+        content = (e.get("message") or {}).get("content")
+        if isinstance(content, str):
+            out.append(content)
+        elif isinstance(content, list):
+            out += [b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"]
+    return out
 
 
 class FakeRuntime:
     """Emits one delta, appends a native turn to the harness's own file (so
-    sync has something to translate), and returns the scripted outcome."""
+    sync has something to translate), and returns the scripted outcome.
 
-    def __init__(self, harness, env, *, block=None, fresh_id=None):
+    half_turn=True records only the user half and fails the turn — the shape
+    a model call that errors out (a 401, say) leaves in the transcript: the
+    prompt is there, no reply ever follows it."""
+
+    def __init__(self, harness, env, *, block=None, fresh_id=None, half_turn=False):
         self.harness = harness
         self.env = env
         self.calls = []
         self.block = block
         self.fresh_id = fresh_id
+        self.half_turn = half_turn
         self.interrupts = 0
 
     def run_turn(self, session, native_id, prompt, model, emit, answers):
@@ -35,16 +54,21 @@ class FakeRuntime:
         emit(TextDelta(f"{self.harness} says hi"))
         if self.harness == "claude":
             write_line(self.env.claude_shadow, claude_user(prompt, uuid=f"u-{len(self.calls)}"))
-            write_line(
-                self.env.claude_shadow,
-                claude_assistant(
-                    [{"type": "text", "text": f"claude did {prompt}"}],
-                    uuid=f"a-{len(self.calls)}",
-                ),
-            )
+            if not self.half_turn:
+                write_line(
+                    self.env.claude_shadow,
+                    claude_assistant(
+                        [{"type": "text", "text": f"claude did {prompt}"}],
+                        uuid=f"a-{len(self.calls)}",
+                    ),
+                )
         elif self.harness == "codex" and native_id:
-            for obj in codex_turn(prompt, f"codex did {prompt}"):
+            entries = codex_turn(prompt, f"codex did {prompt}")
+            for obj in entries[:2] if self.half_turn else entries:
                 write_line(self.env.codex_shadow, obj)
+        if self.half_turn:
+            emit(TurnFinished("failed", ""))
+            return TurnOutcome("failed", error="boom")
         emit(TurnFinished("completed", "1 turn"))
         return TurnOutcome("completed", native_id=self.fresh_id if native_id is None else None)
 
@@ -249,7 +273,7 @@ def test_a_wedged_drain_before_the_runtime_still_finishes_the_turn(setup, monkey
 def test_a_failure_after_the_runtime_ran_adds_no_second_turn_finished(setup, monkeypatch):
     """The outward sync can fail once the turn itself is over. The runtime has
     already emitted its terminal event; a second one would double-close it."""
-    def boom(store, session, target):
+    def boom(store, session, target, **kw):
         raise SyncSetupError("cursor is wedged")
 
     monkeypatch.setattr(dispatch.ops, "sync_after_turn", boom)
@@ -463,3 +487,64 @@ def test_interrupt_reaches_the_running_runtime(setup):
     d.interrupt()
     wait_idle(events)
     assert rts["claude"].interrupts == 1
+
+
+def test_a_failed_codex_turn_closes_its_user_message_in_the_claude_shadow(env_factory):
+    """A model call that dies mid-turn (a 401) leaves the prompt in the
+    harness's own transcript with no reply. Synced outward as-is it leaves
+    every shadow ending on a user message — which opencode's dry-resume
+    check rejects outright, wedging every later turn in the session."""
+    env = env_factory(active="claude")
+    events = []
+    rts = {"claude": FakeRuntime("claude", env),
+           "codex": FakeRuntime("codex", env, half_turn=True)}
+    d = Dispatcher(env.store, env.session, rts, events.append, Answers())
+    try:
+        assert d.submit("/codex break it") == ""
+        wait_idle(events)
+
+        texts = claude_texts(env.claude_shadow)
+        assert texts[-2] == "[via codex] break it"
+        assert texts[-1] == "[tandem] the turn on codex ended: failed: boom"
+        sid = env.session.native_id("claude")
+        assert get_adapter("claude").validate_transcript(env.claude_shadow, sid) == []
+        # the note went in through the engine, so echo suppression covers it:
+        # claude's outgoing cursor sits past it and it never bounces back
+        cursor = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
+        assert cursor.byte_offset == env.claude_shadow.stat().st_size
+
+        # and the session is not wedged: the next turn's pre-turn validation
+        # passes and it runs
+        rts["codex"].half_turn = False
+        assert d.submit("/codex again") == ""
+        wait_idle(events, 2)
+    finally:
+        d.close()
+    assert rts["codex"].calls[-1][1] == "again"
+    assert [e for e in events if isinstance(e, Failure)] == []
+    assert "[via codex] codex did again" in claude_texts(env.claude_shadow)
+
+
+def test_a_failed_claude_turn_closes_its_user_message_in_the_codex_shadow(env_factory):
+    env = env_factory(active="claude")
+    events = []
+    rts = {"claude": FakeRuntime("claude", env, half_turn=True),
+           "codex": FakeRuntime("codex", env)}
+    d = Dispatcher(env.store, env.session, rts, events.append, Answers())
+    try:
+        assert d.submit("break it") == ""
+        wait_idle(events)
+    finally:
+        d.close()
+    texts = shadow_texts(env.codex_shadow)
+    assert texts[-2] == "[via claude-code] break it"
+    assert texts[-1] == "[tandem] the turn on claude ended: failed: boom"
+    sid = env.session.native_id("codex")
+    assert get_adapter("codex").validate_transcript(env.codex_shadow, sid) == []
+
+
+def test_a_completed_turn_gets_no_closing_note(setup):
+    env, d, rts, events = setup
+    d.submit("hello there")
+    wait_idle(events)
+    assert not any("the turn on" in t for t in shadow_texts(env.codex_shadow))

@@ -214,3 +214,52 @@ def test_shadow_busy_retries_without_advancing(env_factory, monkeypatch):
     assert loop.drain() == 0                       # busy: nothing consumed
     assert loop.drain() >= 1                       # retried clean
     assert any("busy test" in t for t in shadow_texts(env.codex_shadow))
+
+
+class TestCloseDanglingTurn:
+    """A turn whose model call died leaves the prompt synced with nothing
+    after it; the engine closes it with the target's own placeholder."""
+
+    def test_a_lone_user_message_is_closed_with_the_note(self, env_factory):
+        env = env_factory()
+        loop, engine = env.loop()
+        write_line(env.source_file, claude_user("please fix the bug"))
+        loop.drain()
+
+        assert engine.close_dangling_turn(loop.ctx, loop.cursor, "[tandem] it died") == 2
+        texts = shadow_texts(env.codex_shadow)
+        assert texts[-2] == "[via claude-code] please fix the bug"
+        assert texts[-1] == "[tandem] it died"
+
+        cursor = env.store.get_cursor(env.session.tandem_id, "claude", "codex")
+        assert "intent" not in cursor.pending
+        assert cursor.pending["last_kind"] is None
+        # the turn is closed now: a second call appends nothing
+        assert engine.close_dangling_turn(loop.ctx, loop.cursor, "[tandem] again") == 0
+        assert shadow_texts(env.codex_shadow)[-1] == "[tandem] it died"
+
+    def test_an_answered_turn_is_left_alone(self, env_factory):
+        env = env_factory()
+        loop, engine = env.loop()
+        write_line(env.source_file, claude_user("please fix the bug"))
+        write_line(env.source_file, claude_assistant([{"type": "text", "text": "Fixed."}]))
+        loop.drain()
+
+        assert engine.close_dangling_turn(loop.ctx, loop.cursor, "[tandem] it died") == 0
+        assert shadow_texts(env.codex_shadow)[-1] == "[via claude-code] Fixed."
+
+    def test_a_flushed_dangling_call_counts_as_an_answer(self, env_factory):
+        """flush_dangling already closed the turn with a tool result pair —
+        the shadow does not end on a user message, so nothing more is owed."""
+        env = env_factory()
+        loop, engine = env.loop()
+        write_line(env.source_file, claude_user("run the tests"))
+        write_line(
+            env.source_file,
+            claude_assistant([{"type": "tool_use", "id": "c1", "name": "Bash",
+                               "input": {"command": "pytest -q"}}]),
+        )
+        loop.drain()
+        assert engine.flush_dangling(loop.ctx, loop.cursor) > 0
+
+        assert engine.close_dangling_turn(loop.ctx, loop.cursor, "[tandem] it died") == 0
