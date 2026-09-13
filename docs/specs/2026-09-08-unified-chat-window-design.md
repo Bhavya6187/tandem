@@ -393,11 +393,15 @@ matching tag.
 
 ### Claude — Agent SDK source
 
-Claude Code is closed. The `claude-agent-sdk` package (0.2.152 at spike
-time) is installed into a scratch venv when needed and read, never
-depended on: `_internal/transport/subprocess_cli.py` for the argv and the
-stdio framing, `_internal/query.py` for the control-request handling
-(`can_use_tool`, `interrupt`, hooks) that our client mirrors.
+Claude Code is closed. The Agent SDK is open source at
+`github.com/anthropics/claude-agent-sdk-python` (0.2.152 at spike time; the
+wheel on PyPI ships bytecode only, so read the repository at the matching
+tag, never the installed package): `src/claude_agent_sdk/_internal/transport/subprocess_cli.py`
+for the argv and the stdio framing, `_internal/query.py` for the
+control-request handling (`can_use_tool`, `interrupt`, hooks) that our
+client mirrors. Live-captured lines (2026-09-13, claude 2.1.265) in
+`tests/golden/chat/claude_stream.jsonl` are the ground truth the client is
+tested against.
 
 ### Generated codex protocol models
 
@@ -406,11 +410,14 @@ models the codex client uses. Tandem already depends on pydantic v2, so
 runtime dependencies stay unchanged; `datamodel-code-generator` is a
 dev-only tool dependency invoked by the script.
 
-- Input: `--codex-src` (default `~/git/codex`) at the tag matching
-  `compat.py`'s tested codex version. The script merges the `definitions`
-  of `ClientRequest.json`, `ServerRequest.json`, `ServerNotification.json`
-  and the standalone approval / user-input files into one schema whose
-  root references only the definitions tandem consumes: initialize,
+- Input: by default the schema the installed binary dumps
+  (`codex app-server generate-json-schema`), so the models match the codex
+  on the machine exactly; `--schema-dir` points at a checkout's
+  `codex-rs/app-server-protocol/schema/json` instead (with
+  `--codex-version`). The script flattens the namespaced definitions
+  (`#/definitions/v2/Name`), skips the two dotted-stem files, merges every
+  file's definitions and the standalone approval / user-input schemas into
+  one document whose root references only the definitions tandem consumes: initialize,
   thread start / resume, turn start / interrupt, the text user input, the
   four server requests and their responses, the notification params for
   item started / completed, agent-message delta, command-output delta,
@@ -422,10 +429,12 @@ dev-only tool dependency invoked by the script.
   header recording the codex tag and the schema directory's content hash.
   Models ignore unknown fields so upstream additions do not break parsing;
   requests are built with `model_dump(by_alias=True, exclude_none=True)`.
-- Tests: `tests/test_codex_protocol.py` asserts the header's tag equals
-  the tested codex version in `compat.py` and validates a set of
-  live-captured messages (from the spike) against the models. Drift shows
-  up as a failing pin, and the regenerated file's diff is the drift report.
+- Tests: `tests/test_codex_protocol.py` asserts the header's version equals
+  the tested codex version in `compat.py` and validates the live-captured
+  messages in `tests/golden/chat/codex_appserver.jsonl` against the models.
+  Drift shows up as a failing pin, and the regenerated file's diff is the
+  drift report. `tandem doctor` reports the generated version against the
+  pin and the installed binary.
 - Recheck recipe, added to `docs/development.md`: fetch tags, worktree at
   the new tag, rerun the generator, read the diff alongside
   `git diff <old>..<new> -- codex-rs/app-server-protocol/schema/json
