@@ -41,6 +41,12 @@ class Dispatcher:
         self.answers = answers
         self.meters = meters or {}
         self.queue: deque[Pending] = deque()
+        # guards the start-or-queue decision and the flags it sets, nothing
+        # more: submit() runs on the main thread while pump() can run on the
+        # finishing turn's worker thread (the window pumps on Idle), and
+        # without it both can start a turn in the same instant. Never held
+        # across a turn.
+        self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._current: str | None = None
         self._running = False
@@ -81,15 +87,19 @@ class Dispatcher:
                 model = self.pin(harness)
                 return f"default → {harness}" + (f" · {model}" if model else "")
         item = Pending(harness, self.pin(harness), prompt)
-        if self.busy:
-            self.queue.append(item)
-            return f"queued → {harness}"
-        self._start(item)
+        with self._lock:
+            # a waiting queue means a pump is still owed: jumping it would
+            # run the prompts out of the order they were typed
+            if self._running or self.queue:
+                self.queue.append(item)
+                return f"queued → {harness}"
+            self._start(item)
         return ""
 
     def pump(self) -> None:
-        if not self.busy and self.queue:
-            self._start(self.queue.popleft())
+        with self._lock:
+            if not self._running and self.queue:
+                self._start(self.queue.popleft())
 
     def interrupt(self) -> None:
         current = self._current
@@ -97,7 +107,8 @@ class Dispatcher:
             self.runtimes[current].interrupt()
 
     def close(self) -> None:
-        self.queue.clear()
+        with self._lock:
+            self.queue.clear()
         for rt in self.runtimes.values():
             try:
                 rt.close()
@@ -125,6 +136,8 @@ class Dispatcher:
             return [f"validation error: {exc}"]
 
     def _start(self, item: Pending) -> None:
+        """Call with _lock held: the flags and the thread it hands them to
+        must be claimed by one caller only."""
         self._current = item.harness
         self._running = True
         self._thread = threading.Thread(target=self._run, args=(item,),
@@ -133,6 +146,7 @@ class Dispatcher:
 
     def _run(self, item: Pending) -> None:
         harness = item.harness
+        ran = False
         self.emit(TurnStarted(harness, item.model, item.prompt))
         try:
             problems = self._validate(harness)
@@ -149,6 +163,7 @@ class Dispatcher:
             # its thread id is adopted below
             outcome = self.runtimes[harness].run_turn(
                 session, session.native_id(harness), item.prompt, item.model, self.emit, self.answers)
+            ran = True      # from here on the runtime has emitted its own TurnFinished
             if outcome.native_id:
                 self.session = ops.adopt_native_id(self.store, session, harness, outcome.native_id)
             # the target stays the default even after a failure: its file holds the partial turn
@@ -160,13 +175,24 @@ class Dispatcher:
                 meter.poll()
         except SyncSetupError as exc:
             self.emit(Failure(f"sync: {exc}"))
+            self._finish_unrun(ran)
         except Exception as exc:                       # a runtime bug must not kill the window
             self.emit(Failure(f"{harness}: {type(exc).__name__}: {exc}"))
+            self._finish_unrun(ran)
         finally:
             # free before the announcement: a window that pumps straight out
             # of this Idle — even synchronously, on this thread — must find
             # the dispatcher idle, or the queued turn stalls until the next
             # submit and then runs out of order
-            self._current = None
-            self._running = False
+            with self._lock:
+                self._current = None
+                self._running = False
             self.emit(Idle())
+
+    def _finish_unrun(self, ran: bool) -> None:
+        """Every TurnStarted owes the renderer one terminal TurnFinished. The
+        runtime emits its own on every path, so this is only for the failures
+        that happen before it ran (a wedged drain in prepare_turn) — one
+        arriving after would be a second."""
+        if not ran:
+            self.emit(TurnFinished("failed", ""))
