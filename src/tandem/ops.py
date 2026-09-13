@@ -202,6 +202,57 @@ def _create_codex_shadow_late(store: StateStore, session: PairedSession) -> None
     store.set_native_session_id(session.tandem_id, "codex", sid)
 
 
+def prepare_turn(store: StateStore, session: PairedSession, target: str) -> None:
+    """Before a turn on `target`: catch the active side up, then mark the
+    target's whole file as known so only the new turn flows back afterwards.
+    (When target IS the active side there is nothing to fast-forward — its
+    cursor is live.)"""
+    drain_source(store, session, session.active, flush_dangling=True)
+    if (target != session.active and session.native_id(target)
+            and source_transcript(session, target) is not None):
+        fast_forward_all(store, session, target)
+
+
+def adopt_native_id(store: StateStore, session: PairedSession, harness: str,
+                    native_id: str) -> PairedSession:
+    """A harness minted its own session id during a turn (codex on its first
+    run). Record it and start every outgoing cursor of that harness at zero
+    so the whole new file is translated on the next drain."""
+    store.set_native_session_id(session.tandem_id, harness, native_id)
+    session = store.get_session(session.tandem_id) or session
+    for other in session.targets_for(harness):
+        cursor = store.get_cursor(session.tandem_id, harness, other)
+        cursor.byte_offset = 0
+        cursor.line_index = 0
+        store.save_cursor(cursor)
+    return session
+
+
+def sync_after_turn(store: StateStore, session: PairedSession, target: str) -> None:
+    """After a turn on `target`: translate it into every other participant
+    with echo suppression (see the module docstring). Each recipient that was
+    fully synced before the drain fast-forwards its own outgoing cursors past
+    the copy — otherwise its next drain translates them straight back,
+    duplicating call ids and text. A recipient with an unsynced tail (a
+    concurrent writer) is left alone so a live turn is never swallowed."""
+    echo_pre: dict[str, tuple[int | None, dict[str, int]]] = {}
+    for side in session.targets_for(target):
+        size = _file_size(source_transcript(session, side))
+        offsets = {
+            t: store.get_cursor(session.tandem_id, side, t).byte_offset
+            for t in session.targets_for(side)
+        }
+        echo_pre[side] = (size, offsets)
+
+    drain_source(store, session, target, flush_dangling=True)
+
+    for side, (pre_size, offsets) in echo_pre.items():
+        if pre_size is None:
+            continue
+        if all(off == pre_size for off in offsets.values()):
+            fast_forward_all(store, session, side)
+
+
 def run_oneoff(
     store: StateStore, session: PairedSession, target: str, prompt: str
 ) -> int:
@@ -211,12 +262,7 @@ def run_oneoff(
     adapter = get_adapter(target)
     sid = session.native_id(target)
 
-    # Catch up the active side first, then mark the target's whole file as
-    # known so only the new turn flows back afterwards. (When target IS the
-    # active side there is nothing to fast-forward — its cursor is live.)
-    drain_source(store, session, session.active, flush_dangling=True)
-    if target != session.active and sid and source_transcript(session, target) is not None:
-        fast_forward_all(store, session, target)
+    prepare_turn(store, session, target)
 
     started = time.time()
     if target == "codex" and not sid:
@@ -231,40 +277,9 @@ def run_oneoff(
         if rollout:
             new_sid = paths.codex_rollout_session_id(rollout)
             if new_sid:
-                store.set_native_session_id(session.tandem_id, "codex", new_sid)
-                session = store.get_session(session.tandem_id) or session
-                fast_forward_to_zero = store.get_cursor(session.tandem_id, "codex", "claude")
-                fast_forward_to_zero.byte_offset = 0
-                fast_forward_to_zero.line_index = 0
-                store.save_cursor(fast_forward_to_zero)
+                session = adopt_native_id(store, session, "codex", new_sid)
 
-    # Echo suppression per direction (see the module docstring): the drain
-    # below appends tandem's translation of the target's turn into every
-    # other participant's file. Those appends are by construction already
-    # represented in the target's file, so each recipient that was fully
-    # synced before the drain fast-forwards its own outgoing cursors past
-    # the copy — otherwise its next drain translates them straight back,
-    # duplicating call ids and text.
-    echo_pre: dict[str, tuple[int | None, dict[str, int]]] = {}
-    for side in session.targets_for(target):
-        size = _file_size(source_transcript(session, side))
-        offsets = {
-            t: store.get_cursor(session.tandem_id, side, t).byte_offset
-            for t in session.targets_for(side)
-        }
-        echo_pre[side] = (size, offsets)
-
-    drain_source(store, session, target, flush_dangling=True)
-
-    # Only when a recipient was fully synced before the drain is everything
-    # now in its file known to be ours. If it had an unsynced tail (a
-    # concurrent writer), fast-forwarding would swallow a live turn: leave
-    # its cursors alone and let the normal drain pick both up.
-    for side, (pre_size, offsets) in echo_pre.items():
-        if pre_size is None:
-            continue
-        if all(off == pre_size for off in offsets.values()):
-            fast_forward_all(store, session, side)
+    sync_after_turn(store, session, target)
     return code
 
 
