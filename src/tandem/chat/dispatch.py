@@ -83,6 +83,11 @@ class Dispatcher:
         text = text.strip()
         if not text:
             return ""
+        if self._closed:
+            # ahead of the route parse: a bare `/codex` or a `:model` would
+            # otherwise write a pin and an active harness the window is in the
+            # middle of shutting down
+            return "closed"
         try:
             got = parse_route(text, self.session.participants)
         except RouteError as exc:

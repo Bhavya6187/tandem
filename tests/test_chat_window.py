@@ -153,19 +153,19 @@ def test_ctrl_c_during_approval_denies_and_interrupts(env_factory):
     assert second == ["deny"]
 
 
-def test_esc_then_a_key_in_one_chunk_resolves_exactly_once(env_factory):
-    """One read can carry two answer keys: the composer only leaves answer
-    mode when the window says so, so `\\x1by` yields Cancel + Answer. The
-    second must be dropped — resolving twice strands an "allow" that would
-    silently approve the NEXT request before the user ever sees it."""
+def test_esc_then_a_key_resolves_exactly_once(env_factory):
+    """Esc denies and the window leaves answer mode; the key that lands right
+    behind it — the user's, arriving before the runtime has posted anything
+    new — must not resolve a second time. A stranded "allow" would silently
+    approve the NEXT request before the user ever sees it."""
     env = env_factory(); w, d, out, answers = make_window(env)
     got = []
     t = threading.Thread(target=lambda: got.append(answers.approve(ApprovalRequest("command", "rm x"))))
     t.start(); time.sleep(0.05)
     w.handle_event(ApprovalRequest("command", "rm x")); d.busy = True
-    w.handle_input(b"\x1by"); t.join(2)
+    w.handle_input(b"\x1b"); w.handle_input(b"y"); t.join(2)       # two reads, as a keyboard sends them
     assert got == ["deny"] and d.interrupts == 1
-    assert w.composer.mode == "prompt" and w.composer.text == ""   # the `y` is not typed into the prompt
+    assert w.composer.mode == "prompt" and w.composer.text == "y"  # ordinary text now, not an answer
 
     second = []
     t2 = blocks_until_answered(answers, ApprovalRequest("command", "rm y"), second)
@@ -173,12 +173,12 @@ def test_esc_then_a_key_in_one_chunk_resolves_exactly_once(env_factory):
     assert second == ["deny"]
 
 
-def test_a_repeated_approval_key_in_one_chunk_resolves_exactly_once(env_factory):
+def test_a_repeated_approval_key_resolves_exactly_once(env_factory):
     env = env_factory(); w, d, out, answers = make_window(env)
     got = []
     t = threading.Thread(target=lambda: got.append(answers.approve(ApprovalRequest("command", "x")))); t.start()
     time.sleep(0.05); w.handle_event(ApprovalRequest("command", "x"))
-    w.handle_input(b"y\x7fy"); t.join(2)                           # Answer, backspace, Answer
+    w.handle_input(b"y"); w.handle_input(b"y"); t.join(2)          # answered, then pressed again
     assert got == ["allow"] and w.composer.mode == "prompt"
 
     second = []
@@ -368,6 +368,99 @@ def test_run_chat_on_a_pty(env_factory):
     code, text = drive_chat(env)
     assert code == 0
     assert "echo:ping" in text and "\x1b[r" in text
+
+
+def test_a_flush_does_not_leave_the_loop_blocked_on_a_dead_read(env_factory, monkeypatch):
+    """The loop decides stdin is readable from the select at the top of the
+    pass, then the event drain below it flushes the tty — an approval row
+    discards whatever was typed before it existed. The fd is blocking with
+    VMIN=1 (raw mode), so an unconditional read then waits for a keypress: no
+    1 s repaint, and every event queued after the approval sits unpainted
+    until the user touches the keyboard.
+
+    Made deterministic the way the lost-wake-byte test is: the approval's wake
+    byte is dropped, so the pass that drains it is woken by the typed-ahead
+    bytes alone — exactly the interleaving the flush was added for."""
+    env = env_factory()
+    hermetic_frame()
+    master, slave = os.openpty()
+    captured = bytearray()
+    pipes: list[tuple[int, int]] = []
+    real_pipe, real_write = os.pipe, os.write
+    swallow_wake = {"on": True}
+
+    def spy_pipe():
+        fds = real_pipe()
+        pipes.append(fds)
+        return fds
+
+    def lossy_write(fd, data):
+        if swallow_wake["on"] and pipes and fd == pipes[0][1] and bytes(data) == b"E":
+            return len(data)                  # the window never learns of this event
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "pipe", spy_pipe)
+    monkeypatch.setattr(os, "write", lossy_write)
+
+    class AsksThenStreams:
+        harness = "claude"
+
+        def run_turn(self, session, native_id, prompt, model, emit, answers):
+            emit(ApprovalRequest("command", "rm -rf ~/"))   # queued, no wake byte
+            real_write(master, b"and then fix the tests")   # …and now stdin is readable
+            time.sleep(0.5)                                 # the pass above has run
+            swallow_wake["on"] = False
+            emit(TextDelta("late-event"))                   # owed a paint, with no keypress
+            emit(TurnFinished("completed", ""))
+            return TurnOutcome("completed")
+
+        def interrupt(self): pass
+
+        def close(self): pass
+
+    seen = {}
+
+    def pull() -> bool:
+        """One read, but never a blocking one: this driver's deadlines have to
+        stay enforceable while the window is painting nothing at all."""
+        try:
+            if not select.select([master], [], [], 0.05)[0]:
+                return True
+            chunk = os.read(master, 4096)
+        except OSError:
+            return False
+        if not chunk:
+            return False
+        captured.extend(chunk)
+        return True
+
+    def driver():
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and b"> " not in captured:
+            if not pull():
+                return
+        real_write(master, b"ping\r")
+        deadline = time.monotonic() + 3                     # the 1 s tick, with room
+        while time.monotonic() < deadline and b"late-event" not in captured:
+            if not pull():
+                return
+        seen["late"] = b"late-event" in captured
+        real_write(master, b"\x03\x03")                     # also unwedges a dead read
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if not pull():
+                return
+
+    t = threading.Thread(target=driver, daemon=True); t.start()
+    try:
+        code = run_chat(env.session, env.store, ChatConfig(), stdin_fd=slave, out_fd=slave,
+                        runtimes={"claude": AsksThenStreams(), "codex": EchoRuntime()})
+    finally:
+        os.close(slave)
+        t.join(5)
+        os.close(master)
+    assert code == 0
+    assert seen.get("late") is True, "the loop was blocked in os.read after the flush"
 
 
 def test_run_chat_drains_events_whose_wake_byte_was_lost(env_factory, monkeypatch):

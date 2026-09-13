@@ -2,8 +2,10 @@
 that drives it. Pure: bytes in, actions out, no terminal access.
 
 Three modes. `prompt` edits text and submits on Enter; `approval` answers
-a permission request with one key; `question` picks a numbered option or
-takes free text. Bracketed paste keeps its newlines (the prompt becomes
+a permission request with one key — a lone keypress at the head of a read,
+so two keystrokes the terminal coalesced into one (`yn`) answer nothing and
+land in the draft, by design; `question` picks a numbered option or takes
+free text. Bracketed paste keeps its newlines (the prompt becomes
 multi-line; the row shows the first line and a `(+N lines)` marker). A
 partial escape sequence at the end of a read is carried to the next one;
 a lone Esc is a key."""

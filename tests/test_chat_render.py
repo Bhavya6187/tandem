@@ -226,11 +226,12 @@ class TestHarnessTextIsSanitized:
         assert "\x1b" not in t
         assert "gohome" in t and "fix it" in t and "Done." in t and "12 passed" in t
 
-    def test_cells_still_counts_the_renderers_own_sgr_as_zero(self, screen):
-        s, out = screen
+    def test_cells_still_counts_the_renderers_own_sgr_as_zero(self):
+        out = Out()
+        s = Screen(out, rows=24, cols=40, cfg=ChatConfig(), color=True)
         s.enter()
-        s.print(s._dim("x" * 5))
-        assert s._col == 5
+        s.print(s._dim("x" * 5))                  # a real SGR wrapper, 5 cells
+        assert "\x1b[2m" in out.text() and s._col == 5
 
 
 def test_the_approval_row_offers_only_the_available_choices(screen):

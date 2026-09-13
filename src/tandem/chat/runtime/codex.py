@@ -72,9 +72,10 @@ def _decision(choice: str, available) -> str:
 
 def _choices(available) -> tuple[str, ...]:
     """What the row may offer: `always` needs the app-server to list
-    acceptForSession, or the key would silently mean plain accept."""
+    acceptForSession — undeclared included, since _decision falls back to a
+    one-shot accept there and the key would silently mean `yes`."""
     listed = {d for d in (available or []) if isinstance(d, str)}
-    if listed and "acceptForSession" not in listed:
+    if "acceptForSession" not in listed:
         return ("allow", "deny")
     return ("allow", "always", "deny")
 

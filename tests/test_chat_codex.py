@@ -11,7 +11,7 @@ import pytest
 
 from tandem.chat.events import (ApprovalRequest, Failure, LimitsUpdate, QuestionRequest,
                                 TextDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished)
-from tandem.chat.runtime.codex import CodexRuntime, _decision, strip_shell
+from tandem.chat.runtime.codex import CodexRuntime, _choices, _decision, strip_shell
 from tandem.config import ChatConfig
 
 FAKE = Path(__file__).parent / "fakes" / "fake_codex_appserver.py"
@@ -102,6 +102,10 @@ def test_the_decision_table():
     assert _decision("deny", ["accept", "decline", "cancel"]) == "decline"
     assert _decision("deny", ["accept", "cancel"]) == "cancel"          # decline not offered
     assert _decision("deny", None) == "decline"                         # nothing declared
+    # and what the row may offer: `always` only where it means acceptForSession
+    assert _choices(["accept", "acceptForSession", "decline"]) == ("allow", "always", "deny")
+    assert _choices(["accept", "cancel"]) == ("allow", "deny")
+    assert _choices(None) == ("allow", "deny")   # undeclared: `always` would be a one-shot accept
 
 
 @pytest.mark.parametrize("choice,decision,status", [

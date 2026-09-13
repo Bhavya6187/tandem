@@ -236,12 +236,13 @@ class Window:
                     self.screen.failure(Failure(note[7:]))
                 elif note:
                     self.screen.note(note)
-            # One request, one answer. The composer stays in answer mode for
-            # the whole read, so a single 4096-byte chunk can carry two answer
-            # actions (`\x1by` → Cancel + Answer, `y\x7fy` → two Answers).
-            # Leaving answer mode before resolving makes the second a no-op:
-            # resolving twice would strand a value that silently answers the
-            # next request — the runtime is already gone by then.
+            # One request, one answer. The composer leaves answer mode only
+            # when the window says so, so a second answer can still arrive
+            # behind the first — another action in the same read (a question's
+            # `2\x7f3`), or the next read before the runtime has posted
+            # anything new. The mode check makes it a no-op: resolving twice
+            # strands a value that silently answers the NEXT request, and the
+            # runtime that asked this one is already gone.
             elif isinstance(action, Answer):
                 if self.composer.mode != "prompt":
                     self.composer.end_answer()
@@ -344,7 +345,11 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
                     win.handle_event(events.get_nowait())
                 except queue.Empty:
                     break
-            if stdin_fd in ready:
+            # re-checked after the drain, not trusted from the select above: an
+            # answer row flushes the tty input queue as it goes up, and the fd
+            # is blocking with VMIN=1 — reading it now would wait for a
+            # keypress, with the 1 s repaint and every queued event behind it
+            if stdin_fd in ready and select.select([stdin_fd], [], [], 0)[0]:
                 data = os.read(stdin_fd, 4096)
                 if not data or not win.handle_input(data):
                     break
