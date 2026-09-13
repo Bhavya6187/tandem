@@ -43,15 +43,30 @@ class WindowAnswers:
         self._q: queue.Queue = queue.Queue()
 
     def approve(self, req: ApprovalRequest) -> str:
+        self._drop_stale()
         self._post(req)
         return self._q.get()
 
     def answer(self, req: QuestionRequest) -> str:
+        self._drop_stale()
         self._post(req)
         return self._q.get()
 
     def resolve(self, text: str) -> None:
         self._q.put(text)
+
+    def _drop_stale(self) -> None:
+        """Every answer belongs to the request that was on screen when the
+        user pressed the key. A value still sitting here answers nothing the
+        user has seen, so it must never be handed to the next request — an
+        inherited "allow" would approve an unseen command. The window drops
+        the duplicate keypress that would leave one (see handle_input); this
+        is the belt to that pair of braces."""
+        while True:
+            try:
+                self._q.get_nowait()
+            except queue.Empty:
+                return
 
 
 class Window:
@@ -78,6 +93,10 @@ class Window:
         self.screen.paint_bottom(self.bar_line(), text, col, focus_composer=True)
 
     def paint_history(self) -> None:
+        if self.cfg.history_turns <= 0:
+            # no history means none: the trim below indexes starts[-N], and
+            # starts[-0] is starts[0] — the whole transcript
+            return
         harness = self.dispatcher.default
         sid = self.session.native_id(harness)
         if not sid:
@@ -152,14 +171,22 @@ class Window:
                     self.screen.failure(Failure(note[7:]))
                 elif note:
                     self.screen.note(note)
+            # One request, one answer. The composer stays in answer mode for
+            # the whole read, so a single 4096-byte chunk can carry two answer
+            # actions (`\x1by` → Cancel + Answer, `y\x7fy` → two Answers).
+            # Leaving answer mode before resolving makes the second a no-op:
+            # resolving twice would strand a value that silently answers the
+            # next request — the runtime is already gone by then.
             elif isinstance(action, Answer):
-                self.answers.resolve(action.text)
-                self.composer.end_answer()
+                if self.composer.mode != "prompt":
+                    self.composer.end_answer()
+                    self.answers.resolve(action.text)
             elif isinstance(action, Cancel):
-                self.answers.resolve("deny")
-                self.composer.end_answer()
-                self.dispatcher.interrupt()
-                self.screen.note("denied · interrupting…")
+                if self.composer.mode != "prompt":
+                    self.composer.end_answer()
+                    self.answers.resolve("deny")
+                    self.dispatcher.interrupt()
+                    self.screen.note("denied · interrupting…")
             elif isinstance(action, Interrupt):
                 if self.dispatcher.busy:
                     self.dispatcher.interrupt()
@@ -239,11 +266,14 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
                     rows, cols = _winsize(stdin_fd)
                     screen.resize(rows, cols)
                     bar.resize(rows, cols)
-                while True:
-                    try:
-                        win.handle_event(events.get_nowait())
-                    except queue.Empty:
-                        break
+            # drained on every pass, not only when a wake byte arrived: `post`
+            # swallows a failed write, and a queued event must not sit unseen
+            # until some later event's byte gets through
+            while True:
+                try:
+                    win.handle_event(events.get_nowait())
+                except queue.Empty:
+                    break
             if stdin_fd in ready:
                 data = os.read(stdin_fd, 4096)
                 if not data or not win.handle_input(data):
