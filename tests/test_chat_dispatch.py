@@ -548,3 +548,55 @@ def test_a_completed_turn_gets_no_closing_note(setup):
     d.submit("hello there")
     wait_idle(events)
     assert not any("the turn on" in t for t in shadow_texts(env.codex_shadow))
+
+
+class TestFreshlyPairedSession:
+    """A freshly paired session has no file for its ACTIVE harness: claude's
+    transcript is written by claude on its first turn, and an active codex has
+    no id at all until it runs (cli._pair_session). `switch_session` seeds both
+    late; the chat dispatcher goes through prepare_turn, which must do the
+    same — or the first prompt routed away from the active harness bricks the
+    session."""
+
+    def test_a_routed_first_prompt_seeds_the_fileless_active_claude(self, env_factory):
+        env = env_factory(active="claude", seed_active=False)
+        assert not env.claude_shadow.exists()
+        events = []
+        rts = {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env)}
+        d = Dispatcher(env.store, env.session, rts, events.append, Answers())
+        try:
+            assert d.submit("/codex hello") == ""
+            wait_idle(events)
+            assert [e for e in events if isinstance(e, Failure)] == []
+            assert env.claude_shadow.exists()
+            assert "[via codex] codex did hello" in claude_texts(env.claude_shadow)
+            # and the window is not wedged: the next turn still runs
+            assert d.submit("/claude and now you") == ""
+            wait_idle(events, 2)
+        finally:
+            d.close()
+        assert [e for e in events if isinstance(e, Failure)] == []
+        assert rts["claude"].calls[-1][1] == "and now you"
+        # the seed is tandem's own marker, not a turn: it must not echo outward
+        assert not any("half of tandem paired session" in t
+                       for t in shadow_texts(env.codex_shadow))
+
+    def test_a_first_prompt_routed_off_a_never_run_codex_seeds_codex(self, env_factory):
+        env = env_factory(active="codex", seed_active=False)
+        assert env.session.native_id("codex") is None
+        events = []
+        rts = {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env)}
+        d = Dispatcher(env.store, env.session, rts, events.append, Answers())
+        try:
+            assert d.submit("/claude go") == ""
+            wait_idle(events)
+        finally:
+            d.close()
+        assert [e for e in events if isinstance(e, Failure)] == []
+        sid = env.store.get_session(env.session.tandem_id).native_id("codex")
+        assert sid
+        rollout = get_adapter("codex").transcript_path(env.cwd, sid)
+        assert rollout is not None
+        texts = shadow_texts(rollout)
+        assert "[via claude-code] go" in texts
+        assert "[via claude-code] claude did go" in texts

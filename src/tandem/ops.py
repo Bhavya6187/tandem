@@ -128,20 +128,9 @@ def switch_session(store: StateStore, session: PairedSession,
     # TARGET of every other side's drain (the runner's ->claude engine and
     # every later flip's drain refuse to start on a missing shadow), and
     # flipping back into it leaves the drain below no file to append to.
-    # Seed it now — but only when tandem has never consumed a byte of it; a
-    # consumed-then-missing file is data loss, and the drain's hard error is
-    # the right answer there.
-    if session.native_id("claude"):
-        expected = get_adapter("claude").expected_transcript_path(
-            session.cwd, session.native_id("claude")
-        )
-        never_ran = all(
-            store.get_cursor(session.tandem_id, "claude", t).byte_offset == 0
-            for t in session.targets_for("claude")
-        )
-        if not expected.exists() and never_ran:
-            other = new_active if old_active == "claude" else old_active
-            _create_claude_shadow_late(store, session, other)
+    if session.native_id("claude") and _claude_needs_seed(store, session):
+        other = new_active if old_active == "claude" else old_active
+        _create_claude_shadow_late(store, session, other)
 
     drain_source(store, session, old_active, flush_dangling=True)
     fast_forward_all(store, session, new_active)
@@ -163,6 +152,21 @@ def switch_session(store: StateStore, session: PairedSession,
         problems = validate_transcript(new_active, transcript,
                                        session.native_id(new_active))
     return new_active, problems, memory_report
+
+
+def _claude_needs_seed(store: StateStore, session: PairedSession) -> bool:
+    """claude has an id but no file, and tandem has never consumed a byte of
+    it. Only then may the file be seeded: a consumed-then-missing file is
+    data loss, and the drain's hard error is the right answer there."""
+    expected = get_adapter("claude").expected_transcript_path(
+        session.cwd, session.native_id("claude")
+    )
+    if expected.exists():
+        return False
+    return all(
+        store.get_cursor(session.tandem_id, "claude", t).byte_offset == 0
+        for t in session.targets_for("claude")
+    )
 
 
 def _create_claude_shadow_late(store: StateStore, session: PairedSession,
@@ -190,32 +194,80 @@ def _create_claude_shadow_late(store: StateStore, session: PairedSession,
     store.save_cursor(cursor)
 
 
-def _create_codex_shadow_late(store: StateStore, session: PairedSession) -> None:
+def _create_codex_shadow_late(store: StateStore, session: PairedSession,
+                              other: str | None = None) -> None:
+    """Mint codex's id and rollout after the fact. `other` is the harness
+    whose turns flow into it next — the active side by default, which is what
+    a flip into codex leaves behind: the ctx belongs to (other -> codex)."""
     from .constants import SEED_NOTE
     from .runner import ctx_from_cursor
 
+    other = other or session.active
     adapter = get_adapter("codex")
     sid = adapter.mint_session_id()
-    # only ever called with new_active == "codex": the (active -> codex) ctx
-    cursor = store.get_cursor(session.tandem_id, session.active, "codex")
+    cursor = store.get_cursor(session.tandem_id, other, "codex")
     ctx = ctx_from_cursor(session, cursor)
     ctx.target_session_id = sid
     note = SEED_NOTE.format(
-        tandem_id=session.tandem_id, other=get_adapter(session.active).display_name
+        tandem_id=session.tandem_id, other=get_adapter(other).display_name
     )
     adapter.create_shadow_transcript(session.cwd, sid, ctx, note)
     store.set_native_session_id(session.tandem_id, "codex", sid)
 
 
-def prepare_turn(store: StateStore, session: PairedSession, target: str) -> None:
-    """Before a turn on `target`: catch the active side up, then mark the
-    target's whole file as known so only the new turn flows back afterwards.
-    (When target IS the active side there is nothing to fast-forward — its
-    cursor is live.)"""
+def _seed_source(session: PairedSession, target: str, harness: str) -> str:
+    """The side whose turns flow into `harness` next: this turn's target when
+    `harness` is the side being left (it is the active one), otherwise the
+    active side, whose tail is drained into it moments later."""
+    return target if session.active == harness else session.active
+
+
+def _seed_late_shadows(store: StateStore, session: PairedSession,
+                       target: str) -> PairedSession:
+    """`switch_session`'s two late seeds, on the turn path.
+
+    A freshly paired session has no file for its ACTIVE harness: claude's
+    transcript is written by claude itself on its first turn, and an active
+    codex has no id at all until it runs (cli._pair_session). So the first
+    turn routed away from the active harness drains into a file that does not
+    exist — and every later turn dies in the drain. `switch_session` seeds
+    both before its own drain; this is the same step for the turn path.
+
+    The harness this turn runs on is never seeded: claude creates its own
+    transcript from the id it was launched with (a file already there is
+    exactly what `_pair_session` avoids), and a never-run codex mints its own
+    thread on this turn, which `adopt_native_id` records afterwards.
+
+    Returns the session, refreshed when the codex seed minted an id."""
+    if (target != "codex" and "codex" in session.participants
+            and not session.native_id("codex")):
+        _create_codex_shadow_late(store, session, _seed_source(session, target, "codex"))
+        session = store.get_session(session.tandem_id) or session
+        # the seed note is tandem's own marker, not a turn: fast-forward the
+        # new file's outgoing cursors so the drain below never translates it
+        # onward (what switch_session's fast_forward_all(new_active) does)
+        fast_forward_all(store, session, "codex")
+    if (target != "claude" and session.native_id("claude")
+            and _claude_needs_seed(store, session)):
+        _create_claude_shadow_late(store, session,
+                                   _seed_source(session, target, "claude"))
+        fast_forward_all(store, session, "claude")
+    return session
+
+
+def prepare_turn(store: StateStore, session: PairedSession,
+                 target: str) -> PairedSession:
+    """Before a turn on `target`: seed any participant whose harness has never
+    run, catch the active side up, then mark the target's whole file as known
+    so only the new turn flows back afterwards. (When target IS the active
+    side there is nothing to fast-forward — its cursor is live.) Returns the
+    session, refreshed when a seed minted an id."""
+    session = _seed_late_shadows(store, session, target)
     drain_source(store, session, session.active, flush_dangling=True)
     if (target != session.active and session.native_id(target)
             and source_transcript(session, target) is not None):
         fast_forward_all(store, session, target)
+    return session
 
 
 def adopt_native_id(store: StateStore, session: PairedSession, harness: str,
@@ -275,7 +327,9 @@ def run_oneoff(
     adapter = get_adapter(target)
     sid = session.native_id(target)
 
-    prepare_turn(store, session, target)
+    # the seeds can mint an id for a never-run participant: sync_after_turn
+    # below needs the session that knows about it
+    session = prepare_turn(store, session, target)
 
     started = time.time()
     if target == "codex" and not sid:

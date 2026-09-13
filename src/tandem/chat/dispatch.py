@@ -167,11 +167,16 @@ class Dispatcher:
                 return
             session = self.session
             if session.native_id(harness):
-                ops.prepare_turn(self.store, session, harness)
+                # prepare_turn also seeds any participant whose harness has
+                # never run (a fresh session's active claude has no file yet),
+                # and hands back the session that knows the ids it minted
+                session = self.session = ops.prepare_turn(self.store, session, harness)
             # else: nothing to fast-forward and no file to drain into yet — the
             # first turn on a never-run codex starts context-less, as `tandem run
             # --on codex` does, and sync_after_turn translates it outward once
-            # its thread id is adopted below
+            # its thread id is adopted below. Nothing needs seeding there
+            # either: an active codex with no id is the only harness a fresh
+            # pairing leaves fileless, and every other side already has one.
             outcome = self.runtimes[harness].run_turn(
                 session, session.native_id(harness), item.prompt, item.model, self.emit, self.answers)
             ran = True      # from here on the runtime has emitted its own TurnFinished
