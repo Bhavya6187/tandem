@@ -3,8 +3,10 @@ reaching the screen, prompts answered from the keyboard, and the real
 select loop driven over a pty."""
 
 import os
+import select
 import threading
 import time
+import tty
 
 from conftest import claude_assistant, claude_user, write_line
 
@@ -33,15 +35,25 @@ class StubDispatcher:
     def close(self): pass
 
 
-def make_window(env, cfg=None):
+def make_window(env, cfg=None, stdin_fd=None):
     cfg = cfg or ChatConfig()
     out = Out()
     screen = Screen(out, 24, 60, cfg, color=False)
     answers = WindowAnswers(lambda ev: None)
     d = StubDispatcher()
     bar = StatusBar(24, 60, "claude", ["codex"], hint="/claude /codex route")
-    w = Window(env.session, env.store, cfg, screen, Composer(), d, answers, bar, {"limits": {}}, {})
+    w = Window(env.session, env.store, cfg, screen, Composer(), d, answers, bar, {"limits": {}}, {},
+               stdin_fd=stdin_fd)
     return w, d, out, answers
+
+
+def readable(fd, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        if select.select([fd], [], [], 0.02)[0]:
+            return True
+        if time.monotonic() >= deadline:
+            return False
 
 
 def blocks_until_answered(answers, req, sink):
@@ -136,6 +148,55 @@ def test_a_repeated_approval_key_in_one_chunk_resolves_exactly_once(env_factory)
     t2 = blocks_until_answered(answers, ApprovalRequest("command", "z"), second)
     w.handle_event(ApprovalRequest("command", "z")); w.handle_input(b"n"); t2.join(2)
     assert second == ["deny"]
+
+
+def test_prose_typed_before_the_row_answers_nothing(env_factory):
+    """The loop drains live events — painting the approval row and entering
+    answer mode — before it reads stdin in the same pass. Whatever was typed
+    while the model worked is still in the tty buffer and arrives as the first
+    chunk after the row: it must not answer a request the user never saw."""
+    env = env_factory(); w, d, out, answers = make_window(env)
+    got = []
+    t = blocks_until_answered(answers, ApprovalRequest("command", "rm -rf ~/"), got)
+    w.handle_event(ApprovalRequest("command", "rm -rf ~/"))
+    assert w.handle_input(b"and then fix the tests") is True
+    t.join(0.2)
+    assert got == [] and w.composer.mode == "approval"
+    w.handle_input(b"n"); t.join(2)                            # a real keypress does answer
+    assert got == ["deny"]
+
+
+def test_entering_answer_mode_drops_what_was_typed_before_the_row(env_factory):
+    """Belt to the first-character rule: the bytes never reach the composer at
+    all. Flushed before the row is painted, so nothing typed after it is lost."""
+    env = env_factory()
+    master, slave = os.openpty()
+    try:
+        tty.setraw(slave)                                      # as run_chat does
+        w, d, out, _ = make_window(env, stdin_fd=slave)
+        os.write(master, b"and then fix the tests")
+        assert readable(slave, 2.0)                            # in the tty buffer
+        w.handle_event(ApprovalRequest("command", "rm -rf ~/"))
+        assert not readable(slave, 0.1)                        # dropped with the row
+        assert w.composer.mode == "approval"
+    finally:
+        os.close(master); os.close(slave)
+
+
+def test_a_window_without_a_tty_still_enters_answer_mode(env_factory):
+    env = env_factory(); w, d, out, _ = make_window(env)       # stdin_fd None
+    w.handle_event(ApprovalRequest("command", "rm x"))
+    assert w.composer.mode == "approval"
+
+
+def test_sigwinch_repaints_the_bottom_block(env_factory):
+    """A resize recomputes the scroll region; without a repaint the bar and
+    composer stay wherever the old geometry left them until the next event."""
+    env = env_factory(); w, d, out, _ = make_window(env)
+    out.buf.clear()
+    w.resize(30, 100)
+    assert w.screen.rows == 30 and w.bar.rows == 30 and w.bar.cols == 100
+    assert "\x1b[29;1H" in out.text()                          # the bar, at its new row
 
 
 def test_window_answers_never_hands_over_a_leftover_value():

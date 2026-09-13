@@ -14,7 +14,7 @@ import codecs
 from dataclasses import dataclass
 from typing import Union
 
-from .events import ApprovalRequest, QuestionRequest
+from .events import ApprovalRequest, QuestionRequest, offered_labels
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,10 @@ _CSI_FINAL = {ord("A"): "up", ord("B"): "down", ord("C"): "right", ord("D"): "le
 _TILDE = {"200": "paste_start", "201": "paste_end", "3": "delete",
           "1": "home", "7": "home", "4": "end", "8": "end"}
 _PASTE_END = b"\x1b[201~"
-APPROVAL_ROW = " [y]es [a]lways [n]o  (Esc denies and interrupts)"
+
+
+def approval_row(choices: tuple[str, ...] | None = None) -> str:
+    return f" {offered_labels(choices)}  (Esc denies and interrupts)"
 
 
 class Composer:
@@ -149,7 +152,7 @@ class Composer:
                 j = i - 1
                 while i < len(data) and data[i] >= 0x20 and data[i] not in (0x7F, 0x1B):
                     i += 1
-                self._typed(self._decoder.decode(data[j:i]), actions)
+                self._typed(self._decoder.decode(data[j:i]), actions, first=j == 0)
         return actions
 
     def _escape(self, data: bytes) -> tuple[str, int]:
@@ -173,15 +176,28 @@ class Composer:
             return _CSI_FINAL.get(data[2], ""), 3
         return "esc", 1                           # Esc then an ordinary key
 
-    def _typed(self, text: str, actions: list[Action]) -> None:
+    def _offers(self, choice: str) -> bool:
+        """A key for a choice this request does not offer answers nothing."""
+        choices = getattr(self.pending, "choices", None)
+        return choice in choices if choices else True
+
+    def _typed(self, text: str, actions: list[Action], *, first: bool = False) -> None:
         if not text:
             return
         if self.mode == "approval":
-            for ch in text:
-                choice = _APPROVAL_KEYS.get(ch.lower())
-                if choice:
-                    actions.append(Answer(choice))
-                    return
+            # An answer is a lone keypress at the head of the read, never a
+            # character scanned out of a longer run: the window drains live
+            # events — painting the approval row — before it reads stdin in
+            # the same pass, so text with anything glued to it was already in
+            # the tty buffer when the request appeared. Answering from it
+            # would approve a command the user has not seen ("and then fix
+            # the tests" both starts with and contains an `a`). What is not
+            # an answer stays in the composer rather than being swallowed.
+            choice = _APPROVAL_KEYS.get(text.lower()) if first and len(text) == 1 else None
+            if choice is not None and self._offers(choice):
+                actions.append(Answer(choice))
+            else:
+                self._insert(text)
             return
         if (self.mode == "question" and self.pending is not None and self.pending.options
                 and not self.buf and text.strip().isdecimal()):
@@ -259,7 +275,7 @@ class Composer:
 
     def line(self, cols: int) -> tuple[str, int]:
         if self.mode == "approval":
-            return APPROVAL_ROW[:cols], 0
+            return approval_row(getattr(self.pending, "choices", None))[:cols], 0
         prompt = "? " if self.mode == "question" else "> "
         text, cur = self.text, self.cur
         nl = text.find("\n")

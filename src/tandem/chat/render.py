@@ -22,7 +22,8 @@ from unicodedata import east_asian_width
 
 from ..events import AssistantMessage, ToolCall, ToolResult, UserMessage
 from .events import (ApprovalRequest, Failure, QuestionRequest, TextDelta, ThinkingDelta,
-                     ToolFinished, ToolOutput, ToolStarted, TurnFinished, TurnStarted)
+                     ToolFinished, ToolOutput, ToolStarted, TurnFinished, TurnStarted,
+                     offered_labels)
 from .runtime import first_line, summarize_args
 
 _CSI = "\x1b["
@@ -31,6 +32,25 @@ _CSI_RE = re.compile(r"\x1b\[[0-9:;<=>?]*[ -/]*[@-~]")
 # to be counted in cells, not characters: an SGR sequence advances the cursor
 # by nothing, and a W/F glyph (CJK, most emoji) by two.
 _ERROR_BUFFER_LINES = 200
+_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-9:;<=>?]*[ -/]*[@-~]"            # CSI … final
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"      # OSC … BEL/ST (or truncated)
+    r"|\x1b[PX^_][^\x1b]*(?:\x1b\\)?"           # DCS/SOS/PM/APC … ST
+    r"|\x1b[@-Z\\-~]"                           # two-character escapes (ESC 7, ESC c)
+)
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _safe(text: str) -> str:
+    """Strip what a harness could otherwise use to drive the terminal: whole
+    escape sequences, then every remaining C0 control (a bare ESC included)
+    but the tab and the newlines the painters already handle themselves. A
+    command string, tool name, tool output or model delta carrying CSI can
+    erase and rewrite the approval row, escape the scroll region, or switch
+    to the alternate screen. Applied before the SGR wrappers go on, so the
+    renderer's own sequences survive — they are the only escapes that reach
+    the terminal."""
+    return _CONTROL_RE.sub("", _ESCAPE_RE.sub("", text or ""))
 
 
 def _cells(text: str) -> int:
@@ -71,7 +91,10 @@ class Screen:
         self._col, self._focus = 0, "region"
 
     def leave(self) -> None:
-        self._w(f"{_CSI}r{_CSI}?2004l{_CSI}{self.rows};1H\r\n")
+        # the separator, bar and composer are painted rows like any other:
+        # left behind they scroll into the terminal's scrollback as soon as
+        # the shell prompt returns, so erase from the top of the block down
+        self._w(f"{_CSI}r{_CSI}?2004l{_CSI}{self.rows - 2};1H{_CSI}J\r\n")
 
     def resize(self, rows: int, cols: int) -> None:
         self.rows, self.cols = max(4, rows), max(10, cols)
@@ -129,28 +152,29 @@ class Screen:
         self._speaker_shown = False
         self._tool_lines.clear(); self._tool_held.clear(); self._tool_dropped.clear()
         label = f"you → {ev.harness}" + (f" · {ev.model}" if ev.model else "")
+        prompt = _safe(ev.prompt)
         self.line()
-        if "\n" in ev.prompt:
+        if "\n" in prompt:
             self.line(self._bold(label))
-            self.print(ev.prompt + "\n")
+            self.print(prompt + "\n")
         else:
-            self.line(self._bold(label) + "  " + ev.prompt)
+            self.line(self._bold(label) + "  " + prompt)
 
     def text_delta(self, ev: TextDelta) -> None:
         self._ensure_speaker()
-        self.print(ev.text)
+        self.print(_safe(ev.text))
 
     def thinking_delta(self, ev: ThinkingDelta) -> None:
         if self.cfg.show_thinking:
             self._ensure_speaker()
-            self.print(self._dim(ev.text))
+            self.print(self._dim(_safe(ev.text)))
 
     def tool_started(self, ev: ToolStarted) -> None:
         self._ensure_speaker()
         self._tool_lines[ev.call_id] = 0
         self._tool_held[ev.call_id] = []
         self._tool_dropped[ev.call_id] = 0
-        self.line(self._dim(f"  ▸ {ev.tool} {ev.summary}".rstrip()))
+        self.line(self._dim(f"  ▸ {_safe(ev.tool)} {_safe(ev.summary)}".rstrip()))
 
     def tool_output(self, ev: ToolOutput) -> None:
         """Print the head of the output up to the cap and hold the rest: a
@@ -158,7 +182,7 @@ class Screen:
         tool_finished, where the lines the user actually needs are. The hold
         is bounded — past _ERROR_BUFFER_LINES the overflow is only counted."""
         cap = self.cfg.tool_output_lines
-        for raw in ev.text.splitlines():
+        for raw in (_safe(line) for line in ev.text.splitlines()):
             if self._tool_lines.get(ev.call_id, 0) < cap:
                 self._tool_lines[ev.call_id] = self._tool_lines.get(ev.call_id, 0) + 1
                 self.line(self._dim("    " + raw))
@@ -181,15 +205,17 @@ class Screen:
         if hidden:
             self.line(self._dim(f"    … +{hidden} lines"))
         status = "ok" if ev.ok else "error"
-        self.line(self._dim(f"    {status}" + (f" · {ev.summary}" if ev.summary else "")))
+        summary = _safe(ev.summary)
+        self.line(self._dim(f"    {status}" + (f" · {summary}" if summary else "")))
 
     def approval(self, ev: ApprovalRequest) -> None:
-        self.line(self._bold(f"  ▸ Allow {ev.kind}: {ev.detail}") + "   [y]es [a]lways [n]o")
+        self.line(self._bold(f"  ▸ Allow {_safe(ev.kind)}: {_safe(ev.detail)}")
+                  + "   " + offered_labels(ev.choices))
 
     def question(self, ev: QuestionRequest) -> None:
-        self.line(self._bold(f"  ? {ev.prompt}"))
+        self.line(self._bold(f"  ? {_safe(ev.prompt)}"))
         for i, option in enumerate(ev.options, 1):
-            self.line(f"    {i}. {option}")
+            self.line(f"    {i}. {_safe(option)}")
         if not ev.options:
             self.line(self._dim("    (type an answer)"))
 
@@ -202,7 +228,9 @@ class Screen:
             self.line(self._dim(f"  {ev.status}"))
 
     def failure(self, ev: Failure) -> None:
-        self.line(self._bold("error: ") + ev.message)
+        # a failure message is usually the harness's own: a stderr tail, a
+        # provider error, a protocol line tandem could not read
+        self.line(self._bold("error: ") + _safe(ev.message))
 
     def note(self, text: str) -> None:
         self.line(self._dim(text))
@@ -217,11 +245,12 @@ class Screen:
             elif isinstance(ev, AssistantMessage):
                 self._turn_harness = source
                 self._ensure_speaker()
-                self.line(ev.text)
+                self.line(_safe(ev.text))
             elif isinstance(ev, ToolCall):
-                self.line(self._dim(f"  ▸ {ev.tool} {summarize_args(ev.tool, ev.arguments)}".rstrip()))
+                summary = summarize_args(ev.tool, ev.arguments)
+                self.line(self._dim(f"  ▸ {_safe(ev.tool)} {_safe(summary)}".rstrip()))
             elif isinstance(ev, ToolResult):
-                text = first_line(ev.output)
+                text = _safe(first_line(ev.output))
                 if text:
                     self.line(self._dim("    " + text))
 

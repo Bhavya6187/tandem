@@ -170,6 +170,88 @@ def test_prompts_and_failures(screen):
     assert "error: codex thread is open in another process\r\n" in t
 
 
+class TestHarnessTextIsSanitized:
+    """Every string a harness controls — deltas, tool names and output, an
+    approval detail, a replayed transcript — is printed with ESC and the other
+    C0 controls stripped. Left in, a command string or a model delta carrying
+    CSI can erase and rewrite the approval row, escape the scroll region, or
+    switch to the alternate screen."""
+
+    def test_a_text_delta_cannot_erase_the_line(self, screen):
+        s, out = screen
+        s.enter(); out.text(clear=True)
+        s.text_delta(TextDelta("a\x1b[2Kb"))
+        t = out.text()
+        assert "\x1b[2K" not in t and "\x1b" not in t and "ab" in t
+
+    def test_an_approval_detail_cannot_move_the_cursor(self, screen):
+        s, out = screen
+        s.enter(); out.text(clear=True)
+        s.approval(ApprovalRequest("command", "echo safe\x1b[2K\x1b[1G  rm -rf ~/"))
+        t = out.text()
+        assert "\x1b[1G" not in t and "\x1b[2K" not in t
+        assert "  ▸ Allow command: echo safe  rm -rf ~/   [y]es [a]lways [n]o\r\n" in t
+
+    def test_tool_rows_and_output_are_stripped(self, screen):
+        s, out = screen
+        s.enter(); out.text(clear=True)
+        s.tool_started(ToolStarted("c1", "ex\x1b[?1049hec", "ls\x1b[1;1Hhijack"))
+        s.tool_output(ToolOutput("c1", "out\x1b[2Kput"))
+        s.tool_finished(ToolFinished("c1", True, "exit\x1b[J 0"))
+        t = out.text()
+        assert "\x1b" not in t
+        assert "  ▸ exec lshijack\r\n    output\r\n    ok · exit 0\r\n" in t
+
+    def test_a_thinking_delta_and_a_failure_are_stripped(self, screen):
+        out = Out()
+        s = Screen(out, 24, 40, ChatConfig(show_thinking=True), color=False)
+        s.enter(); out.text(clear=True)
+        s.thinking_delta(ThinkingDelta("hm\x1b[1;1Hm"))
+        s.failure(Failure("boom\x1b[?1049h"))
+        t = out.text()
+        assert "\x1b" not in t and "hmm" in t and "boom" in t
+
+    def test_the_prompt_and_replayed_history_are_stripped(self, screen):
+        s, out = screen
+        s.enter(); out.text(clear=True)
+        s.turn_started(TurnStarted("codex", "", "go\x1b[2Khome"))
+        s.history([
+            UserMessage(source="claude", text="fix\x1b[1;1H it"),
+            AssistantMessage(source="claude", text="Done\x1b[J."),
+            ToolCall(source="claude", call_id="1", tool="Ba\x1bsh",
+                     arguments={"command": "pytest\x1b[2K"}),
+            ToolResult(source="claude", call_id="1", output="12\x1b[J passed"),
+        ], source="claude")
+        t = out.text()
+        assert "\x1b" not in t
+        assert "gohome" in t and "fix it" in t and "Done." in t and "12 passed" in t
+
+    def test_cells_still_counts_the_renderers_own_sgr_as_zero(self, screen):
+        s, out = screen
+        s.enter()
+        s.print(s._dim("x" * 5))
+        assert s._col == 5
+
+
+def test_the_approval_row_offers_only_the_available_choices(screen):
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.approval(ApprovalRequest("command", "rm x", choices=("allow", "deny")))
+    t = out.text()
+    assert "  ▸ Allow command: rm x   [y]es [n]o\r\n" in t
+    assert "[a]lways" not in t
+
+
+def test_leave_clears_the_bottom_rows(screen):
+    """The bar and composer are painted rows like any other: left behind, they
+    scroll into the terminal's scrollback when the shell prompt returns."""
+    s, out = screen
+    s.enter(); out.text(clear=True); s.leave()
+    t = out.text()
+    assert f"\x1b[{s.rows - 2};1H" in t and "\x1b[J" in t
+    assert t.index("\x1b[J") > t.index(f"\x1b[{s.rows - 2};1H")
+
+
 def test_bottom_block_rows_and_cursor(screen):
     s, out = screen
     s.enter(); out.text(clear=True)

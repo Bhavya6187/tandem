@@ -50,6 +50,18 @@ class ApprovalRequest:
     choices: tuple[str, ...] = ("allow", "always", "deny")
 
 
+APPROVAL_LABELS = (("allow", "[y]es"), ("always", "[a]lways"), ("deny", "[n]o"))
+
+
+def offered_labels(choices: tuple[str, ...] | None) -> str:
+    """The keys an approval advertises, in y/a/n order, filtered by what the
+    request actually offers — codex drops `always` when the app-server's
+    availableDecisions carry no acceptForSession. An empty or missing set
+    means the default three (the dataclass's own default)."""
+    return " ".join(label for key, label in APPROVAL_LABELS
+                    if not choices or key in choices)
+
+
 @dataclass(frozen=True)
 class QuestionRequest:
     prompt: str

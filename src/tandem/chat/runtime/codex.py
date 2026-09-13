@@ -70,6 +70,15 @@ def _decision(choice: str, available) -> str:
     return "accept"
 
 
+def _choices(available) -> tuple[str, ...]:
+    """What the row may offer: `always` needs the app-server to list
+    acceptForSession, or the key would silently mean plain accept."""
+    listed = {d for d in (available or []) if isinstance(d, str)}
+    if listed and "acceptForSession" not in listed:
+        return ("allow", "deny")
+    return ("allow", "always", "deny")
+
+
 class CodexRuntime:
     harness = "codex"
 
@@ -153,14 +162,18 @@ class CodexRuntime:
                       "error": {"code": -32001, "message": "tandem cannot parse this request"}})
             return
         if method == "item/commandExecution/requestApproval":
-            choice = answers.approve(ApprovalRequest("command", first_line(strip_shell(p.command or ""))))
+            available = params.get("availableDecisions")
+            choice = answers.approve(ApprovalRequest(
+                "command", first_line(strip_shell(p.command or "")), _choices(available)))
             send({"jsonrpc": "2.0", "id": rid,
-                  "result": {"decision": _decision(choice, params.get("availableDecisions"))}})
+                  "result": {"decision": _decision(choice, available)}})
         elif method == "item/fileChange/requestApproval":
+            available = params.get("availableDecisions")
             detail = getattr(p, "reason", None) or "apply file changes"
-            choice = answers.approve(ApprovalRequest("file_change", first_line(detail)))
+            choice = answers.approve(ApprovalRequest("file_change", first_line(detail),
+                                                    _choices(available)))
             send({"jsonrpc": "2.0", "id": rid,
-                  "result": {"decision": _decision(choice, params.get("availableDecisions"))}})
+                  "result": {"decision": _decision(choice, available)}})
         elif method == "item/permissions/requestApproval":
             detail = getattr(p, "reason", None) or "additional permissions"
             choice = answers.approve(ApprovalRequest("permission", first_line(detail)))

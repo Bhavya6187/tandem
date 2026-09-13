@@ -72,10 +72,12 @@ class WindowAnswers:
 class Window:
     def __init__(self, session, store, cfg, screen: Screen, composer: Composer,
                  dispatcher, answers: WindowAnswers, bar: StatusBar, usage_state: dict,
-                 meters: dict, poller: RateLimitPoller | None = None):
+                 meters: dict, poller: RateLimitPoller | None = None,
+                 stdin_fd: int | None = None):
         self.session, self.store, self.cfg = session, store, cfg
         self.screen, self.composer, self.dispatcher = screen, composer, dispatcher
         self.answers, self.bar, self.usage_state, self.meters, self.poller = answers, bar, usage_state, meters, poller
+        self.stdin_fd = stdin_fd
         self._ctrlc_at = 0.0
 
     # -- painting ------------------------------------------------------------
@@ -91,6 +93,14 @@ class Window:
     def paint(self) -> None:
         text, col = self.composer.line(self.screen.cols)
         self.screen.paint_bottom(self.bar_line(), text, col, focus_composer=True)
+
+    def resize(self, rows: int, cols: int) -> None:
+        """SIGWINCH: the scroll region and the bar move together, and the
+        bottom block is repainted at once — otherwise it stays wherever the
+        old geometry left it until the next event or the select timeout."""
+        self.screen.resize(rows, cols)
+        self.bar.resize(rows, cols)
+        self.paint()
 
     def paint_history(self) -> None:
         if self.cfg.history_turns <= 0:
@@ -141,9 +151,11 @@ class Window:
         elif isinstance(ev, ToolFinished):
             s.tool_finished(ev)
         elif isinstance(ev, ApprovalRequest):
+            self._flush_input()
             s.approval(ev)
             self.composer.begin_approval(ev)
         elif isinstance(ev, QuestionRequest):
+            self._flush_input()
             s.question(ev)
             self.composer.begin_question(ev)
         elif isinstance(ev, TurnFinished):
@@ -162,6 +174,20 @@ class Window:
         self.paint()
 
     # -- input (main thread) ---------------------------------------------------
+
+    def _flush_input(self) -> None:
+        """Drop whatever is still unread in the tty before an answer row goes
+        up. The loop drains live events before it reads stdin in the same
+        pass, so bytes typed while the model was working would arrive as the
+        first chunk after the row and their first character would be read as
+        the answer to a request the user has not seen. Anything typed after
+        the row is untouched."""
+        if self.stdin_fd is None:
+            return
+        try:
+            termios.tcflush(self.stdin_fd, termios.TCIFLUSH)
+        except (termios.error, OSError, ValueError):
+            pass                                  # not a tty (tests, a pipe)
 
     def _deny_pending(self) -> bool:
         """Answer an approval or question the user is walking away from, and
@@ -258,7 +284,8 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
     poller = RateLimitPoller(list(session.participants), usage_state) if load_frame_config().rate_limits else None
     dispatcher = Dispatcher(store, session, runtimes, post, answers, meters=meters)
     bar = StatusBar(rows, cols, session.active, session.targets_for(session.active), hint=HINT)
-    win = Window(session, store, cfg, screen, composer, dispatcher, answers, bar, usage_state, meters, poller)
+    win = Window(session, store, cfg, screen, composer, dispatcher, answers, bar, usage_state,
+                 meters, poller, stdin_fd=stdin_fd)
 
     old_attrs = termios.tcgetattr(stdin_fd)
     old_winch = signal.signal(signal.SIGWINCH, lambda *_: os.write(wake_w, b"W"))
@@ -276,9 +303,7 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
             if wake_r in ready:
                 kinds = os.read(wake_r, 4096)
                 if b"W" in kinds:
-                    rows, cols = _winsize(stdin_fd)
-                    screen.resize(rows, cols)
-                    bar.resize(rows, cols)
+                    win.resize(*_winsize(stdin_fd))
             # drained on every pass, not only when a wake byte arrived: `post`
             # swallows a failed write, and a queued event must not sit unseen
             # until some later event's byte gets through

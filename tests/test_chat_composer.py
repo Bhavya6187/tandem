@@ -104,6 +104,29 @@ def test_approval_mode_keys():
     assert c.mode == "prompt"
 
 
+def test_approval_answers_only_on_the_first_character_of_a_read():
+    """The window drains live events — painting the approval row — before it
+    reads stdin, so anything with characters glued to it was typed while the
+    model was working. Scanning such a chunk for a y/a/n would answer a request
+    the user has not seen: "and then fix the tests" = always. Only a lone
+    keypress at the head of the read is an answer."""
+    c = Composer()
+    c.begin_approval(ApprovalRequest("command", "rm -rf ~/"))
+    assert feed(c, "xa") == []
+    assert feed(c, "and then fix the tests") == []
+    assert feed(c, "why is it slow?") == []
+    assert c.mode == "approval"                   # still waiting for a real answer
+    assert feed(c, "y") == [Answer("allow")]      # a keypress does answer
+
+
+def test_approval_keys_honor_the_offered_choices():
+    c = Composer()
+    c.begin_approval(ApprovalRequest("command", "rm x", choices=("allow", "deny")))
+    assert c.line(60)[0].startswith(" [y]es [n]o")
+    assert feed(c, "a") == []                     # not on offer: not an answer
+    assert feed(c, "n") == [Answer("deny")]
+
+
 def test_question_mode_digit_and_free_text():
     c = Composer()
     c.begin_question(QuestionRequest("Which?", ("red", "blue")))

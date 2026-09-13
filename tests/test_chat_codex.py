@@ -242,7 +242,10 @@ def test_golden_lines_drive_the_handler():
         got = rt.handle(m, sent.append, rec.emit, rec)
         outcome = got or outcome
     assert outcome is not None and outcome.status == "completed"
-    assert rec.approvals == [ApprovalRequest("command", "echo fixture —")]
+    # the captured availableDecisions are ["accept", {amendment…}, "cancel"]:
+    # no acceptForSession, so the row must not offer `always` — the key would
+    # mean plain accept
+    assert rec.approvals == [ApprovalRequest("command", "echo fixture —", ("allow", "deny"))]
     assert sent == [{"jsonrpc": "2.0", "id": 0, "result": {"decision": "accept"}}]
     assert rec.kinds() == ["ToolStarted", "ToolOutput", "ToolFinished", "LimitsUpdate", "TextDelta", "TurnFinished"]
     assert rec.events[0] == ToolStarted("call_vDe2mWf2XYJ1BjLDXSDWgLSo", "exec", "echo fixture —")
