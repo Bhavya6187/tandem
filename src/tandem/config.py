@@ -151,6 +151,11 @@ def load_harnesses() -> list[str]:
 
 
 _SETTING_SOURCES = ("user", "project", "local")
+# codex's own app-server enums: a value outside them is rejected by the
+# launch, so an unknown one degrades to "" (inherit ~/.codex/config.toml)
+# rather than becoming the reason a launch breaks.
+_CODEX_APPROVAL_POLICIES = ("untrusted", "on-request", "never")
+_CODEX_SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
 
 
 @dataclass(frozen=True)
@@ -170,10 +175,12 @@ def load_chat_config() -> ChatConfig:
         return ChatConfig()
     d = ChatConfig()
 
-    def pick(key: str, kind: type, default):
+    def pick(key: str, kind: type, default, allowed=None):
         v = raw.get(key, default)
         # bool is an int subclass: a `true` must not pass as an int
         if not isinstance(v, kind) or (kind is int and isinstance(v, bool)):
+            return default
+        if allowed and v not in allowed:
             return default
         return v
 
@@ -188,6 +195,7 @@ def load_chat_config() -> ChatConfig:
         history_turns=max(0, pick("history_turns", int, d.history_turns)),
         show_thinking=pick("show_thinking", bool, d.show_thinking),
         claude_setting_sources=sources,
-        codex_approval_policy=pick("codex_approval_policy", str, d.codex_approval_policy),
-        codex_sandbox=pick("codex_sandbox", str, d.codex_sandbox),
+        codex_approval_policy=pick("codex_approval_policy", str,
+                                   d.codex_approval_policy, _CODEX_APPROVAL_POLICIES),
+        codex_sandbox=pick("codex_sandbox", str, d.codex_sandbox, _CODEX_SANDBOXES),
     )

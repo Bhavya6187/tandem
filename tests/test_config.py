@@ -217,3 +217,27 @@ def test_chat_config_reads_and_validates(tmp_path, monkeypatch):
     assert cfg.claude_setting_sources == ("user",)   # unknown names dropped
     assert cfg.codex_approval_policy == "never"
     assert cfg.codex_sandbox == ""            # wrong type -> default
+
+
+def test_chat_config_keeps_known_codex_vocabularies(tmp_path, monkeypatch):
+    _write_config(
+        tmp_path, monkeypatch,
+        '[chat]\ncodex_approval_policy = "on-request"\n'
+        'codex_sandbox = "workspace-write"\n',
+    )
+    cfg = load_chat_config()
+    assert cfg.codex_approval_policy == "on-request"
+    assert cfg.codex_sandbox == "workspace-write"
+
+
+def test_chat_config_unknown_codex_vocabularies_inherit(tmp_path, monkeypatch):
+    # both feed codex's own closed enums: a typo must degrade to "" (inherit
+    # ~/.codex/config.toml), never reach the launch and have codex reject it
+    _write_config(
+        tmp_path, monkeypatch,
+        '[chat]\ncodex_approval_policy = "sometimes"\n'
+        'codex_sandbox = "workspace_write"\n',
+    )
+    cfg = load_chat_config()
+    assert cfg.codex_approval_policy == ""
+    assert cfg.codex_sandbox == ""
