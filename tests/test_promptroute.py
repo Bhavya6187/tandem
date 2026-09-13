@@ -52,6 +52,15 @@ def test_opencode_provider_model():
         Route("opencode", "openai/gpt-5.4-mini"), "go")
 
 
+def test_opencode_model_id_may_carry_more_slashes():
+    # opencode splits `provider/modelID` on the first slash only, so
+    # openrouter ids keep theirs; nobody else's model name may.
+    assert parse_route("/opencode:openrouter/anthropic/claude-sonnet-4 go", PARTS) == (
+        Route("opencode", "openrouter/anthropic/claude-sonnet-4"), "go")
+    assert parse_route("/claude:a/b go", PARTS) is None
+    assert parse_route("/codex:a/b go", PARTS) is None
+
+
 def test_default_clears_pin():
     assert parse_route("/codex:default go", PARTS) == (Route("codex", ""), "go")
 

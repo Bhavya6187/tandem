@@ -27,7 +27,7 @@ HARNESSES = ("claude", "codex", "opencode")
 # model name may not carry a slash either, with one exception below.
 _MODEL = r"[A-Za-z0-9._-]+"
 _ROUTE_RE = re.compile(
-    rf"/({'|'.join(HARNESSES)})(?::({_MODEL}(?:/{_MODEL})?))?(?=\s|$)")
+    rf"/({'|'.join(HARNESSES)})(?::({_MODEL}(?:/{_MODEL})*))?(?=\s|$)")
 
 
 @dataclass(frozen=True)
@@ -50,9 +50,11 @@ def parse_route(
     if m is None:
         return None
     harness, model = m.group(1), m.group(2)
-    # The exception: opencode names its models `provider/model`, so a slash
-    # is part of the name there and nowhere else. `/claude:haiku/x` is a
-    # path like `/codex/README.md`, so it is not a route at all — not even a
+    # The exception: opencode names its models `provider/modelID`, and the
+    # id may itself carry slashes (`openrouter/anthropic/claude-sonnet-4`),
+    # because opencode splits on the first one only. A slash belongs inside
+    # a model name there and nowhere else: `/claude:haiku/x` is a path like
+    # `/codex/README.md`, so it is not a route at all — not even a
     # non-participant one, which is why this precedes the check below.
     if model and "/" in model and harness != "opencode":
         return None
