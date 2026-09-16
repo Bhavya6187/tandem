@@ -26,14 +26,27 @@ class RuntimeClient(Protocol):
     def close(self) -> None: ...
 
 
+# What claude exports to the processes it spawns so a child knows it is
+# nested and where its parent's plumbing lives. Inherited by a headless
+# claude that tandem starts from inside a claude session, they change how
+# that child behaves (the frame's pty probes found it swallowing quit keys).
+# Every other CLAUDE* variable is the user's own configuration —
+# CLAUDE_CONFIG_DIR names the very store tandem syncs, CLAUDE_CODE_USE_BEDROCK
+# picks the provider — and has to reach the child untouched.
+_NESTING_MARKERS = frozenset({
+    "CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SSE_PORT",
+})
+
+
 def child_env(base: dict[str, str] | None = None) -> dict[str, str]:
-    """The user's environment minus every CLAUDE* marker: an inherited one
-    changes how claude behaves (the frame's pty probes found it swallowing
-    quit keys), and codex/opencode never need them."""
+    """The user's environment minus the markers claude sets for its own
+    children (_NESTING_MARKERS): codex and opencode never read them, and a
+    headless claude must not take itself for a nested one."""
     env = dict(os.environ if base is None else base)
-    for key in list(env):
-        if key.startswith("CLAUDE"):
-            del env[key]
+    for key in _NESTING_MARKERS:
+        env.pop(key, None)
     return env
 
 
@@ -60,7 +73,13 @@ def _signal_group(proc: subprocess.Popen, sig: int) -> None:
 def terminate(proc: subprocess.Popen, *, soft: Callable[[], None] | None = None,
               soft_timeout: float = 5.0, term_timeout: float = 2.0) -> str:
     """The ladder: `soft` (close stdin, send a quit request), SIGTERM to the
-    group, SIGKILL. Returns the rung that worked: dead|soft|term|kill."""
+    group, SIGKILL. Returns the rung that worked: dead|soft|term|kill.
+
+    Every rung tandem climbs signals the whole group, not just its leader:
+    a harness that goes quietly on EOF does not wait for the tool command
+    it was running, and that command sits in the group tandem created. Only
+    `dead` leaves the group alone — a harness that ended on its own owns its
+    children's fate, as it does under its native CLI."""
     if proc.poll() is not None:
         return "dead"
     if soft is not None:
@@ -69,6 +88,9 @@ def terminate(proc: subprocess.Popen, *, soft: Callable[[], None] | None = None,
         except Exception:
             pass
         if _wait(proc, soft_timeout):
+            # the group outlives its leader while any member remains; an
+            # empty one raises, which _signal_group swallows
+            _signal_group(proc, signal.SIGTERM)
             return "soft"
     _signal_group(proc, signal.SIGTERM)
     if _wait(proc, term_timeout):

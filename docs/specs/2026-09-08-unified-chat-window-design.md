@@ -165,9 +165,13 @@ class RuntimeClient(Protocol):
 protocol loop on these; the dispatcher runs the client on a worker thread
 so the main thread keeps drawing.
 
-Child environment for every client: the user's environment minus any
-`CLAUDE*` variables (the frame's pty probes found an inherited marker
-changes how claude handles quit keys; the spike stripped them too).
+Child environment for every client: the user's environment minus the
+markers claude sets for its own children (`CLAUDECODE`, `CLAUDE_PID`, the
+`CLAUDE_CODE_*` session plumbing — an inherited marker makes a headless
+claude take itself for a nested one; the frame's pty probes found it
+swallowing quit keys). The user's own `CLAUDE*` settings pass through:
+`CLAUDE_CONFIG_DIR` names the very store tandem syncs, and provider
+switches such as `CLAUDE_CODE_USE_BEDROCK` must reach the child.
 
 **Claude** — process per turn.
 
