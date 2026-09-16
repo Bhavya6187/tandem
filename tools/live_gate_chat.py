@@ -47,7 +47,9 @@ PROJ = Path(a.proj or tempfile.mkdtemp(prefix="tandem-chat-gate-"))
 PROJ.mkdir(parents=True, exist_ok=True)
 subprocess.run(["git", "init", "-q"], cwd=PROJ)
 S = "chatgate"
-APPROVAL = r"\[y\]es \[a\]lways \[n\]o"
+# the row offers only what the harness listed: codex leaves acceptForSession
+# out of availableDecisions for a plain command, so no `[a]lways` there
+APPROVAL = r"\[y\]es(?: \[a\]lways)? \[n\]o"
 
 
 def t(*args):

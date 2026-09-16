@@ -217,3 +217,19 @@ as `date · versions · PASS/FAIL · notes`.
   turn can start in that session. The same script with the codex step removed
   (claude → opencode → claude) passed every step. Re-run once codex is
   signed in.
+- 2026-09-16 · claude 2.1.273 / codex 0.154.0 / opencode 1.18.20 · FAIL (7) ·
+  the gate script's own fault: its approval regex demanded `[a]lways`, but the
+  row offers only what the harness listed and codex leaves `acceptForSession`
+  out of `availableDecisions` for a plain command, so the row read
+  `[y]es [n]o`, the `y` was never sent, and the codex turn waited on the
+  approval until the quit denied it (`aborted by user`); everything after
+  cascaded. Regex widened to `\[y\]es(?: \[a\]lways)? \[n\]o`. The run did
+  verify the shutdown path live: unanswered approval denied on quit, exit in
+  0.5 s, status 0.
+- 2026-09-16 · claude 2.1.273 / codex 0.154.0 / opencode 1.18.20 · PASS (22/22) ·
+  full relay with approvals on both codex and claude, opencode pinned to
+  `opencode/big-pickle`, clean exit, `tandem status` shows 0 failed turns on
+  every direction. The codex protocol models are still generated from
+  0.153.4; `tandem doctor` warns about the 0.154.0 install (its schema adds
+  two optional fields and a description — 23 generated lines — which the
+  0.153.4 models parse unchanged).
