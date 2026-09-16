@@ -250,6 +250,22 @@ def test_window_answers_never_hands_over_a_leftover_value():
     assert got == ["deny"]
 
 
+def test_window_answers_close_releases_the_waiter_and_every_later_request():
+    """After close() nobody is at the keyboard: the request on screen is
+    denied, and every request a runtime raises after that is answered at
+    once, without being put on screen."""
+    posted = []
+    answers = WindowAnswers(posted.append)
+    got = []
+    first = ApprovalRequest("command", "rm -rf /")
+    t = blocks_until_answered(answers, first, got)
+    answers.close(); t.join(2)
+    assert got == ["deny"]
+    assert answers.answer(QuestionRequest("what?", ())) == ""
+    assert answers.approve(ApprovalRequest("command", "ls")) == "deny"
+    assert posted == [first]
+
+
 def test_question_by_digit(env_factory):
     env = env_factory(); w, d, out, answers = make_window(env)
     got = {}

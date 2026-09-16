@@ -46,23 +46,40 @@ def window_command(text: str) -> str:
     return head[0] if head and head[0] in WINDOW_COMMANDS else ""
 
 
+_CLOSED = object()      # what close() leaves in the answers queue for whoever is waiting
+
+
 class WindowAnswers:
     def __init__(self, post: Callable[[LiveEvent], None]):
         self._post = post
         self._q: queue.Queue = queue.Queue()
+        self._closed = False
 
     def approve(self, req: ApprovalRequest) -> str:
-        self._drop_stale()
-        self._post(req)
-        return self._q.get()
+        return self._ask(req, "deny")
 
     def answer(self, req: QuestionRequest) -> str:
+        return self._ask(req, "")
+
+    def _ask(self, req, fallback: str) -> str:
+        """Put the request on screen and wait for the key. After close()
+        nobody is at the keyboard: the request waiting now gets the fallback,
+        and every later one is answered at once without reaching the screen —
+        a runtime that asks its questions one after another (claude's
+        AskUserQuestion) would otherwise park the worker on the second."""
+        if self._closed:
+            return fallback
         self._drop_stale()
         self._post(req)
-        return self._q.get()
+        got = self._q.get()
+        return fallback if got is _CLOSED else got
 
     def resolve(self, text: str) -> None:
         self._q.put(text)
+
+    def close(self) -> None:
+        self._closed = True
+        self._q.put(_CLOSED)
 
     def _drop_stale(self) -> None:
         """Every answer belongs to the request that was on screen when the
@@ -73,8 +90,11 @@ class WindowAnswers:
         is the belt to that pair of braces."""
         while True:
             try:
-                self._q.get_nowait()
+                got = self._q.get_nowait()
             except queue.Empty:
+                return
+            if got is _CLOSED:
+                self._q.put(got)             # close() spoke; the wait below must hear it
                 return
 
 

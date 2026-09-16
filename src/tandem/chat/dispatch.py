@@ -62,6 +62,7 @@ class Dispatcher:
         self._current: str | None = None
         self._running = False
         self._closed = False
+        self._spoken = 0        # bumped by every bare route; a turn started before one must not undo it
 
     @property
     def default(self) -> str:
@@ -100,6 +101,8 @@ class Dispatcher:
             if route.model is not None:
                 self.store.set_pin(self.session.tandem_id, harness, route.model)
             if not prompt:
+                with self._lock:
+                    self._spoken += 1
                 self._set_default(harness)
                 model = self.pin(harness)
                 return f"default → {harness}" + (f" · {model}" if model else "")
@@ -139,12 +142,14 @@ class Dispatcher:
         self.interrupt()
         # A runtime parked on an unanswered approval is asleep in the answers
         # queue, where interrupt cannot reach it; the window's Ctrl-C ladder
-        # denies first for the same reason. Nothing will ask again, so a
-        # value left behind answers nobody.
-        resolve = getattr(self.answers, "resolve", None)
-        if resolve is not None:
+        # denies first for the same reason. Closing the answers denies that
+        # one and everything the runtime asks after it — claude asks a
+        # multi-question request one question at a time, and a single deny
+        # would leave the worker parked on the second.
+        close_answers = getattr(self.answers, "close", None)
+        if close_answers is not None:
             try:
-                resolve("deny")
+                close_answers()
             except Exception:
                 pass
         for rt in self.runtimes.values():
@@ -157,10 +162,13 @@ class Dispatcher:
 
     # -- the turn ------------------------------------------------------------
 
+    def _reload_session(self) -> None:
+        self.session = self.store.get_session(self.session.tandem_id) or self.session
+
     def _set_default(self, harness: str) -> None:
         if harness != self.session.active:
             self.store.set_active(self.session.tandem_id, harness)
-        self.session = self.store.get_session(self.session.tandem_id) or self.session
+        self._reload_session()
 
     def _validate(self, harness: str) -> list[str]:
         sid = self.session.native_id(harness)
@@ -195,11 +203,11 @@ class Dispatcher:
         must be claimed by one caller only."""
         self._current = item.harness
         self._running = True
-        self._thread = threading.Thread(target=self._run, args=(item,),
+        self._thread = threading.Thread(target=self._run, args=(item, self._spoken),
                                         name="tandem-chat-turn", daemon=True)
         self._thread.start()
 
-    def _run(self, item: Pending) -> None:
+    def _run(self, item: Pending, spoken: int) -> None:
         harness = item.harness
         ran = False
         self.emit(TurnStarted(harness, item.model, item.prompt))
@@ -226,8 +234,13 @@ class Dispatcher:
             ran = True      # from here on the runtime has emitted its own TurnFinished
             if outcome.native_id:
                 self.session = ops.adopt_native_id(self.store, session, harness, outcome.native_id)
-            # the target stays the default even after a failure: its file holds the partial turn
-            self._set_default(harness)
+            # the target becomes the default — its file holds the turn, partial
+            # or not — unless the user named another harness since this turn
+            # started: a bare `/codex` typed while claude worked is the later word
+            if self._spoken == spoken:
+                self._set_default(harness)
+            else:
+                self._reload_session()          # keep the ids this turn minted alongside that word
             # A turn that did not complete can have recorded the prompt and no
             # answer (a model call that 401s does exactly that). Synced
             # outward as-is it leaves every other session ending on a user

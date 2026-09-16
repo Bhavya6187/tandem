@@ -208,6 +208,28 @@ def test_prompts_queue_while_busy(setup):
     assert d.default == "codex"
 
 
+def test_a_bare_route_typed_during_a_turn_outlives_that_turn(setup):
+    """`/codex` while claude is still working is the user's later word: the
+    turn's completion makes its harness the default only when nothing was
+    said since it started."""
+    env, d, rts, events = setup
+    gate = threading.Event()
+    rts["claude"].block = gate
+    assert d.submit("first") == ""
+    deadline = time.monotonic() + 5.0
+    while not rts["claude"].calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert d.submit("/codex") == "default → codex"
+    gate.set()
+    wait_idle(events)
+    assert d.default == "codex"
+    assert env.store.get_session(env.session.tandem_id).active == "codex"
+    d.submit("second")
+    wait_idle(events, 2)
+    assert rts["codex"].calls[-1][1] == "second"
+    assert [c[1] for c in rts["claude"].calls] == ["first"]
+
+
 def test_pump_from_inside_the_idle_emit_starts_the_queued_turn(env_factory):
     """The window pumps on Idle, and Idle is emitted from the worker thread
     before it returns. Even at its most synchronous — pump() called straight
@@ -649,6 +671,42 @@ class TestClose:
         d.close()
         assert time.monotonic() - started < 9.0
         assert answered == ["deny"]
+        assert not d._thread.is_alive()
+
+    def test_close_releases_every_question_of_a_multi_question_request(self, env_factory):
+        """claude's AskUserQuestion asks its questions one after another on
+        the worker. A close() that answers only the first leaves the worker
+        parked on the second for the whole join timeout, and the store then
+        closes under it."""
+        from tandem.chat.events import QuestionRequest
+        from tandem.chat.window import WindowAnswers
+
+        env = env_factory(active="claude")
+        answered = []
+
+        class AsksTwice:
+            harness = "claude"
+
+            def run_turn(self, session, native_id, prompt, model, emit, answers):
+                for q in ("one?", "two?"):
+                    answered.append(answers.answer(QuestionRequest(q, ())))
+                emit(TurnFinished("interrupted", ""))
+                return TurnOutcome("interrupted")
+
+            def interrupt(self): pass
+
+            def close(self): pass
+
+        events, posted = [], []
+        rt = AsksTwice()
+        d = Dispatcher(env.store, env.session, {"claude": rt, "codex": rt},
+                       events.append, WindowAnswers(posted.append))
+        d.submit("ask me twice")
+        self._wait_for(lambda: posted != [])
+        started = time.monotonic()
+        d.close()
+        assert time.monotonic() - started < 5.0
+        assert answered == ["", ""]
         assert not d._thread.is_alive()
 
 
