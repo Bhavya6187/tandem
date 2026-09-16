@@ -63,6 +63,35 @@ def test_exactly_full_line_breaks_before_the_next_chunk(screen):
     assert s._col == 0 and out.text().endswith("x" * 40 + "\r\n")
 
 
+def test_a_chunk_wider_than_the_row_wraps_without_an_extra_break():
+    """The terminal wraps a long delta on its own; the renderer follows the
+    cursor onto the new row instead of breaking the paragraph a second time."""
+    out = Out()
+    s = Screen(out, 24, 10, ChatConfig(), color=False)
+    s.enter(); out.text(clear=True)
+    s.print("abcdefghijk")
+    assert s._col == 1 and out.text() == "abcdefghijk"
+    s.print("l")
+    assert s._col == 2 and out.text() == "abcdefghijkl"
+    s.print("x" * 18)                          # lands exactly on the edge, two rows down
+    assert s._col == 0 and out.text().endswith("x" * 18 + "\r\n")
+
+
+def test_tool_output_lines_are_counted_at_their_newline(screen):
+    """Command output streams in arbitrary chunks; a line is a line when its
+    newline arrives, not once per chunk — the cap counts lines the command
+    printed, and an unterminated last line is still shown at the end."""
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.tool_started(ToolStarted("c1", "exec", "make"))
+    for chunk in ("he", "ll", "o\nwor", "ld\ntail"):
+        s.tool_output(ToolOutput("c1", chunk))
+    s.tool_finished(ToolFinished("c1", True, "exit 0"))
+    t = out.text()
+    assert "    hello\r\n    world\r\n    … +1 lines\r\n    ok · exit 0\r\n" in t
+    assert "    he\r\n" not in t and "tail" not in t
+
+
 def test_turn_and_tool_rows(screen):
     s, out = screen
     s.enter(); out.text(clear=True)

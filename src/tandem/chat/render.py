@@ -73,6 +73,7 @@ class Screen:
         self._tool_lines: dict[str, int] = {}
         self._tool_held: dict[str, list[str]] = {}
         self._tool_dropped: dict[str, int] = {}
+        self._tool_partial: dict[str, str] = {}      # the unterminated tail of a call's output
 
     @property
     def region_rows(self) -> int:
@@ -122,12 +123,15 @@ class Screen:
                 self._col = 0
             if seg:
                 self._w(seg)
-                self._col += _cells(seg)
-                if self._col >= self.cols:
-                    # the terminal's pending-wrap state does not survive a
-                    # cursor move, so end the line here rather than guess
+                # a segment wider than the row is wrapped by the terminal
+                # itself; the cursor lands in the next row at the remainder
+                total = self._col + _cells(seg)
+                self._col = total % self.cols
+                if total and self._col == 0:
+                    # exactly on the edge: the terminal's pending-wrap state
+                    # does not survive a cursor move, so end the line here
+                    # rather than guess
                     self._w("\r\n")
-                    self._col = 0
 
     def line(self, text: str = "") -> None:
         if self._col:
@@ -151,6 +155,7 @@ class Screen:
         self._turn_harness = ev.harness
         self._speaker_shown = False
         self._tool_lines.clear(); self._tool_held.clear(); self._tool_dropped.clear()
+        self._tool_partial.clear()
         label = f"you → {ev.harness}" + (f" · {ev.model}" if ev.model else "")
         prompt = _safe(ev.prompt)
         self.line()
@@ -174,26 +179,39 @@ class Screen:
         self._tool_lines[ev.call_id] = 0
         self._tool_held[ev.call_id] = []
         self._tool_dropped[ev.call_id] = 0
+        self._tool_partial[ev.call_id] = ""
         self.line(self._dim(f"  ▸ {_safe(ev.tool)} {_safe(ev.summary)}".rstrip()))
 
     def tool_output(self, ev: ToolOutput) -> None:
         """Print the head of the output up to the cap and hold the rest: a
         call that turns out to have failed gets its tail flushed by
         tool_finished, where the lines the user actually needs are. The hold
-        is bounded — past _ERROR_BUFFER_LINES the overflow is only counted."""
-        cap = self.cfg.tool_output_lines
-        for raw in (_safe(line) for line in ev.text.splitlines()):
-            if self._tool_lines.get(ev.call_id, 0) < cap:
-                self._tool_lines[ev.call_id] = self._tool_lines.get(ev.call_id, 0) + 1
-                self.line(self._dim("    " + raw))
+        is bounded — past _ERROR_BUFFER_LINES the overflow is only counted.
+
+        Output streams in arbitrary chunks, so a line counts when its newline
+        arrives; the unterminated tail waits for the next chunk, or for
+        tool_finished."""
+        buf = self._tool_partial.get(ev.call_id, "") + ev.text
+        *lines, self._tool_partial[ev.call_id] = buf.split("\n")
+        for line in lines:
+            self._tool_line(ev.call_id, line)
+
+    def _tool_line(self, call_id: str, line: str) -> None:
+        raw = _safe(line.rstrip("\r"))
+        if self._tool_lines.get(call_id, 0) < self.cfg.tool_output_lines:
+            self._tool_lines[call_id] = self._tool_lines.get(call_id, 0) + 1
+            self.line(self._dim("    " + raw))
+        else:
+            held = self._tool_held.setdefault(call_id, [])
+            if len(held) < _ERROR_BUFFER_LINES:
+                held.append(raw)
             else:
-                held = self._tool_held.setdefault(ev.call_id, [])
-                if len(held) < _ERROR_BUFFER_LINES:
-                    held.append(raw)
-                else:
-                    self._tool_dropped[ev.call_id] = self._tool_dropped.get(ev.call_id, 0) + 1
+                self._tool_dropped[call_id] = self._tool_dropped.get(call_id, 0) + 1
 
     def tool_finished(self, ev: ToolFinished) -> None:
+        tail = self._tool_partial.pop(ev.call_id, "")
+        if tail:
+            self._tool_line(ev.call_id, tail)
         held = self._tool_held.pop(ev.call_id, [])
         beyond = self._tool_dropped.pop(ev.call_id, 0)
         self._tool_lines.pop(ev.call_id, None)
