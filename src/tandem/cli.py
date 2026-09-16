@@ -423,6 +423,50 @@ def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
 
 
 @main.command()
+@click.option(
+    "--on", "harness",
+    type=click.Choice(["claude", "codex", "opencode"]),
+    default=None,
+    help="Harness for the first prompt [default: the session's last-used harness].",
+)
+def chat(harness: str | None) -> None:
+    """One composer for every harness.
+
+    Prompts run headless on the last-used CLI; a leading /claude, /codex or
+    /opencode runs the prompt there and makes it the default. Pairs a fresh
+    session when this directory has none."""
+    from .chat.window import run_chat
+    from .config import load_chat_config
+
+    cwd = _cwd()
+    with StateStore() as store:
+        session = store.latest_session_for_cwd(cwd)
+        if session is None:
+            usable, _ = _resolve_participants()
+            # a --on naming a harness this machine cannot run must never
+            # become the fresh session's active slot: an active harness
+            # outside the participants can never run a turn. Pair on the
+            # default and let the participant check below report it.
+            active = harness if harness in usable else usable[0]
+            session = _pair_session(store, cwd, active, usable)
+        else:
+            store.touch_used(session.tandem_id)
+            session = _narrow_participants(store, session)
+        if harness is not None:
+            if harness not in session.participants:
+                click.secho(
+                    f"error: {harness} is not a participant in this session "
+                    f"(participants: {', '.join(session.participants)}).",
+                    fg="red", err=True,
+                )
+                sys.exit(1)
+            store.set_active(session.tandem_id, harness)
+            session = store.get_session(session.tandem_id) or session
+        code = run_chat(session, store, load_chat_config())
+    sys.exit(code)
+
+
+@main.command()
 @click.option("-m", "--model", default=None,
               help="Codex model for this worker (config default otherwise).")
 @click.option("--context", "context_mode",

@@ -23,11 +23,11 @@ class CompatRange:
 
 # Format observations in docs/formats.md correspond to these versions.
 COMPAT: dict[str, CompatRange] = {
-    "claude": CompatRange(tested="2.1.261", min_version=(2, 0), max_exclusive=(3,)),
+    "claude": CompatRange(tested="2.1.265", min_version=(2, 0), max_exclusive=(3,)),
     "codex": CompatRange(tested="0.153.4", min_version=(0, 140), max_exclusive=(0, 160)),
     # Floor-only by operator decision (spec: Compat gate). Pre-1.18 opencode
     # predates SQLite session storage and genuinely cannot work.
-    "opencode": CompatRange(tested="1.18.15", min_version=(1, 18)),
+    "opencode": CompatRange(tested="1.18.20", min_version=(1, 18)),
 }
 
 _VERSION_RE = re.compile(r"(\d+(?:\.\d+)+)")

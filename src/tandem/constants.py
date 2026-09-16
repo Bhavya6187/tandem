@@ -23,6 +23,11 @@ SEED_NOTE = (
 # reject a rollout with no response_item).
 SUB_SEED_NOTE = "[tandem] Delegated subagent worker session (no shared history)."
 
+# What closes a dispatched turn the harness never finished (a model call that
+# errored out): the prompt is in every session file with no reply after it,
+# and a shadow left on a user message is not a resumable session.
+TURN_ENDED_NOTE = "[tandem] the turn on {harness} ended: {status}"
+
 # Untranslatable-entry placeholder (decision for the spec's open question).
 PLACEHOLDER = (
     "[tandem: turn {turn} could not be translated from {source} — {reason}; "

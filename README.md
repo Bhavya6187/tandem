@@ -138,6 +138,7 @@ locations.
 | `tandem resume [id]` | Resume the latest or a specific session in this directory |
 | `tandem sessions [-n N]` | List recent sessions across directories |
 | `tandem run --on codex "…"` | Send one contextual prompt to another CLI (`claude`, `codex`, or `opencode`) |
+| `tandem chat` | One composer for every CLI: prompts run headless on the last-used harness; `/claude`, `/codex`, `/opencode` route and stick |
 
 ## Learn more
 

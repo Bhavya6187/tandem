@@ -345,3 +345,44 @@ def test_ago_buckets(delta_s, expected):
 def test_ago_tolerates_garbage():
     assert cli._ago(None) == "?"
     assert cli._ago("not-a-date") == "?"
+
+
+# -- tandem chat -------------------------------------------------------------
+
+
+def test_chat_command_uses_the_latest_session_and_honors_on(env_factory, monkeypatch):
+    from click.testing import CliRunner
+
+    from tandem import cli
+
+    env = env_factory(active="claude")
+    seen = {}
+    monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
+    monkeypatch.setattr("tandem.chat.window.run_chat", lambda session, store, cfg, **kw: seen.setdefault("session", session) and 0)
+    result = CliRunner().invoke(cli.main, ["chat", "--on", "codex"])
+    assert result.exit_code == 0, result.output
+    assert seen["session"].active == "codex"
+    assert env.store.get_session(env.session.tandem_id).active == "codex"
+
+
+def test_chat_rejects_a_non_participant(env_factory, monkeypatch):
+    from click.testing import CliRunner
+
+    from tandem import cli
+
+    env = env_factory(active="claude")
+    monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
+    result = CliRunner().invoke(cli.main, ["chat", "--on", "opencode"])
+    assert result.exit_code == 1 and "not a participant" in result.output
+
+
+def test_chat_on_an_unusable_harness_never_becomes_the_fresh_session_active(
+        homes, ok_versions):
+    """`--on` names a harness this machine cannot run and the directory has
+    no session yet: pairing must not stamp it as the active slot — a session
+    whose active harness is not a participant can never run a turn."""
+    r = click.testing.CliRunner().invoke(cli.main, ["chat", "--on", "opencode"])
+    assert r.exit_code == 1 and "not a participant" in r.output
+    with StateStore() as store:
+        session = store.latest_session_for_cwd(str(homes))
+    assert session.active in session.participants

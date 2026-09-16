@@ -66,7 +66,11 @@ class ReferenceConverter:
             out_events = self._apply_policy(events, source_id, ctx)
             if not out_events:
                 return []
-            return target.render_events(out_events, ctx)
+            rendered = target.render_events(out_events, ctx)
+            # only what actually rendered counts as synced: a raise above
+            # quarantines the entry instead, and must not move the marker
+            ctx.last_kind = out_events[-1].kind
+            return rendered
         except Exception as exc:  # localize any surprise to this one entry
             return TranslationError(
                 reason=f"{type(exc).__name__}: {exc}",
@@ -134,4 +138,6 @@ class ReferenceConverter:
             )
             out.extend(toolmap.map_pair(call, placeholder, target_id))
         ctx.pending_calls.clear()
+        if out:
+            ctx.last_kind = out[-1].kind
         return out

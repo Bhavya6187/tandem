@@ -129,6 +129,39 @@ class SyncEngine:
             return 0
         events = fn(ctx)
         entries = self.target.render_events(events, ctx) if events else []
+        return self._append_out_of_band(entries, ctx, cursor)
+
+    def close_dangling_turn(
+        self, ctx: SessionContext, cursor: SyncCursor, note: str
+    ) -> int:
+        """Close a turn whose last synced event is still the user's prompt:
+        a turn whose model call failed recorded the prompt and nothing else,
+        and a shadow left on a user message is not a resumable session —
+        opencode renders it as perpetually working and its dry-resume check
+        rejects it outright, which wedges every later turn there.
+
+        `note` goes in as the target's own placeholder rendering, through the
+        same append path as everything else, so cursors, intents and echo
+        suppression stay consistent. A no-op unless the last synced event was
+        a user message, so a completed turn is never touched."""
+        if not self._prepared:
+            self._prepare(ctx, cursor)
+        if ctx.last_kind != "user_message":
+            return 0
+        entries = self.target.render_placeholder(note, ctx)
+        # the turn is answered now; a second close appends nothing
+        ctx.last_kind = None
+        return self._append_out_of_band(entries, ctx, cursor)
+
+    # -- internals -----------------------------------------------------------
+
+    def _append_out_of_band(
+        self, entries: list[dict], ctx: SessionContext, cursor: SyncCursor
+    ) -> int:
+        """Append entries that belong to no source line (a dangle flush, a
+        turn-closing note) under the write-ahead intent keyed on the sentinel
+        line index _FLUSH_LINE. The source cursor does not move: nothing was
+        consumed."""
         if not entries:
             ctx_to_cursor(ctx, cursor)
             self.store.save_cursor(cursor)
@@ -141,8 +174,6 @@ class SyncEngine:
         ctx_to_cursor(ctx, cursor)
         self.store.save_cursor(cursor)
         return len(entries)
-
-    # -- internals -----------------------------------------------------------
 
     def _append_once(
         self, entries: list[dict], line: TailedLine, ctx: SessionContext, cursor: SyncCursor

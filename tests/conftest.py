@@ -73,18 +73,30 @@ def shadow_texts(rollout_path):
 
 
 class Env:
-    """Paired session with seeded shadows under tmp homes."""
+    """Paired session with seeded shadows under tmp homes.
 
-    def __init__(self, tmp_path, monkeypatch, active="claude"):
+    `seed_active=False` models what `_pair_session` actually leaves on disk
+    for a freshly paired session: the ACTIVE harness's own file is created by
+    the harness on its first turn, not by tandem — claude's transcript is
+    missing until then, and an active codex has no session id at all."""
+
+    def __init__(self, tmp_path, monkeypatch, active="claude", seed_active=True):
         monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
         # hermetic version checks: run_doctor must not shell out to real CLIs
+        from tandem import compat as compat_mod
         from tandem.compat import COMPAT
         from tandem.harness.claude_code import ClaudeCodeAdapter
         from tandem.harness.codex import CodexAdapter
         from tandem.harness.opencode import OpencodeAdapter
 
+        # doctor's codex-protocol check asks compat directly rather than
+        # through an adapter, so the adapter pins below do not cover it
+        monkeypatch.setattr(
+            compat_mod, "detect_cli_version",
+            lambda binary: COMPAT[binary].tested if binary in COMPAT else None,
+        )
         monkeypatch.setattr(
             ClaudeCodeAdapter, "detect_version", lambda self: COMPAT["claude"].tested
         )
@@ -120,9 +132,11 @@ class Env:
 
         claude_sid = "11111111-1111-4111-8111-111111111111"
         codex_sid = "019faca1-0000-7000-8000-000000000001"
+        # an active codex mints its own id on its first run (cli._pair_session)
+        codex_id = None if active == "codex" and not seed_active else codex_sid
         self.session = self.store.create_session(
             self.cwd, active, ["claude", "codex"],
-            {"claude": claude_sid, "codex": codex_sid},
+            {"claude": claude_sid, "codex": codex_id},
         )
         ctx = SessionContext(
             tandem_id=self.session.tandem_id,
@@ -131,9 +145,11 @@ class Env:
             source_session_id=claude_sid,
             target_session_id=codex_sid,
         )
-        self.codex_shadow = get_adapter("codex").create_shadow_transcript(
-            self.cwd, codex_sid, ctx, "[tandem] seed"
-        )
+        self.codex_shadow = None
+        if codex_id is not None:
+            self.codex_shadow = get_adapter("codex").create_shadow_transcript(
+                self.cwd, codex_sid, ctx, "[tandem] seed"
+            )
         # the claude shadow is a TARGET of the codex->claude direction: its
         # renderer stamps ctx.target_session_id, so it needs its own ctx
         ctx_claude = SessionContext(
@@ -143,12 +159,19 @@ class Env:
             source_session_id=codex_sid,
             target_session_id=claude_sid,
         )
-        self.claude_shadow = get_adapter("claude").create_shadow_transcript(
-            self.cwd, claude_sid, ctx_claude, "[tandem] seed"
-        )
-        cur = self.store.get_cursor(self.session.tandem_id, "codex", "claude")
-        cur.pending["harness_state"] = ctx_claude.harness_state
-        self.store.save_cursor(cur)
+        if active == "claude" and not seed_active:
+            # claude's CLI creates the transcript on its first turn; the path
+            # is known, the file is not there
+            self.claude_shadow = get_adapter("claude").expected_transcript_path(
+                self.cwd, claude_sid
+            )
+        else:
+            self.claude_shadow = get_adapter("claude").create_shadow_transcript(
+                self.cwd, claude_sid, ctx_claude, "[tandem] seed"
+            )
+            cur = self.store.get_cursor(self.session.tandem_id, "codex", "claude")
+            cur.pending["harness_state"] = ctx_claude.harness_state
+            self.store.save_cursor(cur)
         # a stand-in transcript some tests tail directly
         self.source_file = tmp_path / "active.jsonl"
         self.source_file.touch()
@@ -296,7 +319,7 @@ def _warm_gate_closed(monkeypatch):
 
 @pytest.fixture
 def env_factory(tmp_path, monkeypatch):
-    def make(active="claude"):
-        return Env(tmp_path, monkeypatch, active=active)
+    def make(active="claude", seed_active=True):
+        return Env(tmp_path, monkeypatch, active=active, seed_active=seed_active)
 
     return make

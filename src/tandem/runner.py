@@ -77,6 +77,7 @@ def ctx_from_cursor(session: PairedSession, cursor: SyncCursor) -> SessionContex
         harness_state=state,
         source_session_id=session.native_id(cursor.source),
         target_session_id=session.native_id(cursor.target),
+        last_kind=pending.pop("last_kind", None),
     )
 
 
@@ -88,6 +89,7 @@ def ctx_to_cursor(ctx: SessionContext, cursor: SyncCursor) -> None:
         {
             "pending_calls": ctx.pending_calls,
             "harness_state": ctx.harness_state,
+            "last_kind": ctx.last_kind,
         }
     )
 

@@ -15,6 +15,21 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+
+def _codex_protocol_version() -> str | None:
+    """The codex version the generated app-server models were built from
+    (first line of codex_protocol.py), or None when unreadable."""
+    import re
+
+    try:
+        from .chat.runtime import codex_protocol
+        first = Path(codex_protocol.__file__).read_text().splitlines()[0]
+    except Exception:
+        return None
+    m = re.search(r"from codex (\S+)", first)
+    return m.group(1) if m else None
+
+
 def validate_transcript(harness: str, path: Path, session_id: str | None) -> list[str]:
     """Return a list of problems (empty = looks resumable). Thin shim: the
     structural check lives on the adapter (each harness owns its own entry
@@ -154,6 +169,19 @@ def run_doctor(store, session, live: bool = False) -> DoctorReport:
         )
 
     _subagent_checks(report, session)
+
+    generated = _codex_protocol_version()
+    pinned = compat.COMPAT["codex"].tested
+    installed = compat.detect_cli_version("codex")
+    installed_v = compat.parse_version(installed) if installed else None
+    installed_s = ".".join(str(x) for x in installed_v) if installed_v else "not installed"
+    if generated is None:
+        report.warn("chat: codex protocol models missing — run tools/gen_codex_protocol.py")
+    elif generated != pinned or (installed_v and installed_s != generated):
+        report.warn(f"chat: codex protocol models generated from {generated} (pinned {pinned}, installed {installed_s});"
+                    " regenerate with tools/gen_codex_protocol.py and re-run the live gate")
+    else:
+        report.ok(f"chat: codex protocol models generated from {generated} (installed {installed_s})")
 
     if live:
         _live_resume_checks(report, session, transcripts)

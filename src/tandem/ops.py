@@ -45,14 +45,17 @@ def source_transcript(session: PairedSession, source: str) -> Path | None:
 
 def drain_source(
     store: StateStore, session: PairedSession, source: str,
-    *, flush_dangling: bool = False,
+    *, flush_dangling: bool = False, close_note: str | None = None,
 ) -> int:
     """Translate any unsynced tail of `source` into EVERY other participant.
     One engine+loop per (source, target) direction; per-direction cursors
     keep progress independent. Returns total lines consumed across targets.
     With flush_dangling=True, close any still-unpaired tool calls with
     placeholder results afterwards (required when the source is being handed
-    off: both replay APIs reject a dangling call)."""
+    off: both replay APIs reject a dangling call). With `close_note` set, a
+    direction whose last synced event is still the user's prompt gets that
+    note appended too — a turn that ended in failure recorded the prompt and
+    no reply, and a shadow left on a user message is not resumable."""
     transcript = source_transcript(session, source)
     if transcript is None:
         return 0
@@ -69,6 +72,8 @@ def drain_source(
             raise SyncSetupError("; ".join(loop.errors))
         if flush_dangling:
             engine.flush_dangling(loop.ctx, loop.cursor)
+        if close_note:
+            engine.close_dangling_turn(loop.ctx, loop.cursor, close_note)
     return total
 
 
@@ -123,20 +128,9 @@ def switch_session(store: StateStore, session: PairedSession,
     # TARGET of every other side's drain (the runner's ->claude engine and
     # every later flip's drain refuse to start on a missing shadow), and
     # flipping back into it leaves the drain below no file to append to.
-    # Seed it now — but only when tandem has never consumed a byte of it; a
-    # consumed-then-missing file is data loss, and the drain's hard error is
-    # the right answer there.
-    if session.native_id("claude"):
-        expected = get_adapter("claude").expected_transcript_path(
-            session.cwd, session.native_id("claude")
-        )
-        never_ran = all(
-            store.get_cursor(session.tandem_id, "claude", t).byte_offset == 0
-            for t in session.targets_for("claude")
-        )
-        if not expected.exists() and never_ran:
-            other = new_active if old_active == "claude" else old_active
-            _create_claude_shadow_late(store, session, other)
+    if session.native_id("claude") and _claude_needs_seed(store, session):
+        other = new_active if old_active == "claude" else old_active
+        _create_claude_shadow_late(store, session, other)
 
     drain_source(store, session, old_active, flush_dangling=True)
     fast_forward_all(store, session, new_active)
@@ -158,6 +152,21 @@ def switch_session(store: StateStore, session: PairedSession,
         problems = validate_transcript(new_active, transcript,
                                        session.native_id(new_active))
     return new_active, problems, memory_report
+
+
+def _claude_needs_seed(store: StateStore, session: PairedSession) -> bool:
+    """claude has an id but no file, and tandem has never consumed a byte of
+    it. Only then may the file be seeded: a consumed-then-missing file is
+    data loss, and the drain's hard error is the right answer there."""
+    expected = get_adapter("claude").expected_transcript_path(
+        session.cwd, session.native_id("claude")
+    )
+    if expected.exists():
+        return False
+    return all(
+        store.get_cursor(session.tandem_id, "claude", t).byte_offset == 0
+        for t in session.targets_for("claude")
+    )
 
 
 def _create_claude_shadow_late(store: StateStore, session: PairedSession,
@@ -185,21 +194,128 @@ def _create_claude_shadow_late(store: StateStore, session: PairedSession,
     store.save_cursor(cursor)
 
 
-def _create_codex_shadow_late(store: StateStore, session: PairedSession) -> None:
+def _create_codex_shadow_late(store: StateStore, session: PairedSession,
+                              other: str | None = None) -> None:
+    """Mint codex's id and rollout after the fact. `other` is the harness
+    whose turns flow into it next — the active side by default, which is what
+    a flip into codex leaves behind: the ctx belongs to (other -> codex)."""
     from .constants import SEED_NOTE
     from .runner import ctx_from_cursor
 
+    other = other or session.active
     adapter = get_adapter("codex")
     sid = adapter.mint_session_id()
-    # only ever called with new_active == "codex": the (active -> codex) ctx
-    cursor = store.get_cursor(session.tandem_id, session.active, "codex")
+    cursor = store.get_cursor(session.tandem_id, other, "codex")
     ctx = ctx_from_cursor(session, cursor)
     ctx.target_session_id = sid
     note = SEED_NOTE.format(
-        tandem_id=session.tandem_id, other=get_adapter(session.active).display_name
+        tandem_id=session.tandem_id, other=get_adapter(other).display_name
     )
     adapter.create_shadow_transcript(session.cwd, sid, ctx, note)
     store.set_native_session_id(session.tandem_id, "codex", sid)
+
+
+def _seed_source(session: PairedSession, target: str, harness: str) -> str:
+    """The side whose turns flow into `harness` next: this turn's target when
+    `harness` is the side being left (it is the active one), otherwise the
+    active side, whose tail is drained into it moments later."""
+    return target if session.active == harness else session.active
+
+
+def _seed_late_shadows(store: StateStore, session: PairedSession,
+                       target: str) -> PairedSession:
+    """`switch_session`'s two late seeds, on the turn path.
+
+    A freshly paired session has no file for its ACTIVE harness: claude's
+    transcript is written by claude itself on its first turn, and an active
+    codex has no id at all until it runs (cli._pair_session). So the first
+    turn routed away from the active harness drains into a file that does not
+    exist — and every later turn dies in the drain. `switch_session` seeds
+    both before its own drain; this is the same step for the turn path.
+
+    The harness this turn runs on is never seeded: claude creates its own
+    transcript from the id it was launched with (a file already there is
+    exactly what `_pair_session` avoids), and a never-run codex mints its own
+    thread on this turn, which `adopt_native_id` records afterwards.
+
+    Returns the session, refreshed when the codex seed minted an id."""
+    if (target != "codex" and "codex" in session.participants
+            and not session.native_id("codex")):
+        _create_codex_shadow_late(store, session, _seed_source(session, target, "codex"))
+        session = store.get_session(session.tandem_id) or session
+        # the seed note is tandem's own marker, not a turn: fast-forward the
+        # new file's outgoing cursors so the drain below never translates it
+        # onward (what switch_session's fast_forward_all(new_active) does)
+        fast_forward_all(store, session, "codex")
+    if (target != "claude" and session.native_id("claude")
+            and _claude_needs_seed(store, session)):
+        _create_claude_shadow_late(store, session,
+                                   _seed_source(session, target, "claude"))
+        fast_forward_all(store, session, "claude")
+    return session
+
+
+def prepare_turn(store: StateStore, session: PairedSession,
+                 target: str) -> PairedSession:
+    """Before a turn on `target`: seed any participant whose harness has never
+    run, catch the active side up, then mark the target's whole file as known
+    so only the new turn flows back afterwards. (When target IS the active
+    side there is nothing to fast-forward — its cursor is live.) Returns the
+    session, refreshed when a seed minted an id."""
+    session = _seed_late_shadows(store, session, target)
+    drain_source(store, session, session.active, flush_dangling=True)
+    if (target != session.active and session.native_id(target)
+            and source_transcript(session, target) is not None):
+        fast_forward_all(store, session, target)
+    return session
+
+
+def adopt_native_id(store: StateStore, session: PairedSession, harness: str,
+                    native_id: str) -> PairedSession:
+    """A harness minted its own session id during a turn (codex on its first
+    run). Record it and start every outgoing cursor of that harness at zero
+    so the whole new file is translated on the next drain."""
+    store.set_native_session_id(session.tandem_id, harness, native_id)
+    session = store.get_session(session.tandem_id) or session
+    for other in session.targets_for(harness):
+        cursor = store.get_cursor(session.tandem_id, harness, other)
+        cursor.byte_offset = 0
+        cursor.line_index = 0
+        store.save_cursor(cursor)
+    return session
+
+
+def sync_after_turn(store: StateStore, session: PairedSession, target: str,
+                    *, close_note: str | None = None) -> None:
+    """After a turn on `target`: translate it into every other participant
+    with echo suppression (see the module docstring). Each recipient that was
+    fully synced before the drain fast-forwards its own outgoing cursors past
+    the copy — otherwise its next drain translates them straight back,
+    duplicating call ids and text. A recipient with an unsynced tail (a
+    concurrent writer) is left alone so a live turn is never swallowed.
+
+    `close_note` is for a turn that did not complete: the harness recorded
+    the user's prompt and never answered it, so every recipient whose copy
+    ends there gets the note appended as its own placeholder. It rides inside
+    the drain, before the fast-forward above, so the recipients that echo-
+    suppress cover the note too."""
+    echo_pre: dict[str, tuple[int | None, dict[str, int]]] = {}
+    for side in session.targets_for(target):
+        size = _file_size(source_transcript(session, side))
+        offsets = {
+            t: store.get_cursor(session.tandem_id, side, t).byte_offset
+            for t in session.targets_for(side)
+        }
+        echo_pre[side] = (size, offsets)
+
+    drain_source(store, session, target, flush_dangling=True,
+                 close_note=close_note)
+
+    for side, (pre_size, offsets) in echo_pre.items():
+        if pre_size is None:
+            continue
+        if all(off == pre_size for off in offsets.values()):
+            fast_forward_all(store, session, side)
 
 
 def run_oneoff(
@@ -211,12 +327,9 @@ def run_oneoff(
     adapter = get_adapter(target)
     sid = session.native_id(target)
 
-    # Catch up the active side first, then mark the target's whole file as
-    # known so only the new turn flows back afterwards. (When target IS the
-    # active side there is nothing to fast-forward — its cursor is live.)
-    drain_source(store, session, session.active, flush_dangling=True)
-    if target != session.active and sid and source_transcript(session, target) is not None:
-        fast_forward_all(store, session, target)
+    # the seeds can mint an id for a never-run participant: sync_after_turn
+    # below needs the session that knows about it
+    session = prepare_turn(store, session, target)
 
     started = time.time()
     if target == "codex" and not sid:
@@ -231,40 +344,9 @@ def run_oneoff(
         if rollout:
             new_sid = paths.codex_rollout_session_id(rollout)
             if new_sid:
-                store.set_native_session_id(session.tandem_id, "codex", new_sid)
-                session = store.get_session(session.tandem_id) or session
-                fast_forward_to_zero = store.get_cursor(session.tandem_id, "codex", "claude")
-                fast_forward_to_zero.byte_offset = 0
-                fast_forward_to_zero.line_index = 0
-                store.save_cursor(fast_forward_to_zero)
+                session = adopt_native_id(store, session, "codex", new_sid)
 
-    # Echo suppression per direction (see the module docstring): the drain
-    # below appends tandem's translation of the target's turn into every
-    # other participant's file. Those appends are by construction already
-    # represented in the target's file, so each recipient that was fully
-    # synced before the drain fast-forwards its own outgoing cursors past
-    # the copy — otherwise its next drain translates them straight back,
-    # duplicating call ids and text.
-    echo_pre: dict[str, tuple[int | None, dict[str, int]]] = {}
-    for side in session.targets_for(target):
-        size = _file_size(source_transcript(session, side))
-        offsets = {
-            t: store.get_cursor(session.tandem_id, side, t).byte_offset
-            for t in session.targets_for(side)
-        }
-        echo_pre[side] = (size, offsets)
-
-    drain_source(store, session, target, flush_dangling=True)
-
-    # Only when a recipient was fully synced before the drain is everything
-    # now in its file known to be ours. If it had an unsynced tail (a
-    # concurrent writer), fast-forwarding would swallow a live turn: leave
-    # its cursors alone and let the normal drain pick both up.
-    for side, (pre_size, offsets) in echo_pre.items():
-        if pre_size is None:
-            continue
-        if all(off == pre_size for off in offsets.values()):
-            fast_forward_all(store, session, side)
+    sync_after_turn(store, session, target)
     return code
 
 

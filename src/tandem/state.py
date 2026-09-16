@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +42,12 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
     updated_at TEXT,
     PRIMARY KEY (tandem_id, source, target),
     FOREIGN KEY (tandem_id) REFERENCES sessions (tandem_id)
+);
+CREATE TABLE IF NOT EXISTS chat_pins (
+    tandem_id TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    model TEXT NOT NULL,
+    PRIMARY KEY (tandem_id, harness)
 );
 """
 
@@ -87,7 +95,11 @@ class StateStore:
     def __init__(self, db_path: Path | None = None):
         self.db_path = db_path or paths.state_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path)
+        # The chat window shares one store between its main thread and the
+        # dispatcher's turn worker: the connection must not be pinned to the
+        # thread that opened it, and every write takes _tx()'s lock.
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         if self._schema_stale():
             self._conn.close()
@@ -95,7 +107,7 @@ class StateStore:
             # move-aside is deliberately overwritten — the newest stale DB
             # is the one worth keeping, and startup must never fail on it
             self.db_path.replace(self.db_path.with_name(self.db_path.name + ".old"))
-            self._conn = sqlite3.connect(self.db_path)
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
@@ -108,6 +120,15 @@ class StateStore:
         except sqlite3.Error:
             return False
         return bool(names) and "participants" not in names
+
+    @contextmanager
+    def _tx(self):
+        """One writer at a time on the shared connection. sqlite3 serializes
+        the statements itself; the lock is what keeps a read-modify-write
+        atomic and stops one thread's commit from closing another's
+        transaction."""
+        with self._lock, self._conn:
+            yield self._conn
 
     def close(self) -> None:
         self._conn.close()
@@ -129,7 +150,7 @@ class StateStore:
     ) -> PairedSession:
         tandem_id = uuid.uuid4().hex[:12]
         now = _now()
-        with self._conn:
+        with self._tx():
             self._conn.execute(
                 "INSERT INTO sessions (tandem_id, cwd, active, participants,"
                 " native_session_ids, created_at, last_used_at)"
@@ -188,38 +209,39 @@ class StateStore:
         return [self._row_to_session(r) for r in rows]
 
     def touch_used(self, tandem_id: str) -> None:
-        with self._conn:
+        with self._tx():
             self._conn.execute(
                 "UPDATE sessions SET last_used_at = ? WHERE tandem_id = ?",
                 (_now(), tandem_id),
             )
 
     def set_active(self, tandem_id: str, active: str) -> None:
-        with self._conn:
+        with self._tx():
             self._conn.execute(
                 "UPDATE sessions SET active = ? WHERE tandem_id = ?",
                 (active, tandem_id),
             )
 
     def set_participants(self, tandem_id: str, participants: list[str]) -> None:
-        with self._conn:
+        with self._tx():
             self._conn.execute(
                 "UPDATE sessions SET participants = ? WHERE tandem_id = ?",
                 (json.dumps(participants), tandem_id),
             )
 
     def set_native_session_id(self, tandem_id: str, harness: str, session_id: str) -> None:
-        session = self.get_session(tandem_id)
-        ids = dict(session.native_session_ids) if session else {}
-        ids[harness] = session_id
-        with self._conn:
-            self._conn.execute(
-                "UPDATE sessions SET native_session_ids = ? WHERE tandem_id = ?",
-                (json.dumps(ids), tandem_id),
-            )
+        with self._lock:
+            session = self.get_session(tandem_id)
+            ids = dict(session.native_session_ids) if session else {}
+            ids[harness] = session_id
+            with self._tx():
+                self._conn.execute(
+                    "UPDATE sessions SET native_session_ids = ? WHERE tandem_id = ?",
+                    (json.dumps(ids), tandem_id),
+                )
 
     def touch_sync(self, tandem_id: str) -> None:
-        with self._conn:
+        with self._tx():
             self._conn.execute(
                 "UPDATE sessions SET last_sync_at = ? WHERE tandem_id = ?",
                 (_now(), tandem_id),
@@ -243,7 +265,7 @@ class StateStore:
         )
 
     def save_cursor(self, cursor: SyncCursor) -> None:
-        with self._conn:
+        with self._tx():
             self._conn.execute(
                 "INSERT INTO sync_cursors (tandem_id, source, target, byte_offset,"
                 " line_index, turn_index, pending, failed_turns, updated_at)"
@@ -259,3 +281,28 @@ class StateStore:
                  cursor.byte_offset, cursor.line_index, cursor.turn_index,
                  json.dumps(cursor.pending), cursor.failed_turns, _now()),
             )
+
+    # -- chat model pins -----------------------------------------------------
+
+    def get_pin(self, tandem_id: str, harness: str) -> str:
+        """The model pinned for `harness` in the chat window, "" for none."""
+        row = self._conn.execute(
+            "SELECT model FROM chat_pins WHERE tandem_id = ? AND harness = ?",
+            (tandem_id, harness),
+        ).fetchone()
+        return row["model"] if row else ""
+
+    def set_pin(self, tandem_id: str, harness: str, model: str) -> None:
+        """Pin `model` for `harness`; an empty model clears the pin."""
+        with self._tx():
+            if model:
+                self._conn.execute(
+                    "INSERT INTO chat_pins (tandem_id, harness, model) VALUES (?, ?, ?)"
+                    " ON CONFLICT (tandem_id, harness) DO UPDATE SET model = excluded.model",
+                    (tandem_id, harness, model),
+                )
+            else:
+                self._conn.execute(
+                    "DELETE FROM chat_pins WHERE tandem_id = ? AND harness = ?",
+                    (tandem_id, harness),
+                )
