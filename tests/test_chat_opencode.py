@@ -55,7 +55,7 @@ def test_tool_turn_streams_events(fake):
     assert rec.events[2] == ToolOutput("call_1", "ok\n")
     assert rec.events[3] == ToolFinished("call_1", True, "touch x.txt")
     assert rec.events[4] == TextDelta("DONE")
-    assert rec.events[5] == TurnFinished("completed", "120↑ 7↓ · $0.0010")
+    assert rec.events[5] == TurnFinished("completed", "120↑ 7↓")
     rt.close()
 
 

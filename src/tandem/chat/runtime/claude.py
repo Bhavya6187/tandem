@@ -13,7 +13,7 @@ reference for anything not captured):
     system/init · stream_event (content_block_delta: text_delta | thinking_delta)
     assistant (content blocks incl. tool_use) · user (tool_result blocks)
     control_request (subtype can_use_tool: tool_name, input, permission_suggestions)
-    result (subtype, is_error, num_turns, total_cost_usd)
+    result (subtype, is_error, num_turns)
 
 The process exits after `result`; that exit is the turn boundary, so no
 Stop-hook sentinel is wired. `handle_line` is the whole protocol as a pure
@@ -142,10 +142,7 @@ class ClaudeRuntime:
                 status = "interrupted"
             else:
                 status = "failed" if m.get("is_error") else "completed"
-            cost = m.get("total_cost_usd")
             usage = f"{m.get('num_turns', 0)} turns"
-            if isinstance(cost, (int, float)):
-                usage += f" · ${cost:.4f}"
             emit(TurnFinished(status, usage))
             return TurnOutcome(status, error=str(m.get("result", "")) if status == "failed" else "")
         return None     # system/init, rate_limit_event, control_response: nothing to paint
