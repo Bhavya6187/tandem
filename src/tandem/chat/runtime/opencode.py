@@ -3,7 +3,7 @@
   GET  /global/health                          readiness poll after spawn
   GET  /event                                  SSE: {"type","properties"} per `data:` line
   POST /session/<sid>/message {model?, parts}  blocks until the turn ends; the response
-                                               is the assistant message (info.tokens, cost)
+                                               is the assistant message (info.tokens)
   POST /permission/<id>/reply {"reply": once|always|reject}
   POST /session/<sid>/question/<id>/reply {"answers": [[text], …]}
   POST /session/<sid>/abort
@@ -363,8 +363,6 @@ class OpencodeRuntime:
             tokens = info.get("tokens") or {}
             if isinstance(tokens.get("input"), int) and isinstance(tokens.get("output"), int):
                 usage = f"{tokens['input']}↑ {tokens['output']}↓"
-            if isinstance(info.get("cost"), (int, float)):
-                usage += f" · ${info['cost']:.4f}"
         if self._interrupted:
             status, error = "interrupted", ""
         elif "error" in done or st.failed:

@@ -80,7 +80,7 @@ def test_approve_flow_allow(env):
     assert rec.events[1] == ToolOutput("toolu_1", "ok\nline2\nline3")
     assert rec.events[2] == ToolFinished("toolu_1", True, "")
     assert rec.events[3] == TextDelta("DONE")
-    assert rec.events[4].status == "completed" and "2 turns" in rec.events[4].usage
+    assert rec.events[4] == TurnFinished("completed", "2 turns")
     reply = json.loads((env.tmp / "reply.json").read_text())
     assert reply == {"behavior": "allow", "updatedInput": {"command": "touch x.txt", "description": "make x"}}
     assert (env.tmp / "prompt.txt").read_text() == "make x"
