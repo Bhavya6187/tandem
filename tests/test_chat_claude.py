@@ -52,6 +52,18 @@ def env(tmp_path, monkeypatch):
                            runtime=ClaudeRuntime(ChatConfig(), binary=[sys.executable, str(FAKE)]))
 
 
+def test_argv_skip_permissions_bypasses_but_keeps_the_prompt_tool():
+    argv = ClaudeRuntime(ChatConfig(skip_permissions=True)).argv("sid-1", fresh=False, model="")
+    i = argv.index("--permission-mode")
+    assert argv[i + 1] == "bypassPermissions"
+    # AskUserQuestion still arrives as a can_use_tool request over stdio
+    assert argv[argv.index("--permission-prompt-tool") + 1] == "stdio"
+
+
+def test_argv_has_no_permission_mode_by_default():
+    assert "--permission-mode" not in ClaudeRuntime(ChatConfig()).argv("sid-1", fresh=False, model="")
+
+
 def test_argv_fresh_vs_resume():
     # the default one-word binary, so the flags sit at the indices below
     rt = ClaudeRuntime(ChatConfig())

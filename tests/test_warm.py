@@ -60,6 +60,34 @@ def test_build_launch_orders_user_args_before_hook_extras(env_factory):
     assert i_args < i_hook
 
 
+def test_build_launch_skip_permissions_adds_each_harness_flag(env_factory):
+    env = env_factory(active="claude")
+    (paths.tandem_home() / "config.toml").write_text("skip_permissions = true\n")
+    claude = build_launch(env.session, "claude")
+    codex = build_launch(env.session, "codex")
+    assert "--dangerously-skip-permissions" in claude.argv
+    assert "--dangerously-bypass-approvals-and-sandbox" in codex.argv
+    # still ahead of the hook extras, like the user's own args
+    assert (claude.argv.index("--dangerously-skip-permissions")
+            < claude.argv.index(claude.hook_extra[0]))
+
+
+def test_build_launch_has_no_bypass_flag_by_default(env_factory):
+    env = env_factory(active="claude")
+    for side in ("claude", "codex"):
+        assert not [a for a in build_launch(env.session, side).argv
+                    if a.startswith("--dangerously")], side
+
+
+def test_build_launch_skip_permissions_does_not_repeat_a_user_flag(env_factory):
+    env = env_factory(active="claude")
+    (paths.tandem_home() / "config.toml").write_text(
+        'skip_permissions = true\n[claude]\nargs = ["--dangerously-skip-permissions"]\n'
+    )
+    argv = build_launch(env.session, "claude").argv
+    assert argv.count("--dangerously-skip-permissions") == 1
+
+
 class _FakePty:
     """PtyProcess stand-in: fd is a pipe the test can feed/close."""
 

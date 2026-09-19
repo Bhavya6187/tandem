@@ -29,6 +29,50 @@ sessions on a machine that also has opencode. Unknown names are
 dropped, duplicates deduped, and anything else malformed falls back to
 all three. Sessions already paired keep their own participant list.
 
+## skip_permissions — no permission prompts in claude and codex
+
+A top-level switch, off by default. When on, every claude and codex
+session tandem opens runs without its harness's permission prompts — in
+the chat window and in `tandem native` alike:
+
+```toml
+skip_permissions = true
+```
+
+| | claude | codex |
+|---|---|---|
+| `tandem native` and each flip | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` |
+| chat window | `--permission-mode bypassPermissions` | approval policy `never`, sandbox `danger-full-access` |
+
+This removes the harnesses' own safety rails: commands run and files
+change without asking, and codex runs unsandboxed. Set it only if that
+is what you want. In the chat window `/status` reads `permissions
+skipped` while it is on, claude's questions to you (`AskUserQuestion`)
+still appear, and an explicit `[chat] codex_approval_policy` /
+`codex_sandbox` still wins over the switch for codex. opencode is
+untouched — it has no such flag, and its permissions live in its own
+`opencode.json`. One-off relays (`tandem run`), subagent dispatch, and
+doctor probes are unaffected.
+
+Only a literal `true` turns it on; any other value (`"true"`, `1`) leaves
+the prompts in place.
+
+For a single launch, pass `--skip-permissions` instead — or
+`--no-skip-permissions` to keep the prompts for one launch while the
+config says `true`. The flag wins over the config, is not saved with the
+session (a later `resume` needs it again), and is accepted wherever
+tandem opens a session:
+
+```sh
+tandem --skip-permissions
+tandem resume <id> --skip-permissions
+tandem native --skip-permissions
+tandem native resume --skip-permissions
+```
+
+It is a usage error on every other command (`tandem run`, `tandem sub`,
+`tandem doctor`, …), which never bypass permissions either way.
+
 ## [subagents] — GPT subagent workers
 
 Worker model, routing mode, and context handling for GPT subagent
@@ -61,8 +105,10 @@ args = []   # same mechanism; opencode's own flags go here
 ```
 
 The claude/codex flags shown disable the harnesses' own permission
-prompts for sessions tandem launches — set them only if that is what you
-want.
+prompts for the sessions `tandem native` launches — set them only if
+that is what you want. `args` does not reach the chat window; the
+top-level [`skip_permissions`](#skip_permissions--no-permission-prompts-in-claude-and-codex)
+switch covers both.
 The list is passed to the harness raw: a flag that expects a value can
 swallow the settings tandem appends after it and break turn tracking.
 Malformed values (a non-list, empty or non-string elements) are

@@ -7,6 +7,9 @@ from tandem.config import (
     load_chat_config,
     load_frame_config,
     load_harness_args,
+    load_skip_permissions,
+    set_skip_permissions,
+    skip_permission_args,
     load_subagents_config,
 )
 
@@ -241,3 +244,69 @@ def test_chat_config_unknown_codex_vocabularies_inherit(tmp_path, monkeypatch):
     cfg = load_chat_config()
     assert cfg.codex_approval_policy == ""
     assert cfg.codex_sandbox == ""
+
+
+def test_skip_permissions_defaults_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+    assert load_skip_permissions() is False
+    assert load_chat_config().skip_permissions is False
+
+
+def test_skip_permissions_on_without_a_chat_table(tmp_path, monkeypatch):
+    # the key is top-level: it must reach the chat window with no [chat] table
+    _write_config(tmp_path, monkeypatch, "skip_permissions = true\n")
+    assert load_skip_permissions() is True
+    assert load_chat_config().skip_permissions is True
+
+
+def test_skip_permissions_rides_alongside_chat_keys(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch,
+                  "skip_permissions = true\n[chat]\nhistory_turns = 3\n")
+    cfg = load_chat_config()
+    assert (cfg.skip_permissions, cfg.history_turns) == (True, 3)
+
+
+def test_skip_permissions_only_a_real_true_turns_it_on(tmp_path, monkeypatch):
+    # a permissions bypass must never come from a typo: "true", 1 and a
+    # [chat]-scoped copy of the key all leave it off
+    for body in ('skip_permissions = "true"\n', "skip_permissions = 1\n",
+                 "skip_permissions = [true]\n", "[chat]\nskip_permissions = true\n"):
+        _write_config(tmp_path, monkeypatch, body)
+        assert load_skip_permissions() is False, body
+        assert load_chat_config().skip_permissions is False, body
+
+
+def test_skip_permission_args_per_harness(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, "skip_permissions = true\n")
+    assert skip_permission_args("claude") == ["--dangerously-skip-permissions"]
+    assert skip_permission_args("codex") == ["--dangerously-bypass-approvals-and-sandbox"]
+    assert skip_permission_args("opencode") == []    # no such flag; its own config rules
+
+
+def test_skip_permission_args_empty_when_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+    assert skip_permission_args("claude") == []
+
+
+def test_skip_permissions_override_on_needs_no_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+    set_skip_permissions(True)
+    assert load_skip_permissions() is True
+    assert load_chat_config().skip_permissions is True
+    assert skip_permission_args("codex") == ["--dangerously-bypass-approvals-and-sandbox"]
+
+
+def test_skip_permissions_override_off_beats_the_config(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch,
+                  "skip_permissions = true\n[chat]\nhistory_turns = 3\n")
+    set_skip_permissions(False)
+    assert load_skip_permissions() is False
+    assert load_chat_config().skip_permissions is False
+    assert skip_permission_args("claude") == []
+
+
+def test_skip_permissions_override_cleared_falls_back_to_the_config(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, "skip_permissions = true\n")
+    set_skip_permissions(False)
+    set_skip_permissions(None)
+    assert load_skip_permissions() is True

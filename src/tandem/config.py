@@ -4,7 +4,8 @@
 `args` list appended to every interactive launch of that harness; [frame]
 holds the meta-harness flip keybind, its status bar toggle, the
 pipelined-flip toggle, and the bar's rate-limit poll toggle; [chat]
-tunes the unified chat window.
+tunes the unified chat window; top-level `skip_permissions` turns off
+claude's and codex's permission prompts in every session tandem opens.
 
 Unknown keys are ignored and every error yields defaults — configuration
 must never be the reason a launch breaks or subagent routing stops (the
@@ -82,6 +83,47 @@ def load_harness_args(harness: str) -> list[str]:
     ):
         return []
     return args
+
+
+# Each harness's own "ask me nothing" flag for an interactive launch.
+# opencode has none — its permissions live in its own opencode.json.
+_SKIP_PERMISSION_ARGS = {
+    "claude": "--dangerously-skip-permissions",
+    "codex": "--dangerously-bypass-approvals-and-sandbox",
+}
+
+
+# `--skip-permissions` / `--no-skip-permissions` for this launch; None = the
+# config decides. Held here rather than in the environment: an env var would
+# ride into every harness child, and a `tandem` started from inside one would
+# inherit a bypass nobody asked it for.
+_skip_permissions_override: bool | None = None
+
+
+def set_skip_permissions(value: bool | None) -> None:
+    global _skip_permissions_override
+    _skip_permissions_override = value
+
+
+def _skip_permissions(config: dict) -> bool:
+    if _skip_permissions_override is not None:
+        return _skip_permissions_override
+    return config.get("skip_permissions") is True
+
+
+def load_skip_permissions() -> bool:
+    """The launch's `--[no-]skip-permissions` flag, else top-level
+    `skip_permissions`. Forgiving the other way round from the rest: only a
+    real TOML `true` turns it on, so a typo can never be the reason a
+    permission prompt disappears."""
+    return _skip_permissions(_read_config())
+
+
+def skip_permission_args(harness: str) -> list[str]:
+    """The bypass flag for an interactive launch of `harness`; [] when
+    `skip_permissions` is off or the harness has no such flag."""
+    flag = _SKIP_PERMISSION_ARGS.get(harness)
+    return [flag] if flag and load_skip_permissions() else []
 
 
 @dataclass(frozen=True)
@@ -167,12 +209,15 @@ class ChatConfig:
     claude_setting_sources: tuple[str, ...] = _SETTING_SOURCES
     codex_approval_policy: str = ""     # "" = inherit ~/.codex/config.toml
     codex_sandbox: str = ""             # "" = inherit
+    skip_permissions: bool = False      # the top-level key, carried to the runtimes
 
 
 def load_chat_config() -> ChatConfig:
-    raw = _read_config().get("chat")
+    config = _read_config()
+    skip = _skip_permissions(config)
+    raw = config.get("chat")
     if not isinstance(raw, dict):
-        return ChatConfig()
+        return ChatConfig(skip_permissions=skip)
     d = ChatConfig()
 
     def pick(key: str, kind: type, default, allowed=None):
@@ -198,4 +243,5 @@ def load_chat_config() -> ChatConfig:
         codex_approval_policy=pick("codex_approval_policy", str,
                                    d.codex_approval_policy, _CODEX_APPROVAL_POLICIES),
         codex_sandbox=pick("codex_sandbox", str, d.codex_sandbox, _CODEX_SANDBOXES),
+        skip_permissions=skip,
     )

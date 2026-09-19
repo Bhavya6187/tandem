@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import paths
-from .config import load_harness_args
+from .config import load_harness_args, skip_permission_args
 from .harness import get_adapter
 from .ptyrun import PtyControl, _is_alive
 from .state import PairedSession
@@ -61,6 +61,8 @@ def build_launch(session: PairedSession, side: str) -> LaunchRecipe:
     sentinel.parent.mkdir(parents=True, exist_ok=True)
     argv = adapter.interactive_argv(sid, fresh)
     argv += load_harness_args(side)
+    # skip_permissions: the harness's own bypass flag, unless [args] already has it
+    argv += [a for a in skip_permission_args(side) if a not in argv]
     hook_extra = adapter.hook_argv_extra(sentinel)
     argv += hook_extra
     return LaunchRecipe(

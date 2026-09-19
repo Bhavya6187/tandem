@@ -365,6 +365,9 @@ class CodexRuntime:
                 return fail(f"initialize failed: {r['error'].get('message', r['error'])}")
             self._write(proc, {"jsonrpc": "2.0", "method": "initialized"})
             overrides: dict = {}
+            if self.cfg.skip_permissions:
+                # a default only — an explicit codex_* key below still wins
+                overrides = {"approvalPolicy": "never", "sandbox": "danger-full-access"}
             if self.cfg.codex_approval_policy:
                 overrides["approvalPolicy"] = self.cfg.codex_approval_policy
             if self.cfg.codex_sandbox:
