@@ -34,8 +34,12 @@ from .events import (ApprovalRequest, Failure, Idle, LimitsUpdate, LiveEvent, Qu
 from .render import Screen
 from .runtime.factory import make_runtimes
 
-HINT = "/claude /codex /opencode route"
 WINDOW_COMMANDS = ("/quit", "/status")
+
+
+def route_hint(participants: list[str]) -> str:
+    """The bar's trailer: only the harnesses `/` can route to in this session."""
+    return " ".join(f"/{h}" for h in participants) + " route"
 
 
 def window_command(text: str) -> str:
@@ -348,7 +352,8 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
     poller = RateLimitPoller(list(session.participants), usage_state) if load_frame_config().rate_limits else None
     dispatcher = Dispatcher(store, session, runtimes, post, answers, meters=meters,
                             first_turn=seed_then_meter if first_turn is not None else None)
-    bar = StatusBar(rows, cols, session.active, session.targets_for(session.active), hint=HINT)
+    bar = StatusBar(rows, cols, session.active, session.targets_for(session.active),
+                    hint=route_hint(session.participants))
     win = Window(session, store, cfg, screen, composer, dispatcher, answers, bar, usage_state,
                  meters, poller, stdin_fd=stdin_fd)
 
