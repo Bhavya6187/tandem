@@ -40,7 +40,7 @@ def fake():
         f.stop()
 
 
-SESSION = SimpleNamespace(cwd="/tmp/proj")
+SESSION = SimpleNamespace(cwd="/tmp/proj", tandem_id="tdm-opencode")
 
 
 def test_tool_turn_streams_events(fake):
@@ -209,3 +209,20 @@ def test_factory_builds_one_runtime_per_participant():
     rts = make_runtimes(session, ChatConfig())
     assert sorted(rts) == ["claude", "codex", "opencode"]
     assert all(rts[h].harness == h for h in rts)
+
+
+def test_server_is_told_which_session_it_belongs_to(tmp_path, monkeypatch):
+    """The server outlives the turn and runs every tool call of the window's
+    one session, so the id goes in at spawn."""
+    from tandem.chat.runtime import opencode as mod
+
+    seen = []
+    real = mod.subprocess.Popen
+    monkeypatch.setattr(mod.subprocess, "Popen",
+                        lambda *a, **kw: (seen.append(kw["env"]), real(*a, **kw))[1])
+    rt = OpencodeRuntime(ChatConfig(), binary=[sys.executable, str(FAKE_SERVE)])
+    try:
+        rt.ensure_server(str(tmp_path), tandem_id="tdm-opencode")
+    finally:
+        rt.close()
+    assert seen[0]["TANDEM_SESSION_ID"] == "tdm-opencode"

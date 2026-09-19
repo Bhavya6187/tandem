@@ -319,7 +319,8 @@ class CodexRuntime:
         self._thread_id = self._turn_id = None
         self._streamed_output.clear(); self._streamed_text.clear()
         proc = subprocess.Popen(
-            [*self.binary, "app-server"], cwd=session.cwd, env=child_env(),
+            [*self.binary, "app-server"], cwd=session.cwd,
+            env=child_env(tandem_id=session.tandem_id),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1, start_new_session=True,
         )

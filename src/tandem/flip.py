@@ -1,6 +1,6 @@
 """Run the active harness, re-entering on Ctrl-] flips until a plain exit.
 
-Bare `tandem` / `tandem resume` enter here: run the active harness on its
+`tandem native` / `tandem native resume` enter here: run the active harness on its
 PTY; a flip asked for from inside it (Ctrl-]) re-enters the other one with
 no stop in between. When the harness exits without a flip pending, print
 the resume hint and return to the OS shell.
@@ -67,7 +67,7 @@ def run_session(tandem_id: str, sink_factory, run_harness=None) -> int:
         )
     finally:
         # Hint first: state bookkeeping must not be able to swallow it.
-        click.echo(f"to continue this session: tandem resume {tandem_id}")
+        click.echo(f"to continue this session: tandem native resume {tandem_id}")
         # Nested so the reap survives a raising store — a locked sqlite (a
         # concurrent `tandem sub` holds its own) must not be the reason a
         # hidden harness outlives the session with nothing left to reap it.

@@ -33,3 +33,8 @@ PLACEHOLDER = (
     "[tandem: turn {turn} could not be translated from {source} — {reason}; "
     "raw entry quarantined at {quarantine}]"
 )
+
+# Set by the chat window in every harness child's environment: the session
+# the child's own `tandem sub` / `tandem hook-route` calls belong to. A
+# directory holds many chat sessions, so cwd cannot say which one asked.
+SESSION_ENV = "TANDEM_SESSION_ID"

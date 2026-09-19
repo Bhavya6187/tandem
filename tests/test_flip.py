@@ -52,7 +52,7 @@ def test_exit_prints_resume_hint_and_last_code(sess, capsys):
     )
     assert code == 7
     assert log == ["claude"]
-    assert f"to continue this session: tandem resume {sess.tandem_id}" in (
+    assert f"to continue this session: tandem native resume {sess.tandem_id}" in (
         capsys.readouterr().out
     )
 
@@ -67,7 +67,7 @@ def test_failed_entry_reports_and_exits(sess, capsys):
     cap = capsys.readouterr()
     assert code == 1  # a launch that never ran is a failure, not a 0
     assert "could not run the harness: FileNotFoundError" in cap.err
-    assert f"to continue this session: tandem resume {sess.tandem_id}" in cap.out
+    assert f"to continue this session: tandem native resume {sess.tandem_id}" in cap.out
 
 
 def test_resume_hint_prints_even_when_the_loop_raises(sess, capsys, monkeypatch):
@@ -80,7 +80,7 @@ def test_resume_hint_prints_even_when_the_loop_raises(sess, capsys, monkeypatch)
     monkeypatch.setattr(flip, "_flip_loop", boom)
     with pytest.raises(RuntimeError):
         flip.run_session(sess.tandem_id, None, run_harness=fake_runner([]))
-    assert f"to continue this session: tandem resume {sess.tandem_id}" in (
+    assert f"to continue this session: tandem native resume {sess.tandem_id}" in (
         capsys.readouterr().out
     )
 
@@ -128,7 +128,7 @@ def test_flip_failure_exits_with_the_session_intact(sess, capsys, monkeypatch):
     cap = capsys.readouterr()
     assert code == 0  # carried through; session intact
     assert "switch failed: RuntimeError: no flip for you" in cap.err
-    assert f"to continue this session: tandem resume {sess.tandem_id}" in cap.out
+    assert f"to continue this session: tandem native resume {sess.tandem_id}" in cap.out
 
 
 def test_failed_launch_after_a_flip_returns_to_the_harness_we_left(
@@ -173,7 +173,7 @@ def test_both_harnesses_failing_exits_with_the_session_intact(
     assert calls == ["claude", "codex", "claude"]  # one retry only, no ping-pong
     assert cap.err.count("could not run the harness: FileNotFoundError") == 2
     assert code == 1  # neither harness ran: a failure, not the flipping run's 0
-    assert f"to continue this session: tandem resume {sess.tandem_id}" in cap.out
+    assert f"to continue this session: tandem native resume {sess.tandem_id}" in cap.out
 
 
 def test_flip_back_does_not_run_when_the_switch_itself_fails(sess, capsys, monkeypatch):
@@ -562,7 +562,7 @@ def test_a_raising_store_still_reaps_the_leftover_standby(sess, monkeypatch, cap
     with pytest.raises(sqlite3.OperationalError):
         _fake_runner_session(monkeypatch, sess, [([], False)], runner=Runner)
     assert leftover.killed
-    assert f"to continue this session: tandem resume {sess.tandem_id}" in (
+    assert f"to continue this session: tandem native resume {sess.tandem_id}" in (
         capsys.readouterr().out          # the hint still came first
     )
 

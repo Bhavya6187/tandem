@@ -307,6 +307,13 @@ def _rate_limits_hermetic(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_inherited_session(monkeypatch):
+    """The suite may itself run inside a tandem chat window, whose children
+    carry TANDEM_SESSION_ID. No test may resolve the developer's session."""
+    monkeypatch.delenv("TANDEM_SESSION_ID", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _warm_gate_closed(monkeypatch):
     """No test may boot a hidden harness for real. Under plain `pytest` stdin
     is not a terminal and the warm gate is shut anyway, but `pytest -s` on a

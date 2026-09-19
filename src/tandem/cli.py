@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -12,7 +13,7 @@ from pathlib import Path
 import click
 
 from . import __version__, compat, paths
-from .constants import SEED_NOTE
+from .constants import SEED_NOTE, SESSION_ENV
 from .events import SessionContext
 from .harness import get_adapter
 from .state import PairedSession, StateStore
@@ -22,8 +23,18 @@ def _cwd() -> str:
     return str(Path.cwd())
 
 
+def _current_session(store: StateStore, cwd: str) -> PairedSession | None:
+    """The session a command acts on. Inside a chat window's harness the
+    window names it (SESSION_ENV): a directory holds many chat sessions, and
+    the newest is not necessarily the one asking. Anywhere else — and for an
+    id that no longer exists — it is the directory's most recent."""
+    named = os.environ.get(SESSION_ENV)
+    session = store.get_session(named) if named else None
+    return session or store.latest_session_for_cwd(cwd)
+
+
 def _require_session(store: StateStore) -> PairedSession:
-    session = store.latest_session_for_cwd(_cwd())
+    session = _current_session(store, _cwd())
     if session is None:
         click.echo(
             "No tandem session for this directory. Run `tandem` to start one.",
@@ -134,39 +145,52 @@ def _narrow_participants(store: StateStore, session: PairedSession) -> PairedSes
 
 
 _HARNESS_CHOICE = click.Choice(["claude", "codex", "opencode"])
-_ON_HELP = "Harness for the first prompt [default: the session's last-used harness]."
-_NEW_HELP = "Pair a fresh session instead of continuing this directory's latest."
+_ON_HELP = "Harness for the first prompt [default: first usable, or last-used on resume]."
+_NEW_HELP = "Pair a fresh session (the default)."
+_CONTINUE_HELP = "Continue the most recently used session across all directories."
 
 
 @click.group(invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="tandem")
 @click.option("--on", "harness", type=_HARNESS_CHOICE, default=None, help=_ON_HELP)
 @click.option("--new", "fresh", is_flag=True, help=_NEW_HELP)
+@click.option("--continue", "-c", "continue_last", is_flag=True, help=_CONTINUE_HELP)
 @click.option("--active", type=_HARNESS_CHOICE, default=None, hidden=True)
 @click.pass_context
 def main(ctx: click.Context, harness: str | None, fresh: bool,
-         active: str | None) -> None:
+         continue_last: bool, active: str | None) -> None:
     """Run Claude Code and Codex as one paired session.
 
-    With no subcommand, opens the chat window (same as `tandem chat`);
+    With no subcommand, starts a fresh chat. Use `tandem resume [ID]` to
+    reopen a chat, or --continue for the latest one across all directories.
     `tandem native` pairs a fresh session inside the CLIs' own TUIs and
-    `tandem resume` re-enters one.
+    `tandem native resume [ID]` re-enters one.
     """
     if active is not None:
         # pre-chat-default spelling of `tandem native --active X`
         raise click.UsageError(
             f'--active moved: use "tandem native --active {active}" '
             f'(or "tandem --on {active}" for the chat window).')
-    if ctx.invoked_subcommand not in (None, "chat") and (harness is not None or fresh):
-        raise click.UsageError("--on and --new only apply to bare tandem or tandem chat.")
+    if ctx.invoked_subcommand == "resume" and (fresh or continue_last):
+        raise click.UsageError("resume, --new and --continue cannot be combined.")
+    if ctx.invoked_subcommand not in (None, "resume") and (
+            harness is not None or fresh or continue_last):
+        raise click.UsageError(
+            "--on, --new and --continue only apply to chat sessions; "
+            "use bare tandem or tandem resume.")
     if ctx.invoked_subcommand is None:
-        _chat(harness, fresh)
+        _chat(harness, fresh, continue_last=continue_last)
 
 
 def _pair_session(store: StateStore, cwd: str, active: str,
-                  participants: list[str]) -> PairedSession:
+                  participants: list[str], *, seed: bool = True) -> PairedSession:
     """Create a fresh N-way session: state row, seeded shadow transcripts,
-    memory sync. Echoes what it did."""
+    memory sync. Echoes what it did.
+
+    `seed=False` leaves the shadow transcripts to the caller (`_seed_shadows`,
+    which the chat window runs on its first turn): they are the part of a
+    pairing that lands in the harnesses' own session lists, and a window
+    opened and closed must not leave one there per launch."""
     native: dict[str, str | None] = {}
     for hid in participants:
         if hid == "codex" and hid == active:
@@ -174,7 +198,32 @@ def _pair_session(store: StateStore, cwd: str, active: str,
         else:
             native[hid] = get_adapter(hid).mint_session_id()
     session = store.create_session(cwd, active, participants, native)
+    if seed:
+        _seed_shadows(store, session)
 
+    from .memory_sync import sync_memory_files
+
+    mem = sync_memory_files(cwd)
+    shadows = [h for h in participants if h != active]
+    click.echo(f"paired {session.tandem_id} ({active} active, "
+               f"{', '.join(shadows)} shadow)")
+    for a in mem.actions:
+        click.echo(f"  memory: {a}")
+    for w in mem.warnings:
+        click.secho(f"  memory: {w}", fg="yellow", err=True)
+    if "codex" in participants and native.get("codex") is None:
+        click.echo("  note: codex session id will be captured on first run")
+    return session
+
+
+def _seed_shadows(store: StateStore, session: PairedSession) -> None:
+    """The shadow transcripts of a fresh pairing, from the session as it was
+    paired. Silent — the chat window runs it mid-turn, under its own screen —
+    and a participant whose file is already there is skipped, so a run that
+    failed halfway can be run again."""
+    cwd, active = session.cwd, session.active
+    participants = session.participants
+    native = {hid: session.native_id(hid) for hid in participants}
     note = SEED_NOTE.format(
         tandem_id=session.tandem_id,
         other=get_adapter(active).display_name,
@@ -188,6 +237,9 @@ def _pair_session(store: StateStore, cwd: str, active: str,
     for hid in participants:
         needs_create = (hid != active) or (hid == "opencode")
         if not needs_create or native[hid] is None:
+            continue
+        existing = get_adapter(hid).transcript_path(cwd, native[hid])
+        if existing is not None and existing.exists():
             continue
         if hid == active:
             # opencode active: its session must exist before `opencode -s`
@@ -204,20 +256,6 @@ def _pair_session(store: StateStore, cwd: str, active: str,
                                   hid if hid != active else session.next_active(active))
         cursor.pending["harness_state"] = ctx.harness_state
         store.save_cursor(cursor)
-
-    from .memory_sync import sync_memory_files
-
-    mem = sync_memory_files(cwd)
-    shadows = [h for h in participants if h != active]
-    click.echo(f"paired {session.tandem_id} ({active} active, "
-               f"{', '.join(shadows)} shadow)")
-    for a in mem.actions:
-        click.echo(f"  memory: {a}")
-    for w in mem.warnings:
-        click.secho(f"  memory: {w}", fg="yellow", err=True)
-    if "codex" in participants and native.get("codex") is None:
-        click.echo("  note: codex session id will be captured on first run")
-    return session
 
 
 @main.command()
@@ -281,9 +319,9 @@ def status() -> None:
             click.echo(f"  retained forks: {len(kept)} under {sub_root}")
 
 
-@main.command()
+@click.command(name="resume")
 @click.argument("tandem_id", required=False)
-def resume(tandem_id: str | None) -> None:
+def native_resume(tandem_id: str | None) -> None:
     """Resume a paired session (most recent for this directory by default).
 
     The id is printed when you leave a session, and shown by `tandem status`
@@ -307,7 +345,7 @@ def resume(tandem_id: str | None) -> None:
             if session.cwd != cwd:
                 click.secho(
                     f"error: session {tandem_id} belongs to {session.cwd}; "
-                    "run `tandem resume` from there.",
+                    "run `tandem native resume` from there.",
                     fg="red",
                     err=True,
                 )
@@ -360,10 +398,11 @@ def sessions(limit: int) -> None:
     """List your most recent paired sessions, newest first.
 
     Sessions in the current directory are marked with `*`; resume any of
-    them with `tandem resume <id>` from its directory.
+    them with `tandem resume <id>` from anywhere.
     """
     cwd = _cwd()
     with StateStore() as store:
+        _drop_abandoned(store)
         rows = store.list_sessions(limit=limit)
     if not rows:
         click.echo("No tandem sessions yet. Run `tandem` to start one.")
@@ -378,14 +417,13 @@ def sessions(limit: int) -> None:
         )
     click.echo()
     click.echo("Rows marked * are in this directory. Continue one with "
-               "`tandem resume <id>` from its directory.")
+               "`tandem resume <id>` from anywhere, or "
+               "`tandem native resume <id>` from its directory for the native frame.")
 
 
 def _default_sink_factory(store, session, source, target):
     """Sync engine by default; TANDEM_LOG_EVENTS=1 switches to the debug
     event logger (no shadow writes)."""
-    import os
-
     from .runner import EventLogger
     from .sync import SyncEngine
 
@@ -433,27 +471,96 @@ def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
 
 
 @main.command()
+@click.argument("tandem_id", required=False)
 @click.option("--on", "harness", type=_HARNESS_CHOICE, default=None, help=_ON_HELP)
-@click.option("--new", "fresh", is_flag=True, help=_NEW_HELP)
 @click.pass_context
-def chat(ctx: click.Context, harness: str | None, fresh: bool) -> None:
-    """One composer for every harness (what bare `tandem` runs).
+def resume(ctx: click.Context, tandem_id: str | None, harness: str | None) -> None:
+    """Resume a chat by ID, or choose from sessions across all directories.
 
-    Prompts run headless on the last-used CLI; a leading /claude, /codex or
-    /opencode runs the prompt there and makes it the default. Pairs a fresh
-    session when this directory has none."""
+    Restores the conversation, last-used harness and model pins. The session
+    uses its saved working directory, regardless of where you launch tandem.
+    Use `tandem native resume [ID]` for the CLIs' own interfaces."""
     parent_options = ctx.parent.params if ctx.parent is not None else {}
     _chat(harness if harness is not None else parent_options.get("harness"),
-          fresh or parent_options.get("fresh", False))
+          False, tandem_id or "")
 
 
-def _chat(harness: str | None, fresh: bool) -> None:
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True         # it exists; it is just not ours to signal
+    return True
+
+
+def _drop_abandoned(store: StateStore) -> None:
+    """Forget chat sessions whose window died before its first turn. A closed
+    terminal tab is a SIGHUP: no cleanup runs, and what is left is a row with
+    no shadow transcripts — resumable in name only. The marker names the
+    owning window, so one that is merely still open is left alone."""
+    try:
+        markers = list((paths.tandem_home() / "unused").iterdir())
+    except OSError:
+        return
+    for marker in markers:
+        try:
+            pid = int(marker.read_text().strip())
+        except (OSError, ValueError):
+            pid = None
+        if pid is not None and _pid_alive(pid):
+            continue
+        store.delete_session(marker.name)
+        marker.unlink(missing_ok=True)
+
+
+def _select_chat_session(store: StateStore, resume_id: str | None,
+                         continue_last: bool) -> PairedSession | None:
+    """Resolve explicit resume intent; cwd is session metadata, not a key.
+
+    None means a fresh launch. Cancellation exits here so it cannot fall
+    through into pairing, and a failed resume never creates a replacement.
+    """
+    if resume_id is None and not continue_last:
+        return None
+    if resume_id:
+        session = store.get_session(resume_id)
+        if session is None:
+            raise click.ClickException(f"No tandem session {resume_id!r}. See `tandem sessions`.")
+    else:
+        rows = store.list_sessions(limit=1 if continue_last else None)
+        if not rows:
+            raise click.ClickException("No tandem sessions yet. Run `tandem` to start one.")
+        if continue_last:
+            session = rows[0]
+        else:
+            click.echo("Resume a session (all directories):")
+            click.echo(f"     {'ID':<12}  {'LAST USED':<9}  {'ACTIVE':<8}  DIRECTORY")
+            for i, row in enumerate(rows, 1):
+                click.echo(
+                    f"{i:>3}. {row.tandem_id:<12}  {_ago(row.last_used_at or row.created_at):<9}  "
+                    f"{row.active:<8}  {_short_dir(row.cwd)}")
+            choice = click.prompt("Session number (0 to cancel)", type=click.IntRange(0, len(rows)))
+            if choice == 0:
+                raise click.exceptions.Exit(0)
+            session = rows[choice - 1]
+    if not Path(session.cwd).is_dir():
+        raise click.ClickException(
+            f"Session {session.tandem_id}'s working directory is missing: {session.cwd}")
+    return session
+
+
+def _chat(harness: str | None, fresh: bool, resume_id: str | None = None,
+          continue_last: bool = False) -> None:
     from .chat.window import run_chat
     from .config import load_chat_config
 
-    cwd = _cwd()
+    if sum((fresh, resume_id is not None, continue_last)) > 1:
+        raise click.UsageError("--new, resume and --continue cannot be combined.")
     with StateStore() as store:
-        session = None if fresh else store.latest_session_for_cwd(cwd)
+        _drop_abandoned(store)
+        session = _select_chat_session(store, resume_id, continue_last)
         paired = session is None
         if paired:
             usable, _ = _resolve_participants()
@@ -462,9 +569,8 @@ def _chat(harness: str | None, fresh: bool) -> None:
             # outside the participants can never run a turn. Pair on the
             # default and let the participant check below report it.
             active = harness if harness in usable else usable[0]
-            session = _pair_session(store, cwd, active, usable)
+            session = _pair_session(store, _cwd(), active, usable, seed=False)
         else:
-            store.touch_used(session.tandem_id)
             session = _narrow_participants(store, session)
         if harness is not None:
             if harness not in session.participants:
@@ -476,11 +582,40 @@ def _chat(harness: str | None, fresh: bool) -> None:
                 sys.exit(1)
             store.set_active(session.tandem_id, harness)
             session = store.get_session(session.tandem_id) or session
+        store.touch_used(session.tandem_id)
+        if not paired:
+            click.echo(f"resuming {session.tandem_id} ({session.active} active, "
+                       f"{_short_dir(session.cwd)})")
         if paired:
             from .plugin_setup import offer_install
 
             offer_install()
-        code = run_chat(session, store, load_chat_config())
+        if not paired:
+            code = run_chat(session, store, load_chat_config())
+        else:
+            # The shadows wait for the first prompt, seeded from the session
+            # as it was paired (a bare `/codex` typed first moves the active
+            # slot, not what the pairing owes). A window that never got one —
+            # opened and closed, or refused for want of a terminal — has
+            # written nothing outside the state db, and is dropped whole.
+            # A window killed outright runs none of this; the marker is how
+            # the next launch knows to (_drop_abandoned).
+            fresh, used = session, []
+            marker = paths.unused_marker(session.tandem_id)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(os.getpid()))
+
+            def first_turn() -> None:
+                _seed_shadows(store, fresh)
+                used.append(1)
+                marker.unlink(missing_ok=True)
+
+            try:
+                code = run_chat(session, store, load_chat_config(), first_turn=first_turn)
+            finally:
+                if not used:
+                    store.delete_session(session.tandem_id)
+                    marker.unlink(missing_ok=True)
     sys.exit(code)
 
 
@@ -695,7 +830,7 @@ def hook_route_cmd() -> None:
         cwd = payload.get("cwd") or _cwd()
         cfg = load_subagents_config()
         with StateStore() as store:
-            session = store.latest_session_for_cwd(cwd)
+            session = _current_session(store, cwd)
         # Consent travels out-of-band: the relay's `tandem sub` reads this
         # stamp, so it must be current before the dispatch spawns the relay.
         # Stamped regardless of route config — a manual tandem:gpt dispatch
@@ -751,7 +886,7 @@ def doctor(live: bool) -> None:
     from .doctor import run_doctor
 
     with StateStore() as store:
-        session = store.latest_session_for_cwd(_cwd())
+        session = _current_session(store, _cwd())
         report = run_doctor(store, session, live=live)
     icons = {"ok": ("✓", "green"), "warn": ("!", "yellow"), "fail": ("✗", "red")}
     for check in report.checks:
@@ -804,7 +939,7 @@ def plugin_install_cmd() -> None:
     sys.exit(0 if install_plugin() else 1)
 
 
-@main.command()
+@main.group(invoke_without_command=True)
 @click.option(
     "--active",
     type=_HARNESS_CHOICE,
@@ -812,11 +947,16 @@ def plugin_install_cmd() -> None:
     help="Initially active harness for the fresh session "
          "[default: first usable harness]",
 )
-def native(active: str | None) -> None:
+@click.pass_context
+def native(ctx: click.Context, active: str | None) -> None:
     """Pair a fresh session and enter the active CLI's own TUI.
 
-    Flip between the CLIs from the bar; `tandem resume` continues an
+    Flip between the CLIs from the bar; `tandem native resume` continues an
     earlier session."""
+    if ctx.invoked_subcommand is not None:
+        if active is not None:
+            raise click.UsageError("--active only applies to a fresh `tandem native` session.")
+        return
     cwd = _cwd()
     usable, _ = _resolve_participants()
     if active is None:
@@ -833,6 +973,9 @@ def native(active: str | None) -> None:
 
     offer_install()
     sys.exit(_enter_session(session))
+
+
+native.add_command(native_resume)
 
 
 def _enter_session(session: PairedSession) -> int:

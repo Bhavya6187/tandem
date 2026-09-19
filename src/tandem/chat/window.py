@@ -295,11 +295,14 @@ class Window:
 
 
 def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | None = None,
-             runtimes: dict | None = None) -> int:
+             runtimes: dict | None = None, first_turn: Callable[[], None] | None = None) -> int:
+    """`first_turn` is what a freshly paired session defers until its first
+    prompt (cli._chat: seeding the other harnesses' session files). A window
+    left before then has run nothing, and the launcher drops the session."""
     stdin_fd = sys.stdin.fileno() if stdin_fd is None else stdin_fd
     out_fd = sys.stdout.fileno() if out_fd is None else out_fd
     if not os.isatty(stdin_fd):
-        sys.stderr.write("tandem chat needs a terminal\n")
+        sys.stderr.write("tandem needs a terminal\n")
         return 1
     rows, cols = _winsize(stdin_fd)
     events: queue.Queue = queue.Queue()
@@ -328,14 +331,23 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
     answers = WindowAnswers(post)
     runtimes = runtimes if runtimes is not None else make_runtimes(session, cfg)
     meters: dict = {}
-    for h in session.participants:
-        sid = session.native_id(h)
-        path = get_adapter(h).transcript_path(session.cwd, sid) if sid else None
-        if path is not None:
-            meters[h] = UsageFeed(get_adapter(h), session, path, {"text": ""})
+
+    def add_meters() -> None:
+        for h in session.participants:
+            sid = session.native_id(h)
+            path = get_adapter(h).transcript_path(session.cwd, sid) if sid and h not in meters else None
+            if path is not None:
+                meters[h] = UsageFeed(get_adapter(h), session, path, {"text": ""})
+
+    def seed_then_meter() -> None:
+        first_turn()
+        add_meters()        # opencode has no transcript path until its session exists
+
+    add_meters()
     usage_state: dict = {"limits": {}}
     poller = RateLimitPoller(list(session.participants), usage_state) if load_frame_config().rate_limits else None
-    dispatcher = Dispatcher(store, session, runtimes, post, answers, meters=meters)
+    dispatcher = Dispatcher(store, session, runtimes, post, answers, meters=meters,
+                            first_turn=seed_then_meter if first_turn is not None else None)
     bar = StatusBar(rows, cols, session.active, session.targets_for(session.active), hint=HINT)
     win = Window(session, store, cfg, screen, composer, dispatcher, answers, bar, usage_state,
                  meters, poller, stdin_fd=stdin_fd)
@@ -385,5 +397,7 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
         signal.signal(signal.SIGWINCH, old_winch)
         os.close(wake_r)
         os.close(wake_w)
-    write(f"tandem chat: session {session.tandem_id} · continue with `tandem`\r\n".encode())
+    if not dispatcher.first_turn_pending:            # else nothing ran and the session is dropped
+        write(f"tandem: session {session.tandem_id} · resume with "
+              f"`tandem resume {session.tandem_id}`\r\n".encode())
     return 0

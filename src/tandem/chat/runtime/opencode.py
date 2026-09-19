@@ -95,7 +95,8 @@ class OpencodeRuntime:
                 self.base_url = None
                 self._sse_started = False
 
-    def ensure_server(self, cwd: str, health_timeout: float = 10.0) -> str:
+    def ensure_server(self, cwd: str, health_timeout: float = 10.0, *,
+                      tandem_id: str | None = None) -> str:
         if self._injected:
             return self.base_url
         with self._lock:
@@ -105,7 +106,8 @@ class OpencodeRuntime:
             self.base_url = f"http://127.0.0.1:{port}"
             self._proc = subprocess.Popen(
                 [*self.binary, "serve", "--port", str(port), "--hostname", "127.0.0.1"],
-                cwd=cwd, env=child_env(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                cwd=cwd, env=child_env(tandem_id=tandem_id),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE, text=True, start_new_session=True,
             )
             proc = self._proc
@@ -315,7 +317,7 @@ class OpencodeRuntime:
             provider, model_id = model.split("/", 1)
             body["model"] = {"providerID": provider, "modelID": model_id}
         try:
-            self.ensure_server(session.cwd)
+            self.ensure_server(session.cwd, tandem_id=session.tandem_id)
         except Exception as exc:        # an unhealthy server, a missing binary: both end the turn
             msg = str(exc) or type(exc).__name__
             emit(Failure(msg)); emit(TurnFinished("failed", ""))

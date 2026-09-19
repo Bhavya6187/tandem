@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # tools/live_gate_chat.py
-"""Live gate for `tandem chat`: a three-harness relay with approvals, driven
+"""Live gate for `tandem`: a three-harness relay with approvals, driven
 in tmux on a private socket. Needs real, signed-in claude/codex/opencode.
 
 usage: tools/live_gate_chat.py [--bin /path/to/tandem] [--proj DIR]
 
 Steps (each waits on pane text or on the file a harness was asked to touch):
-  1. launch `tandem chat` in an empty, trusted project directory
+  1. launch `tandem` in an empty, trusted project directory
   2. `/claude Reply with exactly MARLIN.`                    → pane shows MARLIN
   3. `/codex What word did the previous assistant say? Then run: touch gate-codex.txt`
        → approval prompt → `y` → file exists, and codex names MARLIN
@@ -122,7 +122,7 @@ def check(cond, what):
 
 t("kill-session", "-t", S)
 t("new-session", "-d", "-s", S, "-x", "160", "-y", "45", "-c", str(PROJ),
-  f"env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT {a.bin} chat; echo EXIT=$?; sleep 300")
+  f"env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT {a.bin}; echo EXIT=$?; sleep 300")
 # the empty composer row, which tmux hands back as a bare ">" (it strips the
 # trailing space); anchored, or the bar's own text would match
 check(wait(r"(?m)^>\s*$", 60, "composer"), "window up")

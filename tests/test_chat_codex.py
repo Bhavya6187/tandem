@@ -43,7 +43,7 @@ def env(tmp_path, monkeypatch):
                 return m["params"]
         return None
 
-    return SimpleNamespace(tmp=tmp_path, session=SimpleNamespace(cwd=str(proj)), params=params,
+    return SimpleNamespace(tmp=tmp_path, session=SimpleNamespace(cwd=str(proj), tandem_id="tdm-codex"), params=params,
                            runtime=CodexRuntime(ChatConfig(), binary=[sys.executable, str(FAKE)]))
 
 
@@ -319,3 +319,15 @@ def test_golden_lines_drive_the_handler():
     assert rec.events[0] == ToolStarted("call_vDe2mWf2XYJ1BjLDXSDWgLSo", "exec", "echo fixture —")
     assert rec.events[1] == ToolOutput("call_vDe2mWf2XYJ1BjLDXSDWgLSo", "fixture —\n")   # from aggregatedOutput, no delta streamed
     assert rec.events[3] == LimitsUpdate("codex", "5h 0% 7d 0%")
+
+
+def test_child_is_told_which_session_it_belongs_to(env, monkeypatch):
+    from tandem.chat.runtime import codex as mod
+
+    seen = []
+    real = mod.subprocess.Popen
+    monkeypatch.setattr(mod.subprocess, "Popen",
+                        lambda *a, **kw: (seen.append(kw["env"]), real(*a, **kw))[1])
+    rec = Recorder()
+    env.runtime.run_turn(env.session, None, "hi", "", rec.emit, rec)
+    assert seen[0]["TANDEM_SESSION_ID"] == "tdm-codex"
