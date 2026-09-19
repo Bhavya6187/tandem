@@ -363,7 +363,7 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
     old_winch = signal.signal(signal.SIGWINCH, lambda *_: os.write(wake_w, b"W"))
     try:
         tty.setraw(stdin_fd)
-        screen.enter()
+        screen.enter(fresh=True)
         win.paint_history()
         for m in meters.values():
             m.poll()
