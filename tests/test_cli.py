@@ -37,6 +37,15 @@ def entered(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def chatted(monkeypatch):
+    """Sessions handed to the chat window, which is patched away."""
+    calls = []
+    monkeypatch.setattr("tandem.chat.window.run_chat",
+                        lambda session, store, cfg, **kw: (calls.append(session), 0)[1])
+    return calls
+
+
 def test_version_reports_installed_dist():
     # The dist is named tandem-cli, not tandem; --version must come from
     # tandem.__version__ or it crashes in venvs without a "tandem" dist.
@@ -45,24 +54,24 @@ def test_version_reports_installed_dist():
     assert tandem.__version__ in r.output
 
 
-def test_bare_tandem_pairs_fresh_each_launch(homes, ok_versions, entered):
+def test_native_pairs_fresh_each_launch(homes, ok_versions, entered):
     runner = click.testing.CliRunner()
-    r1 = runner.invoke(cli.main, [])
-    r2 = runner.invoke(cli.main, [])
+    r1 = runner.invoke(cli.main, ["native"])
+    r2 = runner.invoke(cli.main, ["native"])
     assert r1.exit_code == 0 and r2.exit_code == 0
     assert "paired" in r1.output and "claude active, codex shadow" in r1.output
     ids = {s.tandem_id for s in entered}
     assert len(ids) == 2  # two launches -> two distinct sessions
 
 
-def test_active_codex_flips_roles(homes, ok_versions, entered):
-    r = click.testing.CliRunner().invoke(cli.main, ["--active", "codex"])
+def test_native_active_codex_flips_roles(homes, ok_versions, entered):
+    r = click.testing.CliRunner().invoke(cli.main, ["native", "--active", "codex"])
     assert r.exit_code == 0
     assert entered[0].active == "codex"
     assert "codex active, claude shadow" in r.output
 
 
-def test_bare_tandem_defaults_to_first_usable(homes, entered, monkeypatch):
+def test_native_defaults_to_first_usable(homes, entered, monkeypatch):
     """No --active given: drop into the first usable harness in configured
     order rather than assuming claude is installed."""
     monkeypatch.setattr(
@@ -70,14 +79,14 @@ def test_bare_tandem_defaults_to_first_usable(homes, entered, monkeypatch):
         lambda warn_only=False: (["codex", "claude"],
                                  {"claude": "2.1.220", "codex": "0.145.0"}),
     )
-    r = click.testing.CliRunner().invoke(cli.main, [])
+    r = click.testing.CliRunner().invoke(cli.main, ["native"])
     assert r.exit_code == 0
     assert entered[0].active == "codex"
     assert "codex active, claude shadow" in r.output
 
 
-def test_explicit_active_not_usable_still_errors(homes, ok_versions, entered):
-    r = click.testing.CliRunner().invoke(cli.main, ["--active", "opencode"])
+def test_native_explicit_active_not_usable_still_errors(homes, ok_versions, entered):
+    r = click.testing.CliRunner().invoke(cli.main, ["native", "--active", "opencode"])
     assert r.exit_code == 1
     assert "not usable" in r.stderr
     assert entered == []
@@ -92,11 +101,12 @@ class _NoBin:
         return None
 
 
-def test_missing_binary_blocks_pairing(homes, entered, monkeypatch):
+@pytest.mark.parametrize("argv", [[], ["native"]])
+def test_missing_binary_blocks_pairing(homes, entered, chatted, monkeypatch, argv):
     monkeypatch.setattr(cli, "get_adapter", lambda hid: _NoBin())
-    r = click.testing.CliRunner().invoke(cli.main, [])
+    r = click.testing.CliRunner().invoke(cli.main, argv)
     assert r.exit_code == 1
-    assert entered == []  # never paired, never entered
+    assert entered == [] and chatted == []  # never paired, never entered
     with StateStore() as store:
         assert store.latest_session_for_cwd(cli._cwd()) is None
 
@@ -218,14 +228,14 @@ def test_plugin_install_cmd_exit_codes(monkeypatch):
     assert r.exit_code == 1
 
 
-def test_bare_tandem_offers_plugin_after_pairing(
+def test_native_offers_plugin_after_pairing(
         homes, ok_versions, entered, monkeypatch):
     from tandem import plugin_setup
 
     calls = []
     monkeypatch.setattr(plugin_setup, "offer_install",
                         lambda: calls.append(len(entered)))
-    r = click.testing.CliRunner().invoke(cli.main, [])
+    r = click.testing.CliRunner().invoke(cli.main, ["native"])
     assert r.exit_code == 0
     # offered exactly once, after pairing but before entering the session
     assert calls == [0]
@@ -386,3 +396,103 @@ def test_chat_on_an_unusable_harness_never_becomes_the_fresh_session_active(
     with StateStore() as store:
         session = store.latest_session_for_cwd(str(homes))
     assert session.active in session.participants
+
+
+# -- bare tandem is the chat window ------------------------------------------
+
+
+def test_bare_tandem_opens_chat_on_the_latest_session(
+        homes, ok_versions, entered, chatted):
+    s = _mk_session(homes)
+    r = click.testing.CliRunner().invoke(cli.main, [])
+    assert r.exit_code == 0, r.output
+    assert [c.tandem_id for c in chatted] == [s.tandem_id]
+    assert entered == []  # the native frame is `tandem native` now
+
+
+def test_bare_tandem_pairs_when_the_directory_has_no_session(
+        homes, ok_versions, entered, chatted):
+    r = click.testing.CliRunner().invoke(cli.main, [])
+    assert r.exit_code == 0, r.output
+    assert "paired" in r.output
+    assert len(chatted) == 1 and entered == []
+
+
+def test_bare_tandem_honors_on(homes, ok_versions, chatted):
+    s = _mk_session(homes, active="claude")
+    r = click.testing.CliRunner().invoke(cli.main, ["--on", "codex"])
+    assert r.exit_code == 0, r.output
+    assert chatted[0].active == "codex"
+    with StateStore() as store:
+        assert store.get_session(s.tandem_id).active == "codex"
+
+
+@pytest.mark.parametrize("argv", [["--new"], ["chat", "--new"]])
+def test_new_pairs_a_fresh_session_for_chat(homes, ok_versions, chatted, argv):
+    old = _mk_session(homes)
+    r = click.testing.CliRunner().invoke(cli.main, argv)
+    assert r.exit_code == 0, r.output
+    assert len(chatted) == 1 and chatted[0].tandem_id != old.tandem_id
+
+
+def test_new_with_on_makes_it_the_fresh_session_active(homes, ok_versions, chatted):
+    _mk_session(homes, active="claude")
+    r = click.testing.CliRunner().invoke(cli.main, ["--new", "--on", "codex"])
+    assert r.exit_code == 0, r.output
+    assert chatted[0].active == "codex"
+
+
+def test_group_active_points_at_native(homes, ok_versions, entered, chatted):
+    """`tandem --active X` was the pre-chat-default spelling; it must name
+    its replacements rather than die as an unknown option."""
+    r = click.testing.CliRunner().invoke(cli.main, ["--active", "codex"])
+    assert r.exit_code == 2
+    assert "tandem native --active codex" in r.stderr
+    assert "tandem --on codex" in r.stderr
+    assert entered == [] and chatted == []
+    with StateStore() as store:
+        assert store.latest_session_for_cwd(str(homes)) is None
+
+
+def test_chat_offers_plugin_only_when_it_pairs(homes, ok_versions, chatted, monkeypatch):
+    from tandem import plugin_setup
+
+    calls = []
+    monkeypatch.setattr(plugin_setup, "offer_install",
+                        lambda: calls.append(len(chatted)))
+    runner = click.testing.CliRunner()
+    assert runner.invoke(cli.main, []).exit_code == 0
+    # offered once, after pairing but before the window opens
+    assert calls == [0]
+    assert runner.invoke(cli.main, []).exit_code == 0   # reuses the session
+    assert calls == [0]
+
+
+@pytest.mark.parametrize("argv, active, fresh", [
+    (["--new", "chat"], "claude", True),
+    (["--on", "codex", "chat"], "codex", False),
+    (["--on", "claude", "chat", "--on", "codex"], "codex", False),
+])
+def test_chat_honors_group_options(homes, ok_versions, chatted, argv, active, fresh):
+    old = _mk_session(homes)
+    result = click.testing.CliRunner().invoke(cli.main, argv)
+    assert result.exit_code == 0, result.output
+    assert chatted[0].active == active
+    assert (chatted[0].tandem_id != old.tandem_id) == fresh
+
+
+@pytest.mark.parametrize("argv", [["--new", "status"], ["--on", "codex", "native"]])
+def test_chat_options_rejected_for_other_commands(homes, ok_versions, entered, argv):
+    result = click.testing.CliRunner().invoke(cli.main, argv)
+    assert result.exit_code == 2
+    assert "only apply" in result.output
+    assert entered == []
+
+
+def test_invalid_chat_harness_does_not_offer_install(homes, ok_versions, monkeypatch):
+    calls = []
+    monkeypatch.setattr("tandem.plugin_setup.offer_install", lambda: calls.append(True))
+    result = click.testing.CliRunner().invoke(cli.main, ["--on", "opencode"])
+    assert result.exit_code == 1
+    assert "not a participant" in result.output
+    assert calls == []

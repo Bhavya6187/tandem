@@ -15,13 +15,14 @@ harnesses = ["claude", "codex", "opencode"]
 ```
 
 Naming a harness here is an *intent*, not a requirement: a fresh
-`tandem` session pairs the listed harnesses that are actually installed
+session pairs the listed harnesses that are actually installed
 and usable — not-installed ones are skipped silently, ones that are
 installed but unusable warn and drop out, and fewer than two usable is
 an error that prints the install command for each missing CLI. The
 order sets both the **Ctrl-]** cycle and the default starting harness
-(`tandem` enters the first usable one; `--active` overrides that per
-launch).
+(`tandem native` enters the first usable one and `--active` overrides
+that per launch; a fresh chat session starts on it unless `--on` names
+another).
 Leave a harness off the list to keep it out of new sessions even though
 it's installed — `harnesses = ["claude", "codex"]` gives two-way
 sessions on a machine that also has opencode. Unknown names are
@@ -45,7 +46,7 @@ keep_forks = false      # keep each worker's rollout for debugging
 ## [claude] / [codex] / [opencode] — per-harness startup args
 
 Optional per-harness tables add flags to every interactive session tandem
-opens (`tandem`, `tandem resume`, and each flip) — one-off relays
+opens (`tandem native`, `tandem resume`, and each flip) — one-off relays
 (`tandem run`), subagent dispatch, and doctor probes are unaffected:
 
 ```toml
@@ -110,8 +111,8 @@ flip, which is slower but does the same thing.
 
 ## [chat] — the unified window
 
-`tandem chat` runs every prompt headless inside the harness that ran the
-last one, unless the prompt starts with `/claude`, `/codex`, or
+Bare `tandem` (or `tandem chat`) opens the chat window, which runs every
+prompt headless inside the harness that ran the last one, unless the prompt starts with `/claude`, `/codex`, or
 `/opencode` (optionally `/codex:gpt-5.5` to pin a model for that harness,
 `/codex:default` to clear it). A bare route switches the default without a
 turn. Tandem's own window commands are `/quit` (leave the window, as two

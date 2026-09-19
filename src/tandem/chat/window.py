@@ -385,5 +385,5 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
         signal.signal(signal.SIGWINCH, old_winch)
         os.close(wake_r)
         os.close(wake_w)
-    write(f"tandem chat: session {session.tandem_id} · continue with `tandem chat`\r\n".encode())
+    write(f"tandem chat: session {session.tandem_id} · continue with `tandem`\r\n".encode())
     return 0
