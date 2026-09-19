@@ -87,7 +87,14 @@ class Screen:
     def _region_cmd(self) -> str:
         return f"{_CSI}1;{self.region_rows}r"
 
-    def enter(self) -> None:
+    def enter(self, *, fresh: bool = False) -> None:
+        """`fresh` is the window opening, as opposed to a Ctrl-L repaint: the
+        terminal still shows whatever ran before — the shell, a previous
+        session — and the region would overwrite it cell by cell. One LF per
+        row from the bottom row, with no region set yet, scrolls it all into
+        scrollback; ED 2 would erase it outright on most terminals."""
+        if fresh:
+            self._w(f"{_CSI}r{_CSI}{self.rows};1H" + "\r\n" * self.rows)
         self._w(f"{_CSI}?2004h" + self._region_cmd() + f"{_CSI}{self.region_rows};1H")
         self._col, self._focus = 0, "region"
 
