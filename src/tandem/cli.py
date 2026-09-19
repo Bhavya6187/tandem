@@ -157,6 +157,8 @@ def main(ctx: click.Context, harness: str | None, fresh: bool,
         raise click.UsageError(
             f'--active moved: use "tandem native --active {active}" '
             f'(or "tandem --on {active}" for the chat window).')
+    if ctx.invoked_subcommand not in (None, "chat") and (harness is not None or fresh):
+        raise click.UsageError("--on and --new only apply to bare tandem or tandem chat.")
     if ctx.invoked_subcommand is None:
         _chat(harness, fresh)
 
@@ -433,13 +435,16 @@ def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
 @main.command()
 @click.option("--on", "harness", type=_HARNESS_CHOICE, default=None, help=_ON_HELP)
 @click.option("--new", "fresh", is_flag=True, help=_NEW_HELP)
-def chat(harness: str | None, fresh: bool) -> None:
+@click.pass_context
+def chat(ctx: click.Context, harness: str | None, fresh: bool) -> None:
     """One composer for every harness (what bare `tandem` runs).
 
     Prompts run headless on the last-used CLI; a leading /claude, /codex or
     /opencode runs the prompt there and makes it the default. Pairs a fresh
     session when this directory has none."""
-    _chat(harness, fresh)
+    parent_options = ctx.parent.params if ctx.parent is not None else {}
+    _chat(harness if harness is not None else parent_options.get("harness"),
+          fresh or parent_options.get("fresh", False))
 
 
 def _chat(harness: str | None, fresh: bool) -> None:
@@ -449,7 +454,8 @@ def _chat(harness: str | None, fresh: bool) -> None:
     cwd = _cwd()
     with StateStore() as store:
         session = None if fresh else store.latest_session_for_cwd(cwd)
-        if session is None:
+        paired = session is None
+        if paired:
             usable, _ = _resolve_participants()
             # a --on naming a harness this machine cannot run must never
             # become the fresh session's active slot: an active harness
@@ -457,9 +463,6 @@ def _chat(harness: str | None, fresh: bool) -> None:
             # default and let the participant check below report it.
             active = harness if harness in usable else usable[0]
             session = _pair_session(store, cwd, active, usable)
-            from .plugin_setup import offer_install
-
-            offer_install()
         else:
             store.touch_used(session.tandem_id)
             session = _narrow_participants(store, session)
@@ -473,6 +476,10 @@ def _chat(harness: str | None, fresh: bool) -> None:
                 sys.exit(1)
             store.set_active(session.tandem_id, harness)
             session = store.get_session(session.tandem_id) or session
+        if paired:
+            from .plugin_setup import offer_install
+
+            offer_install()
         code = run_chat(session, store, load_chat_config())
     sys.exit(code)
 

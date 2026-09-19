@@ -466,3 +466,33 @@ def test_chat_offers_plugin_only_when_it_pairs(homes, ok_versions, chatted, monk
     assert calls == [0]
     assert runner.invoke(cli.main, []).exit_code == 0   # reuses the session
     assert calls == [0]
+
+
+@pytest.mark.parametrize("argv, active, fresh", [
+    (["--new", "chat"], "claude", True),
+    (["--on", "codex", "chat"], "codex", False),
+    (["--on", "claude", "chat", "--on", "codex"], "codex", False),
+])
+def test_chat_honors_group_options(homes, ok_versions, chatted, argv, active, fresh):
+    old = _mk_session(homes)
+    result = click.testing.CliRunner().invoke(cli.main, argv)
+    assert result.exit_code == 0, result.output
+    assert chatted[0].active == active
+    assert (chatted[0].tandem_id != old.tandem_id) == fresh
+
+
+@pytest.mark.parametrize("argv", [["--new", "status"], ["--on", "codex", "native"]])
+def test_chat_options_rejected_for_other_commands(homes, ok_versions, entered, argv):
+    result = click.testing.CliRunner().invoke(cli.main, argv)
+    assert result.exit_code == 2
+    assert "only apply" in result.output
+    assert entered == []
+
+
+def test_invalid_chat_harness_does_not_offer_install(homes, ok_versions, monkeypatch):
+    calls = []
+    monkeypatch.setattr("tandem.plugin_setup.offer_install", lambda: calls.append(True))
+    result = click.testing.CliRunner().invoke(cli.main, ["--on", "opencode"])
+    assert result.exit_code == 1
+    assert "not a participant" in result.output
+    assert calls == []
