@@ -148,20 +148,20 @@ def test_enter_session_runs_the_flip_loop(homes, monkeypatch):
     assert seen[0][1] is cli._default_sink_factory
 
 
-def test_resume_picks_most_recently_used(homes, ok_versions, entered):
+def test_native_resume_picks_most_recently_used(homes, ok_versions, entered):
     s1 = _mk_session(homes, n=1)
     _mk_session(homes, n=2)
     with StateStore() as store:
         store.touch_used(s1.tandem_id)
-    r = click.testing.CliRunner().invoke(cli.main, ["resume"])
+    r = click.testing.CliRunner().invoke(cli.main, ["native", "resume"])
     assert r.exit_code == 0
     assert entered[0].tandem_id == s1.tandem_id
 
 
-def test_resume_by_id(homes, ok_versions, entered):
+def test_native_resume_by_id(homes, ok_versions, entered):
     s1 = _mk_session(homes, n=1)
     _mk_session(homes, n=2)
-    r = click.testing.CliRunner().invoke(cli.main, ["resume", s1.tandem_id])
+    r = click.testing.CliRunner().invoke(cli.main, ["native", "resume", s1.tandem_id])
     assert r.exit_code == 0
     assert entered[0].tandem_id == s1.tandem_id
     with StateStore() as store:  # resume bumps last_used_at
@@ -170,34 +170,34 @@ def test_resume_by_id(homes, ok_versions, entered):
         )
 
 
-def test_resume_unknown_id_errors(homes, ok_versions, entered):
-    r = click.testing.CliRunner().invoke(cli.main, ["resume", "nope00000000"])
+def test_native_resume_unknown_id_errors(homes, ok_versions, entered):
+    r = click.testing.CliRunner().invoke(cli.main, ["native", "resume", "nope00000000"])
     assert r.exit_code == 1
     assert entered == []
 
 
-def test_resume_id_from_other_directory_errors(homes, ok_versions, entered, tmp_path):
+def test_native_resume_id_from_other_directory_errors(homes, ok_versions, entered, tmp_path):
     other_dir = tmp_path / "elsewhere"
     other_dir.mkdir()
     s = _mk_session(other_dir)
-    r = click.testing.CliRunner().invoke(cli.main, ["resume", s.tandem_id])
+    r = click.testing.CliRunner().invoke(cli.main, ["native", "resume", s.tandem_id])
     assert r.exit_code == 1
     assert str(other_dir) in r.stderr  # tells the user where it lives
     assert entered == []
 
 
-def test_resume_with_no_sessions_hints_tandem(homes, ok_versions, entered):
-    r = click.testing.CliRunner().invoke(cli.main, ["resume"])
+def test_native_resume_with_no_sessions_hints_tandem(homes, ok_versions, entered):
+    r = click.testing.CliRunner().invoke(cli.main, ["native", "resume"])
     assert r.exit_code == 1
     assert "Run `tandem` to start one" in r.stderr
 
 
-def test_resume_without_two_usable_harnesses_is_fatal(homes, entered, monkeypatch):
+def test_native_resume_without_two_usable_harnesses_is_fatal(homes, entered, monkeypatch):
     """Resume recomputes availability (spec: Participants/Resume); fewer
     than two usable survivors is fatal — nothing could run anyway."""
     _mk_session(homes)
     monkeypatch.setattr(cli, "get_adapter", lambda hid: _NoBin())
-    r = click.testing.CliRunner().invoke(cli.main, ["resume"])
+    r = click.testing.CliRunner().invoke(cli.main, ["native", "resume"])
     assert r.exit_code == 1
     assert "warning:" in r.stderr        # availability reported before the exit
     assert entered == []
@@ -360,7 +360,7 @@ def test_ago_tolerates_garbage():
 # -- tandem chat -------------------------------------------------------------
 
 
-def test_chat_command_uses_the_latest_session_and_honors_on(env_factory, monkeypatch):
+def test_chat_resume_honors_on(env_factory, monkeypatch):
     from click.testing import CliRunner
 
     from tandem import cli
@@ -369,7 +369,7 @@ def test_chat_command_uses_the_latest_session_and_honors_on(env_factory, monkeyp
     seen = {}
     monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
     monkeypatch.setattr("tandem.chat.window.run_chat", lambda session, store, cfg, **kw: seen.setdefault("session", session) and 0)
-    result = CliRunner().invoke(cli.main, ["chat", "--on", "codex"])
+    result = CliRunner().invoke(cli.main, ["resume", env.session.tandem_id, "--on", "codex"])
     assert result.exit_code == 0, result.output
     assert seen["session"].active == "codex"
     assert env.store.get_session(env.session.tandem_id).active == "codex"
@@ -382,7 +382,7 @@ def test_chat_rejects_a_non_participant(env_factory, monkeypatch):
 
     env = env_factory(active="claude")
     monkeypatch.setattr(cli, "_cwd", lambda: env.cwd)
-    result = CliRunner().invoke(cli.main, ["chat", "--on", "opencode"])
+    result = CliRunner().invoke(cli.main, ["resume", env.session.tandem_id, "--on", "opencode"])
     assert result.exit_code == 1 and "not a participant" in result.output
 
 
@@ -391,7 +391,7 @@ def test_chat_on_an_unusable_harness_never_becomes_the_fresh_session_active(
     """`--on` names a harness this machine cannot run and the directory has
     no session yet: pairing must not stamp it as the active slot — a session
     whose active harness is not a participant can never run a turn."""
-    r = click.testing.CliRunner().invoke(cli.main, ["chat", "--on", "opencode"])
+    r = click.testing.CliRunner().invoke(cli.main, ["--on", "opencode"])
     assert r.exit_code == 1 and "not a participant" in r.output
     with StateStore() as store:
         session = store.latest_session_for_cwd(str(homes))
@@ -401,12 +401,15 @@ def test_chat_on_an_unusable_harness_never_becomes_the_fresh_session_active(
 # -- bare tandem is the chat window ------------------------------------------
 
 
-def test_bare_tandem_opens_chat_on_the_latest_session(
+def test_chat_launches_create_independent_sessions(
         homes, ok_versions, entered, chatted):
     s = _mk_session(homes)
-    r = click.testing.CliRunner().invoke(cli.main, [])
-    assert r.exit_code == 0, r.output
-    assert [c.tandem_id for c in chatted] == [s.tandem_id]
+    for _ in range(2):
+        r = click.testing.CliRunner().invoke(cli.main, [])
+        assert r.exit_code == 0, r.output
+    assert len({s.tandem_id, *(c.tandem_id for c in chatted)}) == 3
+    with StateStore() as store:
+        assert len(store.list_sessions()) == 3
     assert entered == []  # the native frame is `tandem native` now
 
 
@@ -424,10 +427,11 @@ def test_bare_tandem_honors_on(homes, ok_versions, chatted):
     assert r.exit_code == 0, r.output
     assert chatted[0].active == "codex"
     with StateStore() as store:
-        assert store.get_session(s.tandem_id).active == "codex"
+        assert store.get_session(s.tandem_id).active == "claude"
+        assert store.get_session(chatted[0].tandem_id).active == "codex"
 
 
-@pytest.mark.parametrize("argv", [["--new"], ["chat", "--new"]])
+@pytest.mark.parametrize("argv", [[], ["--new"]])
 def test_new_pairs_a_fresh_session_for_chat(homes, ok_versions, chatted, argv):
     old = _mk_session(homes)
     r = click.testing.CliRunner().invoke(cli.main, argv)
@@ -464,24 +468,25 @@ def test_chat_offers_plugin_only_when_it_pairs(homes, ok_versions, chatted, monk
     assert runner.invoke(cli.main, []).exit_code == 0
     # offered once, after pairing but before the window opens
     assert calls == [0]
-    assert runner.invoke(cli.main, []).exit_code == 0   # reuses the session
+    assert runner.invoke(cli.main, ["--continue"]).exit_code == 0
     assert calls == [0]
 
 
-@pytest.mark.parametrize("argv, active, fresh", [
-    (["--new", "chat"], "claude", True),
-    (["--on", "codex", "chat"], "codex", False),
-    (["--on", "claude", "chat", "--on", "codex"], "codex", False),
+@pytest.mark.parametrize("argv, active", [
+    (["--on", "codex", "resume"], "codex"),
+    (["--on", "claude", "resume", "--on", "codex"], "codex"),
 ])
-def test_chat_honors_group_options(homes, ok_versions, chatted, argv, active, fresh):
+def test_resume_honors_group_on(homes, ok_versions, chatted, argv, active):
     old = _mk_session(homes)
-    result = click.testing.CliRunner().invoke(cli.main, argv)
+    result = click.testing.CliRunner().invoke(cli.main, [*argv, old.tandem_id])
     assert result.exit_code == 0, result.output
     assert chatted[0].active == active
-    assert (chatted[0].tandem_id != old.tandem_id) == fresh
+    assert chatted[0].tandem_id == old.tandem_id
 
 
-@pytest.mark.parametrize("argv", [["--new", "status"], ["--on", "codex", "native"]])
+@pytest.mark.parametrize("argv", [
+    ["--new", "status"], ["--on", "codex", "native"], ["--continue", "native"],
+])
 def test_chat_options_rejected_for_other_commands(homes, ok_versions, entered, argv):
     result = click.testing.CliRunner().invoke(cli.main, argv)
     assert result.exit_code == 2
@@ -496,3 +501,109 @@ def test_invalid_chat_harness_does_not_offer_install(homes, ok_versions, monkeyp
     assert result.exit_code == 1
     assert "not a participant" in result.output
     assert calls == []
+
+
+def test_chat_resume_by_id_from_any_directory(homes, ok_versions, chatted, tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    wanted = _mk_session(other, active="codex", n=1)
+    newer = _mk_session(homes, n=2)
+    with StateStore() as store:
+        store.set_pin(wanted.tandem_id, "codex", "gpt-5.5")
+    r = click.testing.CliRunner().invoke(cli.main, ["resume", wanted.tandem_id])
+    assert r.exit_code == 0, r.output
+    assert chatted[0].tandem_id == wanted.tandem_id
+    assert chatted[0].cwd == str(other)
+    assert chatted[0].native_session_ids == wanted.native_session_ids
+    assert chatted[0].active == "codex"
+    with StateStore() as store:
+        assert store.get_pin(wanted.tandem_id, "codex") == "gpt-5.5"
+        assert [s.tandem_id for s in store.list_sessions()] == [wanted.tandem_id, newer.tandem_id]
+
+
+@pytest.mark.parametrize("argv", [["--continue"], ["-c"]])
+def test_chat_continue_selects_last_used_across_directories(
+        homes, ok_versions, chatted, tmp_path, argv):
+    other = tmp_path / "other"
+    other.mkdir()
+    wanted = _mk_session(other, n=1)
+    _mk_session(homes, n=2)
+    with StateStore() as store:
+        store.touch_used(wanted.tandem_id)
+    r = click.testing.CliRunner().invoke(cli.main, argv)
+    assert r.exit_code == 0, r.output
+    assert chatted[0].tandem_id == wanted.tandem_id
+    assert chatted[0].cwd == str(other)
+
+
+def test_chat_resume_picker_includes_older_sessions_in_other_directories(
+        homes, ok_versions, chatted, tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    wanted = _mk_session(other)
+    for i in range(12):
+        _mk_session(homes, n=i + 1)
+    r = click.testing.CliRunner().invoke(cli.main, ["resume"], input="14\n13\n")
+    assert r.exit_code == 0, r.output
+    assert wanted.tandem_id in r.output and str(other) in r.output
+    assert chatted[0].tandem_id == wanted.tandem_id
+
+
+@pytest.mark.parametrize("answer", ["0\n", ""])
+def test_chat_resume_picker_can_cancel_without_mutating_sessions(
+        homes, ok_versions, chatted, answer):
+    old = _mk_session(homes)
+    r = click.testing.CliRunner().invoke(cli.main, ["resume"], input=answer)
+    assert r.exit_code in (0, 1), r.output
+    assert chatted == []
+    with StateStore() as store:
+        assert store.list_sessions() == [old]
+
+
+@pytest.mark.parametrize("argv", [["resume"], ["--continue"], ["resume", "unknown"]])
+def test_chat_resume_never_silently_creates_a_session(homes, ok_versions, chatted, argv):
+    r = click.testing.CliRunner().invoke(cli.main, argv)
+    assert r.exit_code == 1, r.output
+    assert "session" in r.output
+    assert chatted == []
+    with StateStore() as store:
+        assert store.list_sessions() == []
+
+
+def test_chat_resume_reports_missing_working_directory(homes, ok_versions, chatted, tmp_path):
+    old = _mk_session(tmp_path / "gone")
+    r = click.testing.CliRunner().invoke(cli.main, ["resume", old.tandem_id])
+    assert r.exit_code == 1, r.output
+    assert old.cwd in r.output and "directory" in r.output
+    assert chatted == []
+    with StateStore() as store:
+        assert store.list_sessions() == [old]
+
+
+@pytest.mark.parametrize("argv", [
+    ["--new", "--continue"], ["--new", "resume"], ["--continue", "resume"],
+])
+def test_chat_rejects_conflicting_session_options_before_pairing(homes, chatted, argv):
+    r = click.testing.CliRunner().invoke(cli.main, argv)
+    assert r.exit_code == 2, r.output
+    assert "cannot be combined" in r.output
+    assert chatted == []
+    with StateStore() as store:
+        assert store.list_sessions() == []
+
+
+def test_chat_command_is_removed(homes, chatted):
+    result = click.testing.CliRunner().invoke(cli.main, ["chat"])
+    assert result.exit_code == 2
+    assert "No such command" in result.output
+    assert chatted == []
+
+
+def test_native_active_rejected_on_resume(homes, entered):
+    old = _mk_session(homes)
+    result = click.testing.CliRunner().invoke(
+        cli.main, ["native", "--active", "codex", "resume", old.tandem_id])
+    assert result.exit_code == 2
+    assert entered == []
+    with StateStore() as store:
+        assert store.list_sessions() == [old]

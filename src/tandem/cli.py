@@ -134,33 +134,41 @@ def _narrow_participants(store: StateStore, session: PairedSession) -> PairedSes
 
 
 _HARNESS_CHOICE = click.Choice(["claude", "codex", "opencode"])
-_ON_HELP = "Harness for the first prompt [default: the session's last-used harness]."
-_NEW_HELP = "Pair a fresh session instead of continuing this directory's latest."
+_ON_HELP = "Harness for the first prompt [default: first usable, or last-used on resume]."
+_NEW_HELP = "Pair a fresh session (the default)."
+_CONTINUE_HELP = "Continue the most recently used session across all directories."
 
 
 @click.group(invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="tandem")
 @click.option("--on", "harness", type=_HARNESS_CHOICE, default=None, help=_ON_HELP)
 @click.option("--new", "fresh", is_flag=True, help=_NEW_HELP)
+@click.option("--continue", "-c", "continue_last", is_flag=True, help=_CONTINUE_HELP)
 @click.option("--active", type=_HARNESS_CHOICE, default=None, hidden=True)
 @click.pass_context
 def main(ctx: click.Context, harness: str | None, fresh: bool,
-         active: str | None) -> None:
+         continue_last: bool, active: str | None) -> None:
     """Run Claude Code and Codex as one paired session.
 
-    With no subcommand, opens the chat window (same as `tandem chat`);
+    With no subcommand, starts a fresh chat. Use `tandem resume [ID]` to
+    reopen a chat, or --continue for the latest one across all directories.
     `tandem native` pairs a fresh session inside the CLIs' own TUIs and
-    `tandem resume` re-enters one.
+    `tandem native resume [ID]` re-enters one.
     """
     if active is not None:
         # pre-chat-default spelling of `tandem native --active X`
         raise click.UsageError(
             f'--active moved: use "tandem native --active {active}" '
             f'(or "tandem --on {active}" for the chat window).')
-    if ctx.invoked_subcommand not in (None, "chat") and (harness is not None or fresh):
-        raise click.UsageError("--on and --new only apply to bare tandem or tandem chat.")
+    if ctx.invoked_subcommand == "resume" and (fresh or continue_last):
+        raise click.UsageError("resume, --new and --continue cannot be combined.")
+    if ctx.invoked_subcommand not in (None, "resume") and (
+            harness is not None or fresh or continue_last):
+        raise click.UsageError(
+            "--on, --new and --continue only apply to chat sessions; "
+            "use bare tandem or tandem resume.")
     if ctx.invoked_subcommand is None:
-        _chat(harness, fresh)
+        _chat(harness, fresh, continue_last=continue_last)
 
 
 def _pair_session(store: StateStore, cwd: str, active: str,
@@ -281,9 +289,9 @@ def status() -> None:
             click.echo(f"  retained forks: {len(kept)} under {sub_root}")
 
 
-@main.command()
+@click.command(name="resume")
 @click.argument("tandem_id", required=False)
-def resume(tandem_id: str | None) -> None:
+def native_resume(tandem_id: str | None) -> None:
     """Resume a paired session (most recent for this directory by default).
 
     The id is printed when you leave a session, and shown by `tandem status`
@@ -307,7 +315,7 @@ def resume(tandem_id: str | None) -> None:
             if session.cwd != cwd:
                 click.secho(
                     f"error: session {tandem_id} belongs to {session.cwd}; "
-                    "run `tandem resume` from there.",
+                    "run `tandem native resume` from there.",
                     fg="red",
                     err=True,
                 )
@@ -360,7 +368,7 @@ def sessions(limit: int) -> None:
     """List your most recent paired sessions, newest first.
 
     Sessions in the current directory are marked with `*`; resume any of
-    them with `tandem resume <id>` from its directory.
+    them with `tandem resume <id>` from anywhere.
     """
     cwd = _cwd()
     with StateStore() as store:
@@ -378,7 +386,8 @@ def sessions(limit: int) -> None:
         )
     click.echo()
     click.echo("Rows marked * are in this directory. Continue one with "
-               "`tandem resume <id>` from its directory.")
+               "`tandem resume <id>` from anywhere, or "
+               "`tandem native resume <id>` from its directory for the native frame.")
 
 
 def _default_sink_factory(store, session, source, target):
@@ -433,27 +442,65 @@ def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
 
 
 @main.command()
+@click.argument("tandem_id", required=False)
 @click.option("--on", "harness", type=_HARNESS_CHOICE, default=None, help=_ON_HELP)
-@click.option("--new", "fresh", is_flag=True, help=_NEW_HELP)
 @click.pass_context
-def chat(ctx: click.Context, harness: str | None, fresh: bool) -> None:
-    """One composer for every harness (what bare `tandem` runs).
+def resume(ctx: click.Context, tandem_id: str | None, harness: str | None) -> None:
+    """Resume a chat by ID, or choose from sessions across all directories.
 
-    Prompts run headless on the last-used CLI; a leading /claude, /codex or
-    /opencode runs the prompt there and makes it the default. Pairs a fresh
-    session when this directory has none."""
+    Restores the conversation, last-used harness and model pins. The session
+    uses its saved working directory, regardless of where you launch tandem.
+    Use `tandem native resume [ID]` for the CLIs' own interfaces."""
     parent_options = ctx.parent.params if ctx.parent is not None else {}
     _chat(harness if harness is not None else parent_options.get("harness"),
-          fresh or parent_options.get("fresh", False))
+          False, tandem_id or "")
 
 
-def _chat(harness: str | None, fresh: bool) -> None:
+def _select_chat_session(store: StateStore, resume_id: str | None,
+                         continue_last: bool) -> PairedSession | None:
+    """Resolve explicit resume intent; cwd is session metadata, not a key.
+
+    None means a fresh launch. Cancellation exits here so it cannot fall
+    through into pairing, and a failed resume never creates a replacement.
+    """
+    if resume_id is None and not continue_last:
+        return None
+    if resume_id:
+        session = store.get_session(resume_id)
+        if session is None:
+            raise click.ClickException(f"No tandem session {resume_id!r}. See `tandem sessions`.")
+    else:
+        rows = store.list_sessions(limit=1 if continue_last else None)
+        if not rows:
+            raise click.ClickException("No tandem sessions yet. Run `tandem` to start one.")
+        if continue_last:
+            session = rows[0]
+        else:
+            click.echo("Resume a session (all directories):")
+            click.echo(f"     {'ID':<12}  {'LAST USED':<9}  {'ACTIVE':<8}  DIRECTORY")
+            for i, row in enumerate(rows, 1):
+                click.echo(
+                    f"{i:>3}. {row.tandem_id:<12}  {_ago(row.last_used_at or row.created_at):<9}  "
+                    f"{row.active:<8}  {_short_dir(row.cwd)}")
+            choice = click.prompt("Session number (0 to cancel)", type=click.IntRange(0, len(rows)))
+            if choice == 0:
+                raise click.exceptions.Exit(0)
+            session = rows[choice - 1]
+    if not Path(session.cwd).is_dir():
+        raise click.ClickException(
+            f"Session {session.tandem_id}'s working directory is missing: {session.cwd}")
+    return session
+
+
+def _chat(harness: str | None, fresh: bool, resume_id: str | None = None,
+          continue_last: bool = False) -> None:
     from .chat.window import run_chat
     from .config import load_chat_config
 
-    cwd = _cwd()
+    if sum((fresh, resume_id is not None, continue_last)) > 1:
+        raise click.UsageError("--new, resume and --continue cannot be combined.")
     with StateStore() as store:
-        session = None if fresh else store.latest_session_for_cwd(cwd)
+        session = _select_chat_session(store, resume_id, continue_last)
         paired = session is None
         if paired:
             usable, _ = _resolve_participants()
@@ -462,9 +509,8 @@ def _chat(harness: str | None, fresh: bool) -> None:
             # outside the participants can never run a turn. Pair on the
             # default and let the participant check below report it.
             active = harness if harness in usable else usable[0]
-            session = _pair_session(store, cwd, active, usable)
+            session = _pair_session(store, _cwd(), active, usable)
         else:
-            store.touch_used(session.tandem_id)
             session = _narrow_participants(store, session)
         if harness is not None:
             if harness not in session.participants:
@@ -476,6 +522,10 @@ def _chat(harness: str | None, fresh: bool) -> None:
                 sys.exit(1)
             store.set_active(session.tandem_id, harness)
             session = store.get_session(session.tandem_id) or session
+        store.touch_used(session.tandem_id)
+        if not paired:
+            click.echo(f"resuming {session.tandem_id} ({session.active} active, "
+                       f"{_short_dir(session.cwd)})")
         if paired:
             from .plugin_setup import offer_install
 
@@ -804,7 +854,7 @@ def plugin_install_cmd() -> None:
     sys.exit(0 if install_plugin() else 1)
 
 
-@main.command()
+@main.group(invoke_without_command=True)
 @click.option(
     "--active",
     type=_HARNESS_CHOICE,
@@ -812,11 +862,16 @@ def plugin_install_cmd() -> None:
     help="Initially active harness for the fresh session "
          "[default: first usable harness]",
 )
-def native(active: str | None) -> None:
+@click.pass_context
+def native(ctx: click.Context, active: str | None) -> None:
     """Pair a fresh session and enter the active CLI's own TUI.
 
-    Flip between the CLIs from the bar; `tandem resume` continues an
+    Flip between the CLIs from the bar; `tandem native resume` continues an
     earlier session."""
+    if ctx.invoked_subcommand is not None:
+        if active is not None:
+            raise click.UsageError("--active only applies to a fresh `tandem native` session.")
+        return
     cwd = _cwd()
     usable, _ = _resolve_participants()
     if active is None:
@@ -833,6 +888,9 @@ def native(active: str | None) -> None:
 
     offer_install()
     sys.exit(_enter_session(session))
+
+
+native.add_command(native_resume)
 
 
 def _enter_session(session: PairedSession) -> int:

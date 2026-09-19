@@ -22,10 +22,16 @@ flip, compatibility ranges, and where your data lives. (Back to the
   no dynamic rejoin. Sync fans out per direction: with three
   participants, each turn on the active side is translated twice, once
   into each shadow.
+- **Sessions belong to conversations.** Each `tandem` launch creates a new
+  paired session with its own ID. `tandem resume [id]` reopens a chat by ID
+  or shows a picker across all directories; `tandem --continue` reopens the
+  most recently used session. Resuming uses the session's saved working
+  directory and native transcripts, preserving its harness and model pins.
 - **Exit means exit.** Leaving the harness — as opposed to flipping out
   of it — prints the resume hint and returns you to your OS shell; the
-  paired session is saved and `tandem resume` re-enters it (`tandem
-  sessions` lists recent ones across directories).
+  paired session is saved and `tandem native resume [id]` re-enters it in
+  the native frame from its directory (`tandem sessions` lists recent ones
+  across directories).
   `status` / `sync` / `doctor` / `run --on` / `sync-mcp` run one-shot
   from your shell, targeting the directory's most recently used session.
 - **The frame: flip without leaving.** Ctrl-] (configurable, consumed at

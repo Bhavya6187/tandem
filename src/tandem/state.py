@@ -196,15 +196,15 @@ class StateStore:
         ).fetchone()
         return self._row_to_session(row) if row else None
 
-    def list_sessions(self, limit: int = 10) -> list[PairedSession]:
+    def list_sessions(self, limit: int | None = 10) -> list[PairedSession]:
         """Most recently used paired sessions across every working
         directory, newest first (same NULL-immune ordering as
-        latest_session_for_cwd)."""
+        latest_session_for_cwd). None returns every session for the picker."""
         rows = self._conn.execute(
             "SELECT * FROM sessions"
             " ORDER BY COALESCE(last_used_at, created_at) DESC, created_at DESC"
             " LIMIT ?",
-            (limit,),
+            (-1 if limit is None else limit,),
         ).fetchall()
         return [self._row_to_session(r) for r in rows]
 

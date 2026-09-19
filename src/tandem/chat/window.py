@@ -299,7 +299,7 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
     stdin_fd = sys.stdin.fileno() if stdin_fd is None else stdin_fd
     out_fd = sys.stdout.fileno() if out_fd is None else out_fd
     if not os.isatty(stdin_fd):
-        sys.stderr.write("tandem chat needs a terminal\n")
+        sys.stderr.write("tandem needs a terminal\n")
         return 1
     rows, cols = _winsize(stdin_fd)
     events: queue.Queue = queue.Queue()
@@ -385,5 +385,6 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
         signal.signal(signal.SIGWINCH, old_winch)
         os.close(wake_r)
         os.close(wake_w)
-    write(f"tandem chat: session {session.tandem_id} · continue with `tandem`\r\n".encode())
+    write(f"tandem: session {session.tandem_id} · resume with "
+          f"`tandem resume {session.tandem_id}`\r\n".encode())
     return 0

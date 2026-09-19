@@ -46,7 +46,7 @@ keep_forks = false      # keep each worker's rollout for debugging
 ## [claude] / [codex] / [opencode] — per-harness startup args
 
 Optional per-harness tables add flags to every interactive session tandem
-opens (`tandem native`, `tandem resume`, and each flip) — one-off relays
+opens (`tandem native`, `tandem native resume`, and each flip) — one-off relays
 (`tandem run`), subagent dispatch, and doctor probes are unaffected:
 
 ```toml
@@ -111,7 +111,13 @@ flip, which is slower but does the same thing.
 
 ## [chat] — the unified window
 
-Bare `tandem` (or `tandem chat`) opens the chat window, which runs every
+Bare `tandem` starts a fresh chat. `tandem resume [id]` reopens one by ID,
+or shows a picker across all directories when no ID is given.
+`tandem --continue` reopens the most recently used session across directories.
+Resuming restores the conversation and model pins in the session's saved
+working directory.
+
+The chat window runs every
 prompt headless inside the harness that ran the last one, unless the prompt starts with `/claude`, `/codex`, or
 `/opencode` (optionally `/codex:gpt-5.5` to pin a model for that harness,
 `/codex:default` to clear it). A bare route switches the default without a

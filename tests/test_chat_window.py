@@ -329,7 +329,7 @@ def hermetic_frame():
         f.write("[frame]\nrate_limits = false\n")
 
 
-def drive_chat(env) -> tuple[int, str]:
+def drive_chat(env, *, launch=None, runtimes=None) -> tuple[int, str]:
     """Run the real loop over a pty: wait for the composer, submit `ping`,
     wait for the echo, then quit with two Ctrl-Cs. Returns (exit code,
     everything the window painted). The quit is sent even when the echo never
@@ -367,8 +367,10 @@ def drive_chat(env) -> tuple[int, str]:
 
     t = threading.Thread(target=driver, daemon=True); t.start()
     try:
-        code = run_chat(env.session, env.store, ChatConfig(), stdin_fd=slave, out_fd=slave,
-                        runtimes={"claude": EchoRuntime(), "codex": EchoRuntime()})
+        kwargs = dict(stdin_fd=slave, out_fd=slave,
+                      runtimes=runtimes or {"claude": EchoRuntime(), "codex": EchoRuntime()})
+        code = (launch(**kwargs) if launch is not None else
+                run_chat(env.session, env.store, ChatConfig(), **kwargs))
     finally:
         os.close(slave)                               # the driver's read then fails and ends
         t.join(5)
@@ -384,6 +386,45 @@ def test_run_chat_on_a_pty(env_factory):
     code, text = drive_chat(env)
     assert code == 0
     assert "echo:ping" in text and "\x1b[r" in text
+    assert f"tandem resume {env.session.tandem_id}" in text
+
+
+def test_resume_from_another_directory_restores_history_and_continues_native_session(
+        env_factory, monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from tandem import cli
+
+    env = env_factory()
+    hermetic_frame()
+    write_line(env.claude_shadow, claude_user("remember the blue whale", uuid="u9"))
+    write_line(env.claude_shadow, claude_assistant(
+        [{"type": "text", "text": "I will remember it."}], uuid="a9"))
+    env.store.set_pin(env.session.tandem_id, "claude", "claude-fable-5")
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    turns = []
+
+    class ResumedRuntime(EchoRuntime):
+        def run_turn(self, session, native_id, prompt, model, emit, answers):
+            turns.append((session.cwd, native_id, model, prompt))
+            return super().run_turn(session, native_id, prompt, model, emit, answers)
+
+    def launch(**kwargs):
+        monkeypatch.setattr("tandem.chat.window.run_chat",
+                            lambda session, store, cfg: run_chat(session, store, cfg, **kwargs))
+        result = CliRunner().invoke(cli.main, ["resume", env.session.tandem_id])
+        assert result.exit_code == 0, result.output
+        return result.exit_code
+
+    code, text = drive_chat(env, launch=launch,
+                            runtimes={"claude": ResumedRuntime(), "codex": EchoRuntime()})
+    assert code == 0
+    assert "remember the blue whale" in text and "I will remember it." in text
+    assert "echo:ping" in text
+    assert turns == [(env.cwd, env.session.native_id("claude"), "claude-fable-5", "ping")]
+    assert len(env.store.list_sessions()) == 1
 
 
 def test_a_flush_does_not_leave_the_loop_blocked_on_a_dead_read(env_factory, monkeypatch):
