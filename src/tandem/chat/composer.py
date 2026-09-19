@@ -57,6 +57,11 @@ _CSI_FINAL = {ord("A"): "up", ord("B"): "down", ord("C"): "right", ord("D"): "le
 _TILDE = {"200": "paste_start", "201": "paste_end", "3": "delete",
           "1": "home", "7": "home", "4": "end", "8": "end"}
 _PASTE_END = b"\x1b[201~"
+# Meta (Option) keys arrive as Esc + the key: macOS terminals send Esc b /
+# Esc f for option-left / option-right, Esc DEL for option-backspace.
+_META = {ord("b"): "word_left", ord("f"): "word_right", ord("d"): "word_delete",
+         0x7F: "word_backspace", 0x08: "word_backspace"}
+_WORD_ARROW = {"left": "word_left", "right": "word_right"}
 
 
 def approval_row(choices: tuple[str, ...] | None = None) -> str:
@@ -171,7 +176,12 @@ class Composer:
             final, params = data[j], data[2:j].decode(errors="replace")
             if final == ord("~"):
                 return _TILDE.get(params, ""), j + 1
-            return _CSI_FINAL.get(final, ""), j + 1
+            name = _CSI_FINAL.get(final, "")
+            if params.rpartition(";")[2] not in ("", "1", "2"):   # alt/ctrl arrow (1;3D, 1;5C): by word
+                name = _WORD_ARROW.get(name, name)
+            return name, j + 1
+        if data[1] in _META:
+            return _META[data[1]], 2
         if data[1:2] == b"O":
             if len(data) < 3:
                 return "", 0
@@ -221,10 +231,36 @@ class Composer:
         elif name == "delete":
             if self.cur < len(self.buf):
                 del self.buf[self.cur]
+        elif name == "word_left":
+            self.cur = self._word_left()
+        elif name == "word_right":
+            self.cur = self._word_right()
+        elif name == "word_backspace":
+            start = self._word_left()
+            del self.buf[start:self.cur]
+            self.cur = start
+        elif name == "word_delete":
+            del self.buf[self.cur:self._word_right()]
         elif name == "up":
             self._history_step(-1)
         elif name == "down":
             self._history_step(1)
+
+    def _word_left(self) -> int:
+        i = self.cur
+        while i > 0 and self.buf[i - 1].isspace():
+            i -= 1
+        while i > 0 and not self.buf[i - 1].isspace():
+            i -= 1
+        return i
+
+    def _word_right(self) -> int:
+        i, n = self.cur, len(self.buf)
+        while i < n and self.buf[i].isspace():
+            i += 1
+        while i < n and not self.buf[i].isspace():
+            i += 1
+        return i
 
     def _history_step(self, step: int) -> None:
         if self.mode != "prompt" or not self.history:

@@ -36,6 +36,28 @@ def test_editing_keys():
     assert c.text == ""
 
 
+def test_meta_word_motion():
+    c = Composer()
+    feed(c, "one two  three")
+    assert feed(c, b"\x1bb") == [] and c.cur == 9     # option-left: Esc b, no Interrupt
+    assert feed(c, b"\x1bb") == [] and c.cur == 4
+    assert feed(c, b"\x1bf") == [] and c.cur == 7     # option-right: Esc f
+    assert feed(c, b"\x1bf") == [] and c.cur == 14
+    assert feed(c, b"\x1bf") == [] and c.cur == 14    # end stays
+    assert c.text == "one two  three"                 # no stray b / f typed
+    feed(c, b"\x1b[1;3D"); assert c.cur == 9          # modified arrows move by word too
+    feed(c, b"\x1b[1;5D"); assert c.cur == 4
+    feed(c, b"\x1b[1;3C"); assert c.cur == 7
+
+
+def test_meta_word_delete():
+    c = Composer()
+    feed(c, "one two three")
+    assert feed(c, b"\x1b\x7f") == [] and c.text == "one two "    # option-backspace
+    feed(c, b"\x01")
+    assert feed(c, b"\x1bd") == [] and c.text == " two "          # Esc d
+
+
 def test_history_with_draft():
     c = Composer()
     feed(c, "one\r"); feed(c, "two\r"); feed(c, "dra")
