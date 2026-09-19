@@ -14,7 +14,7 @@ from tandem.chat.composer import Composer
 from tandem.chat.events import (ApprovalRequest, Idle, LimitsUpdate, QuestionRequest, TextDelta,
                                 TurnFinished, TurnOutcome, TurnStarted)
 from tandem.chat.render import Screen
-from tandem.chat.window import Window, WindowAnswers, run_chat
+from tandem.chat.window import Window, WindowAnswers, route_hint, run_chat
 from tandem.config import ChatConfig
 from tandem.frame import StatusBar
 
@@ -65,6 +65,13 @@ def blocks_until_answered(answers, req, sink):
     t.start(); t.join(0.2)
     assert sink == []
     return t
+
+
+def test_route_hint_names_only_the_participants():
+    """The trailer advertises what `/` can actually route to: a harness
+    dropped from `harnesses` in config.toml is not a participant."""
+    assert route_hint(["claude", "codex"]) == "/claude /codex route"
+    assert route_hint(["claude", "codex", "opencode"]) == "/claude /codex /opencode route"
 
 
 def test_submit_and_notes(env_factory):
