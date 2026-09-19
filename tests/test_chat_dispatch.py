@@ -760,3 +760,51 @@ class TestFreshlyPairedSession:
         texts = shadow_texts(rollout)
         assert "[via claude-code] go" in texts
         assert "[via claude-code] claude did go" in texts
+
+
+# -- first_turn: what a fresh session defers until it is actually used ---------
+
+def test_first_turn_hook_runs_once_before_the_first_runtime_call(env_factory):
+    env = env_factory(active="claude")
+    events, order = [], []
+    rt = CountingRuntime("claude")
+    real = rt.run_turn
+    rt.run_turn = lambda *a, **kw: (order.append("turn"), real(*a, **kw))[1]
+    d = Dispatcher(env.store, env.session, {"claude": rt, "codex": rt}, events.append, Answers(),
+                   first_turn=lambda: order.append("seed"))
+    try:
+        assert d.first_turn_pending
+        d.submit("one"); wait_idle(events)
+        assert not d.first_turn_pending
+        d.submit("two"); wait_idle(events, 2)
+    finally:
+        d.close()
+    assert order == ["seed", "turn", "turn"]
+
+
+def test_first_turn_hook_that_fails_fails_the_turn_and_is_retried(env_factory):
+    env = env_factory(active="claude")
+    events, attempts = [], []
+    rt = CountingRuntime("claude")
+
+    def seed():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError("disk full")
+
+    d = Dispatcher(env.store, env.session, {"claude": rt, "codex": rt}, events.append, Answers(),
+                   first_turn=seed)
+    try:
+        d.submit("one"); wait_idle(events)
+        assert rt.calls == [] and d.first_turn_pending
+        assert any(isinstance(e, Failure) and "disk full" in e.message for e in events)
+        assert TurnFinished("failed", "") in events
+        d.submit("two"); wait_idle(events, 2)
+    finally:
+        d.close()
+    assert rt.calls == ["two"] and len(attempts) == 2 and not d.first_turn_pending
+
+
+def test_without_a_hook_nothing_is_pending(setup):
+    _, d, _, _ = setup
+    assert not d.first_turn_pending

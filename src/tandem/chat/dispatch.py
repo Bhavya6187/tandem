@@ -44,13 +44,18 @@ def _close_note(harness: str, outcome: TurnOutcome) -> str | None:
 
 class Dispatcher:
     def __init__(self, store, session, runtimes: dict, emit: Callable[[LiveEvent], None],
-                 answers: Answers, *, meters: dict | None = None):
+                 answers: Answers, *, meters: dict | None = None,
+                 first_turn: Callable[[], None] | None = None):
         self.store = store
         self.session = session
         self.runtimes = runtimes
         self.emit = emit
         self.answers = answers
-        self.meters = meters or {}
+        self.meters = meters if meters is not None else {}
+        # what a fresh session puts off until it is used (seeding the other
+        # harnesses' session files): a window opened and closed leaves nothing
+        # behind. Kept until it succeeds, so a failed attempt is retried.
+        self._first_turn = first_turn
         self.queue: deque[Pending] = deque()
         # guards the start-or-queue decision and the flags it sets, nothing
         # more: submit() runs on the main thread while pump() can run on the
@@ -63,6 +68,10 @@ class Dispatcher:
         self._running = False
         self._closed = False
         self._spoken = 0        # bumped by every bare route; a turn started before one must not undo it
+
+    @property
+    def first_turn_pending(self) -> bool:
+        return self._first_turn is not None
 
     @property
     def default(self) -> str:
@@ -212,6 +221,9 @@ class Dispatcher:
         ran = False
         self.emit(TurnStarted(harness, item.model, item.prompt))
         try:
+            if self._first_turn is not None:
+                self._first_turn()
+                self._first_turn = None
             problems = self._validate(harness)
             if problems:
                 self.emit(Failure(f"{harness} transcript: " + "; ".join(problems)))

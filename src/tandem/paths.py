@@ -23,6 +23,12 @@ def quarantine_dir(tandem_id: str) -> Path:
     return tandem_home() / "quarantine" / tandem_id
 
 
+def unused_marker(tandem_id: str) -> Path:
+    """Present while a chat session is paired but has not run a turn; holds
+    the pid of the window that owns it (cli._drop_abandoned)."""
+    return tandem_home() / "unused" / tandem_id
+
+
 def log_dir() -> Path:
     return tandem_home() / "logs"
 

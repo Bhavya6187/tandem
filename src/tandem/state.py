@@ -208,6 +208,14 @@ class StateStore:
         ).fetchall()
         return [self._row_to_session(r) for r in rows]
 
+    def delete_session(self, tandem_id: str) -> None:
+        """Forget a session that was paired and never used, with everything
+        keyed on it. The native session files are not this store's to remove:
+        the caller only drops sessions that never got any."""
+        with self._tx():
+            for table in ("sync_cursors", "chat_pins", "sessions"):
+                self._conn.execute(f"DELETE FROM {table} WHERE tandem_id = ?", (tandem_id,))
+
     def touch_used(self, tandem_id: str) -> None:
         with self._tx():
             self._conn.execute(

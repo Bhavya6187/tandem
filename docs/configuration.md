@@ -154,3 +154,9 @@ tandem's own state (`state.db`, config, quarantine, subagent logs) from
 `~/.tandem`; the harnesses' own overrides — `CLAUDE_CONFIG_DIR`,
 `CODEX_HOME`, `OPENCODE_DB` — are respected when tandem looks for their
 session stores.
+
+`TANDEM_SESSION_ID` is set by tandem, not by you: the chat window exports
+it to every harness it runs, so a `tandem sub` or `tandem hook-route`
+spawned from inside that harness acts on the window's own session rather
+than the directory's most recent one (a directory can hold many). Commands
+run from a plain shell never see it and keep resolving by directory.

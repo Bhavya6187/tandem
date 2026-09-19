@@ -20,6 +20,15 @@ def test_child_env_strips_only_claudes_own_nesting_markers():
                    "PATH": "/bin", "HOME": "/h"}
 
 
+def test_child_env_names_the_session_the_child_belongs_to():
+    """A directory can hold many chat sessions, so a `tandem sub` or
+    `tandem hook-route` the harness spawns cannot find its session by cwd:
+    the window's session id rides the child's environment, replacing any
+    outer window's."""
+    env = child_env({"PATH": "/bin", "TANDEM_SESSION_ID": "outer"}, tandem_id="tdm-inner")
+    assert env == {"PATH": "/bin", "TANDEM_SESSION_ID": "tdm-inner"}
+
+
 def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)

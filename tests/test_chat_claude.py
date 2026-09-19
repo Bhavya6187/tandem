@@ -48,7 +48,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_REPLY_OUT", str(tmp_path / "reply.json"))
     monkeypatch.setenv("FAKE_PROMPT_OUT", str(tmp_path / "prompt.txt"))
     proj = tmp_path / "proj"; proj.mkdir()
-    return SimpleNamespace(tmp=tmp_path, session=SimpleNamespace(cwd=str(proj)),
+    return SimpleNamespace(tmp=tmp_path, session=SimpleNamespace(cwd=str(proj), tandem_id="tdm-claude"),
                            runtime=ClaudeRuntime(ChatConfig(), binary=[sys.executable, str(FAKE)]))
 
 
@@ -193,3 +193,15 @@ def test_golden_lines_drive_the_parser():
     assert rec.events[0] == ThinkingDelta("I should run it.")
     assert rec.events[1] == ToolStarted("toolu_01EdBuo5aF5Cjkj7NbwFrLeC", "Bash", "touch fixture-claude.txt")
     assert sent[0]["type"] == "control_response" and sent[0]["response"]["request_id"] == "16c61d1a-b82a-4c4b-8a21-1f3298f9eaaf"
+
+
+def test_child_is_told_which_session_it_belongs_to(env, monkeypatch):
+    from tandem.chat.runtime import claude as mod
+
+    seen = []
+    real = mod.subprocess.Popen
+    monkeypatch.setattr(mod.subprocess, "Popen",
+                        lambda *a, **kw: (seen.append(kw["env"]), real(*a, **kw))[1])
+    rec = Recorder("allow")
+    env.runtime.run_turn(env.session, "sid-1", "make x", "", rec.emit, rec)
+    assert seen[0]["TANDEM_SESSION_ID"] == "tdm-claude"

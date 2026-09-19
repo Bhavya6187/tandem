@@ -39,7 +39,23 @@ def entered(monkeypatch):
 
 @pytest.fixture
 def chatted(monkeypatch):
-    """Sessions handed to the chat window, which is patched away."""
+    """Sessions handed to the chat window, which is patched away. The stand-in
+    runs what a first prompt would (`first_turn`), so the session is a used
+    one; `chat_left_idle` is the window nobody typed into."""
+    calls = []
+
+    def run_chat(session, store, cfg, *, first_turn=None, **kw):
+        calls.append(session)
+        if first_turn is not None:
+            first_turn()
+        return 0
+
+    monkeypatch.setattr("tandem.chat.window.run_chat", run_chat)
+    return calls
+
+
+@pytest.fixture
+def chat_left_idle(monkeypatch):
     calls = []
     monkeypatch.setattr("tandem.chat.window.run_chat",
                         lambda session, store, cfg, **kw: (calls.append(session), 0)[1])
@@ -607,3 +623,181 @@ def test_native_active_rejected_on_resume(homes, entered):
     assert entered == []
     with StateStore() as store:
         assert store.list_sessions() == [old]
+
+
+# -- the session a chat child belongs to ----------------------------------------
+
+def _two_sessions(proj):
+    """Two chat windows opened in one directory: `newer` is what a cwd lookup
+    finds, `older` is the window whose harness is asking."""
+    with StateStore() as store:
+        older = store.create_session(str(proj), "claude", ["claude", "codex"],
+                                     {"claude": "c-old", "codex": "x-old"})
+        newer = store.create_session(str(proj), "claude", ["claude", "codex"],
+                                     {"claude": "c-new", "codex": "x-new"})
+        store.touch_used(newer.tandem_id)
+    return older, newer
+
+
+def test_status_follows_the_session_named_by_the_environment(homes, ok_versions, monkeypatch):
+    older, newer = _two_sessions(homes)
+    monkeypatch.setenv("TANDEM_SESSION_ID", older.tandem_id)
+    r = click.testing.CliRunner().invoke(cli.main, ["status"])
+    assert r.exit_code == 0, r.output
+    assert f"tandem session {older.tandem_id}" in r.output
+    assert newer.tandem_id not in r.output
+
+
+def test_unknown_session_in_the_environment_falls_back_to_cwd(homes, ok_versions, monkeypatch):
+    _, newer = _two_sessions(homes)
+    monkeypatch.setenv("TANDEM_SESSION_ID", "tdm-gone")
+    r = click.testing.CliRunner().invoke(cli.main, ["status"])
+    assert r.exit_code == 0, r.output
+    assert f"tandem session {newer.tandem_id}" in r.output
+
+
+def test_hook_route_stamps_consent_on_the_asking_window(homes, monkeypatch):
+    import json
+
+    from tandem import paths
+
+    older, newer = _two_sessions(homes)
+    monkeypatch.setenv("TANDEM_SESSION_ID", older.tandem_id)
+    payload = {"tool_name": "Agent", "cwd": str(homes), "session_id": "s-1",
+               "permission_mode": "acceptEdits",
+               "tool_input": {"subagent_type": "tandem:gpt", "prompt": "do it"}}
+    r = click.testing.CliRunner().invoke(cli.main, ["hook-route"], input=json.dumps(payload))
+    assert r.exit_code == 0, r.output
+    assert (paths.tandem_home() / "sandbox" / older.tandem_id).read_text() == "workspace-write"
+    assert not (paths.tandem_home() / "sandbox" / newer.tandem_id).exists()
+
+
+# -- a fresh chat session costs nothing until it is used ------------------------
+
+def _native_files(tmp_path):
+    return sorted(str(p.relative_to(tmp_path)) for root in (".claude", ".codex")
+                  for p in (tmp_path / root).rglob("*.jsonl"))
+
+
+def test_chat_opened_and_left_leaves_no_session_behind(homes, ok_versions, chat_left_idle, tmp_path):
+    r = click.testing.CliRunner().invoke(cli.main, [])
+    assert r.exit_code == 0, r.output
+    assert len(chat_left_idle) == 1
+    with StateStore() as store:
+        assert store.list_sessions(limit=None) == []
+        assert store.get_session(chat_left_idle[0].tandem_id) is None
+    assert _native_files(tmp_path) == []
+
+
+def test_chat_seeds_the_shadows_on_its_first_turn(homes, ok_versions, chatted, tmp_path):
+    r = click.testing.CliRunner().invoke(cli.main, [])
+    assert r.exit_code == 0, r.output
+    with StateStore() as store:
+        session = store.get_session(chatted[0].tandem_id)
+    assert session is not None
+    # claude is active and writes its own file on its first turn; codex is
+    # the shadow, seeded with the note — what pairing used to do up front
+    files = _native_files(tmp_path)
+    assert len(files) == 1 and files[0].startswith(".codex/")
+    assert session.native_id("codex") in files[0]
+
+
+def test_chat_window_that_dies_before_a_turn_leaves_no_session_behind(
+        homes, ok_versions, monkeypatch, tmp_path):
+    def boom(session, store, cfg, **kw):
+        raise OSError("no terminal")
+
+    monkeypatch.setattr("tandem.chat.window.run_chat", boom)
+    r = click.testing.CliRunner().invoke(cli.main, [])
+    assert r.exit_code == 1 and isinstance(r.exception, OSError)
+    with StateStore() as store:
+        assert store.list_sessions(limit=None) == []
+    assert _native_files(tmp_path) == []
+
+
+def test_resumed_chat_left_idle_is_kept(homes, ok_versions, chatted, chat_left_idle):
+    with StateStore() as store:
+        kept = store.create_session(str(homes), "claude", ["claude", "codex"],
+                                    {"claude": "c-1", "codex": "x-1"})
+    r = click.testing.CliRunner().invoke(cli.main, ["resume", kept.tandem_id])
+    assert r.exit_code == 0, r.output
+    with StateStore() as store:
+        assert store.get_session(kept.tandem_id) is not None
+
+
+# -- a window killed before its first turn (a closed terminal tab: SIGHUP runs
+#    no cleanup) leaves a row with no shadows; the next launch drops it ---------
+
+def _dead_pid():
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def _unused_marker(tandem_id):
+    from tandem import paths
+
+    return paths.unused_marker(tandem_id)
+
+
+def test_open_unused_window_is_marked_with_its_pid(homes, ok_versions, monkeypatch):
+    import os
+
+    seen = {}
+
+    def run_chat(session, store, cfg, *, first_turn=None, **kw):
+        marker = _unused_marker(session.tandem_id)
+        seen["open"] = marker.read_text()
+        first_turn()
+        seen["after_turn"] = marker.exists()
+        return 0
+
+    monkeypatch.setattr("tandem.chat.window.run_chat", run_chat)
+    r = click.testing.CliRunner().invoke(cli.main, [])
+    assert r.exit_code == 0, r.output
+    assert seen == {"open": str(os.getpid()), "after_turn": False}
+
+
+def test_window_left_idle_clears_its_marker(homes, ok_versions, chat_left_idle):
+    click.testing.CliRunner().invoke(cli.main, [])
+    assert not _unused_marker(chat_left_idle[0].tandem_id).exists()
+
+
+def _abandon(homes, pid):
+    with StateStore() as store:
+        s = store.create_session(str(homes), "claude", ["claude", "codex"],
+                                 {"claude": "c-dead", "codex": "x-dead"})
+        store.touch_used(s.tandem_id)
+    marker = _unused_marker(s.tandem_id)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(str(pid))
+    return s
+
+
+def test_continue_never_lands_on_a_window_that_died_unused(homes, ok_versions, chatted):
+    dead = _abandon(homes, _dead_pid())
+    r = click.testing.CliRunner().invoke(cli.main, ["--continue"])
+    assert r.exit_code != 0 and "No tandem sessions yet" in r.output
+    assert chatted == []
+    with StateStore() as store:
+        assert store.get_session(dead.tandem_id) is None
+    assert not _unused_marker(dead.tandem_id).exists()
+
+
+def test_sessions_list_drops_a_window_that_died_unused(homes, ok_versions):
+    dead = _abandon(homes, _dead_pid())
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    assert r.exit_code == 0 and dead.tandem_id not in r.output
+
+
+def test_unused_window_that_is_still_open_is_left_alone(homes, ok_versions, chatted):
+    import os
+
+    live = _abandon(homes, os.getpid())
+    click.testing.CliRunner().invoke(cli.main, [])
+    with StateStore() as store:
+        assert store.get_session(live.tandem_id) is not None
+    assert _unused_marker(live.tandem_id).exists()

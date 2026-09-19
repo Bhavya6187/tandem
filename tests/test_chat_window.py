@@ -329,7 +329,7 @@ def hermetic_frame():
         f.write("[frame]\nrate_limits = false\n")
 
 
-def drive_chat(env, *, launch=None, runtimes=None) -> tuple[int, str]:
+def drive_chat(env, *, launch=None, runtimes=None, ping=True, **chat_kwargs) -> tuple[int, str]:
     """Run the real loop over a pty: wait for the composer, submit `ping`,
     wait for the echo, then quit with two Ctrl-Cs. Returns (exit code,
     everything the window painted). The quit is sent even when the echo never
@@ -353,10 +353,11 @@ def drive_chat(env, *, launch=None, runtimes=None) -> tuple[int, str]:
         while time.monotonic() < deadline and b"> " not in captured:
             if not pull():
                 return
-        os.write(master, b"ping\r")
-        while time.monotonic() < deadline and b"echo:ping" not in captured:
-            if not pull():
-                return
+        if ping:                                      # else: open the window and leave
+            os.write(master, b"ping\r")
+            while time.monotonic() < deadline and b"echo:ping" not in captured:
+                if not pull():
+                    return
         os.write(master, b"\x03\x03")
         # a fresh deadline: the window still has its teardown to write, and a
         # driver that stopped reading would wedge it on a full pty buffer
@@ -368,7 +369,8 @@ def drive_chat(env, *, launch=None, runtimes=None) -> tuple[int, str]:
     t = threading.Thread(target=driver, daemon=True); t.start()
     try:
         kwargs = dict(stdin_fd=slave, out_fd=slave,
-                      runtimes=runtimes or {"claude": EchoRuntime(), "codex": EchoRuntime()})
+                      runtimes=runtimes or {"claude": EchoRuntime(), "codex": EchoRuntime()},
+                      **chat_kwargs)
         code = (launch(**kwargs) if launch is not None else
                 run_chat(env.session, env.store, ChatConfig(), **kwargs))
     finally:
@@ -545,3 +547,55 @@ def test_run_chat_drains_events_whose_wake_byte_was_lost(env_factory, monkeypatc
     code, text = drive_chat(env)
     assert code == 0
     assert "echo:ping" in text
+
+
+# -- first_turn: a fresh session is seeded when it is used, not when it opens ---
+
+def test_window_left_without_a_turn_never_runs_first_turn_or_offers_a_resume(env_factory):
+    """Nothing was said, so the launcher drops the session: naming it in the
+    exit line would point at an id that is about to stop existing."""
+    env = env_factory(active="claude")
+    hermetic_frame()
+    seeded = []
+    code, text = drive_chat(env, ping=False, first_turn=lambda: seeded.append(1))
+    assert code == 0
+    assert seeded == []
+    assert "tandem resume" not in text
+
+
+def test_first_prompt_runs_first_turn_and_the_exit_line_names_the_session(env_factory):
+    env = env_factory(active="claude")
+    hermetic_frame()
+    seeded = []
+    code, text = drive_chat(env, first_turn=lambda: seeded.append(1))
+    assert code == 0
+    assert seeded == [1]
+    assert "echo:ping" in text
+    assert f"tandem resume {env.session.tandem_id}" in text
+
+
+def test_first_turn_picks_up_meters_for_sessions_it_created(env_factory, monkeypatch):
+    """Opencode has no transcript path until its session exists, so a window
+    opened before seeding has no opencode meter to show; the seed adds it."""
+    from tandem.chat import window
+
+    env = env_factory(active="claude")
+    hermetic_frame()
+    exists = []
+    real = window.get_adapter
+
+    class LatePath:
+        def __init__(self, adapter): self._a = adapter
+        def __getattr__(self, name): return getattr(self._a, name)
+        def transcript_path(self, cwd, sid):
+            return self._a.transcript_path(cwd, sid) if exists else None
+
+    monkeypatch.setattr(window, "get_adapter",
+                        lambda h: LatePath(real(h)) if h == "codex" else real(h))
+    built = []
+    real_feed = window.UsageFeed
+    monkeypatch.setattr(window, "UsageFeed",
+                        lambda adapter, *a, **kw: (built.append(adapter.id), real_feed(adapter, *a, **kw))[1])
+    code, _ = drive_chat(env, first_turn=lambda: exists.append(1))
+    assert code == 0
+    assert built == ["claude", "codex"]

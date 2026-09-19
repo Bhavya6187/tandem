@@ -299,3 +299,19 @@ def test_store_is_usable_from_a_worker_thread(tmp_path):
         assert store.get_session(s.tandem_id).native_id("codex") == "x-id"
         assert store.get_session(s.tandem_id).active == "codex"
         assert store.get_cursor(s.tandem_id, "codex", "claude").byte_offset == 12
+
+
+def test_delete_session_takes_its_cursors_and_pins(tmp_path):
+    with StateStore(tmp_path / "state.db") as store:
+        gone = store.create_session("/p", "claude", ["claude", "codex"], {"claude": "c", "codex": "x"})
+        kept = store.create_session("/p", "claude", ["claude", "codex"], {"claude": "c2", "codex": "x2"})
+        for s in (gone, kept):
+            store.save_cursor(store.get_cursor(s.tandem_id, "claude", "codex"))
+            store.set_pin(s.tandem_id, "claude", "haiku")
+        store.delete_session(gone.tandem_id)
+        assert store.get_session(gone.tandem_id) is None
+        assert store.get_pin(gone.tandem_id, "claude") == ""
+        rows = store._conn.execute("SELECT tandem_id FROM sync_cursors").fetchall()
+        assert [r[0] for r in rows] == [kept.tandem_id]
+        assert store.get_session(kept.tandem_id) is not None
+        assert store.get_pin(kept.tandem_id, "claude") == "haiku"

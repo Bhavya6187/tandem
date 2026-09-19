@@ -12,6 +12,7 @@ import signal
 import subprocess
 from typing import Callable, Protocol
 
+from ...constants import SESSION_ENV
 from ..events import Answers, LiveEvent, TurnOutcome
 
 
@@ -40,13 +41,20 @@ _NESTING_MARKERS = frozenset({
 })
 
 
-def child_env(base: dict[str, str] | None = None) -> dict[str, str]:
+def child_env(base: dict[str, str] | None = None, *,
+              tandem_id: str | None = None) -> dict[str, str]:
     """The user's environment minus the markers claude sets for its own
     children (_NESTING_MARKERS): codex and opencode never read them, and a
-    headless claude must not take itself for a nested one."""
+    headless claude must not take itself for a nested one.
+
+    `tandem_id` names the window's session to whatever the child spawns in
+    turn (`tandem sub`, `tandem hook-route`): a directory holds many chat
+    sessions, so cwd no longer identifies the one that asked."""
     env = dict(os.environ if base is None else base)
     for key in _NESTING_MARKERS:
         env.pop(key, None)
+    if tandem_id:
+        env[SESSION_ENV] = tandem_id
     return env
 
 
