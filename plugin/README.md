@@ -17,7 +17,8 @@ tandem plugin install   # = claude plugin marketplace add Bhavya6187/tandem
                         #   + claude plugin install tandem@tandem
 ```
 
-The first `tandem` launch offers this install too. Setup and usage: the
+Pairing a fresh session (`tandem` in a new directory, `tandem --new`, or
+`tandem native`) offers this install too. Setup and usage: the
 [GPT subagents guide](../docs/subagents.md); config keys (`model`, `route`,
 `context`, `keep_forks`) in the
 [configuration reference](../docs/configuration.md). The plugin is static

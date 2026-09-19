@@ -133,24 +133,32 @@ def _narrow_participants(store: StateStore, session: PairedSession) -> PairedSes
     return store.get_session(session.tandem_id)
 
 
+_HARNESS_CHOICE = click.Choice(["claude", "codex", "opencode"])
+_ON_HELP = "Harness for the first prompt [default: the session's last-used harness]."
+_NEW_HELP = "Pair a fresh session instead of continuing this directory's latest."
+
+
 @click.group(invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="tandem")
-@click.option(
-    "--active",
-    type=click.Choice(["claude", "codex", "opencode"]),
-    default=None,
-    help="Initially active harness for the fresh session "
-         "[default: first usable harness]",
-)
+@click.option("--on", "harness", type=_HARNESS_CHOICE, default=None, help=_ON_HELP)
+@click.option("--new", "fresh", is_flag=True, help=_NEW_HELP)
+@click.option("--active", type=_HARNESS_CHOICE, default=None, hidden=True)
 @click.pass_context
-def main(ctx: click.Context, active: str) -> None:
+def main(ctx: click.Context, harness: str | None, fresh: bool,
+         active: str | None) -> None:
     """Run Claude Code and Codex as one paired session.
 
-    With no subcommand, pairs a fresh session and enters the active
-    harness; `tandem resume` continues an earlier one.
+    With no subcommand, opens the chat window (same as `tandem chat`);
+    `tandem native` pairs a fresh session inside the CLIs' own TUIs and
+    `tandem resume` re-enters one.
     """
+    if active is not None:
+        # pre-chat-default spelling of `tandem native --active X`
+        raise click.UsageError(
+            f'--active moved: use "tandem native --active {active}" '
+            f'(or "tandem --on {active}" for the chat window).')
     if ctx.invoked_subcommand is None:
-        _interactive(active)
+        _chat(harness, fresh)
 
 
 def _pair_session(store: StateStore, cwd: str, active: str,
@@ -423,24 +431,24 @@ def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
 
 
 @main.command()
-@click.option(
-    "--on", "harness",
-    type=click.Choice(["claude", "codex", "opencode"]),
-    default=None,
-    help="Harness for the first prompt [default: the session's last-used harness].",
-)
-def chat(harness: str | None) -> None:
-    """One composer for every harness.
+@click.option("--on", "harness", type=_HARNESS_CHOICE, default=None, help=_ON_HELP)
+@click.option("--new", "fresh", is_flag=True, help=_NEW_HELP)
+def chat(harness: str | None, fresh: bool) -> None:
+    """One composer for every harness (what bare `tandem` runs).
 
     Prompts run headless on the last-used CLI; a leading /claude, /codex or
     /opencode runs the prompt there and makes it the default. Pairs a fresh
     session when this directory has none."""
+    _chat(harness, fresh)
+
+
+def _chat(harness: str | None, fresh: bool) -> None:
     from .chat.window import run_chat
     from .config import load_chat_config
 
     cwd = _cwd()
     with StateStore() as store:
-        session = store.latest_session_for_cwd(cwd)
+        session = None if fresh else store.latest_session_for_cwd(cwd)
         if session is None:
             usable, _ = _resolve_participants()
             # a --on naming a harness this machine cannot run must never
@@ -449,6 +457,9 @@ def chat(harness: str | None) -> None:
             # default and let the participant check below report it.
             active = harness if harness in usable else usable[0]
             session = _pair_session(store, cwd, active, usable)
+            from .plugin_setup import offer_install
+
+            offer_install()
         else:
             store.touch_used(session.tandem_id)
             session = _narrow_participants(store, session)
@@ -786,7 +797,19 @@ def plugin_install_cmd() -> None:
     sys.exit(0 if install_plugin() else 1)
 
 
-def _interactive(active: str | None) -> None:
+@main.command()
+@click.option(
+    "--active",
+    type=_HARNESS_CHOICE,
+    default=None,
+    help="Initially active harness for the fresh session "
+         "[default: first usable harness]",
+)
+def native(active: str | None) -> None:
+    """Pair a fresh session and enter the active CLI's own TUI.
+
+    Flip between the CLIs from the bar; `tandem resume` continues an
+    earlier session."""
     cwd = _cwd()
     usable, _ = _resolve_participants()
     if active is None:

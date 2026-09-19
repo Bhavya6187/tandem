@@ -32,19 +32,25 @@ cd your-project
 tandem
 ```
 
-Work normally in the CLI that opens. Press **Ctrl-]** to continue the same
-session in the next CLI. If you press it while the model is working, tandem
-waits until the response finishes; press it again to cancel the switch.
+`tandem` opens the chat window: one composer for every CLI. Prompts run on
+the last-used harness; start one with `/claude`, `/codex`, or `/opencode` to
+run it there and make that the default. Run `tandem` again in the same
+directory to pick the session back up, or `tandem --new` to start a fresh
+one. `tandem --on codex` chooses the harness for the first prompt.
 
-Exit normally when you're done. Come back later with:
+Prefer the CLIs' own interfaces? Use the native frame:
 
 ```bash
-tandem resume      # resume the latest session in this directory
+tandem native      # pair a fresh session inside the first usable CLI's own TUI
+tandem resume      # re-enter the latest session in this directory
 tandem sessions    # find recent sessions across directories
 ```
 
-By default, tandem opens the first usable CLI in your configured order. Use
-`tandem --active codex` or `tandem --active opencode` to choose another.
+Work normally in the CLI that opens. Press **Ctrl-]** to continue the same
+session in the next CLI. If you press it while the model is working, tandem
+waits until the response finishes; press it again to cancel the switch.
+`tandem native` opens the first usable CLI in your configured order; use
+`tandem native --active codex` or `--active opencode` to choose another.
 
 ## What's new in 0.5
 
@@ -133,12 +139,13 @@ locations.
 
 | Command | What it does |
 | --- | --- |
-| `tandem` | Start a new session |
-| `Ctrl-]` | Continue in the next CLI |
-| `tandem resume [id]` | Resume the latest or a specific session in this directory |
+| `tandem` | Open the chat window — one composer for every CLI: prompts run headless on the last-used harness; `/claude`, `/codex`, `/opencode` route and stick. Continues this directory's latest session; `--new` pairs a fresh one, `--on codex` picks the first harness |
+| `tandem native` | Pair a fresh session inside the CLIs' native interfaces (`--active codex` picks the starting CLI) |
+| `Ctrl-]` | In the native frame: continue in the next CLI |
+| `tandem resume [id]` | Re-enter the latest or a specific session in this directory in the native frame |
 | `tandem sessions [-n N]` | List recent sessions across directories |
 | `tandem run --on codex "…"` | Send one contextual prompt to another CLI (`claude`, `codex`, or `opencode`) |
-| `tandem chat` | One composer for every CLI: prompts run headless on the last-used harness; `/claude`, `/codex`, `/opencode` route and stick |
+| `tandem chat` | Same as bare `tandem` |
 
 ## Learn more
 
