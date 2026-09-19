@@ -133,6 +133,8 @@ class Window:
                 if self.dispatcher.pin(h)]
         if pins:
             parts.append("pins: " + ", ".join(pins))
+        if self.cfg.skip_permissions:
+            parts.append("permissions skipped")
         return " · ".join(parts)
 
     def paint(self) -> None:

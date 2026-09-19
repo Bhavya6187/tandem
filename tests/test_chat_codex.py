@@ -82,6 +82,25 @@ def test_model_and_config_overrides(env):
     assert env.params("turn/start")["model"] == "gpt-5.5"
 
 
+def test_skip_permissions_overrides_approval_and_sandbox(env):
+    rt = CodexRuntime(ChatConfig(skip_permissions=True), binary=[sys.executable, str(FAKE)])
+    rec = Recorder("allow")
+    rt.run_turn(env.session, "thread-1", "go", "", rec.emit, rec)
+    assert env.params("thread/resume") == {"threadId": "thread-1", "cwd": env.session.cwd,
+                                           "approvalPolicy": "never",
+                                           "sandbox": "danger-full-access"}
+
+
+def test_skip_permissions_yields_to_an_explicit_codex_key(env):
+    rt = CodexRuntime(ChatConfig(skip_permissions=True, codex_sandbox="workspace-write"),
+                      binary=[sys.executable, str(FAKE)])
+    rec = Recorder("allow")
+    rt.run_turn(env.session, "thread-1", "go", "", rec.emit, rec)
+    assert env.params("thread/resume") == {"threadId": "thread-1", "cwd": env.session.cwd,
+                                           "approvalPolicy": "never",
+                                           "sandbox": "workspace-write"}
+
+
 def test_always_and_deny_decisions(env, monkeypatch):
     rec = Recorder("always")
     env.runtime.run_turn(env.session, "t", "go", "", rec.emit, rec)

@@ -65,6 +65,9 @@ class ClaudeRuntime:
                 "--verbose", "--include-partial-messages",
                 "--permission-prompt-tool", "stdio",
                 "--setting-sources", ",".join(self.cfg.claude_setting_sources)]
+        if self.cfg.skip_permissions:
+            # the prompt tool stays: AskUserQuestion still has to reach the window
+            argv += ["--permission-mode", "bypassPermissions"]
         if model:
             argv += ["--model", model]
         return argv

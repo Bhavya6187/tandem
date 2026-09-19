@@ -801,3 +801,111 @@ def test_unused_window_that_is_still_open_is_left_alone(homes, ok_versions, chat
     with StateStore() as store:
         assert store.get_session(live.tandem_id) is not None
     assert _unused_marker(live.tandem_id).exists()
+
+
+# -- --skip-permissions -------------------------------------------------------
+
+
+@pytest.fixture
+def chat_cfgs(monkeypatch):
+    """The config each chat window was opened with."""
+    cfgs = []
+
+    def run_chat(session, store, cfg, *, first_turn=None, **kw):
+        cfgs.append(cfg)
+        if first_turn is not None:
+            first_turn()
+        return 0
+
+    monkeypatch.setattr("tandem.chat.window.run_chat", run_chat)
+    return cfgs
+
+
+@pytest.fixture
+def native_skips(monkeypatch):
+    """What `skip_permissions` resolved to as each native session was entered
+    — the moment the flip loop starts building launches."""
+    from tandem.config import load_skip_permissions
+
+    seen = []
+    monkeypatch.setattr(cli, "_enter_session", lambda s: (seen.append(load_skip_permissions()), 0)[1])
+    return seen
+
+
+@pytest.mark.parametrize("argv", [
+    ["--skip-permissions"],
+    ["resume", "{id}", "--skip-permissions"],
+    ["--skip-permissions", "resume", "{id}"],
+])
+def test_skip_permissions_flag_reaches_the_chat_window(homes, ok_versions, chat_cfgs, argv):
+    old = _mk_session(homes)
+    argv = [a.format(id=old.tandem_id) for a in argv]
+    result = click.testing.CliRunner().invoke(cli.main, argv)
+    assert result.exit_code == 0, result.output
+    assert [c.skip_permissions for c in chat_cfgs] == [True]
+
+
+def test_chat_keeps_its_prompts_without_the_flag(homes, ok_versions, chat_cfgs):
+    result = click.testing.CliRunner().invoke(cli.main, [])
+    assert result.exit_code == 0, result.output
+    assert [c.skip_permissions for c in chat_cfgs] == [False]
+
+
+@pytest.mark.parametrize("argv", [
+    ["native", "--skip-permissions"],
+    ["native", "resume", "--skip-permissions"],
+    ["--skip-permissions", "native"],
+])
+def test_skip_permissions_flag_reaches_native_sessions(homes, ok_versions, native_skips, argv):
+    _mk_session(homes)
+    result = click.testing.CliRunner().invoke(cli.main, argv)
+    assert result.exit_code == 0, result.output
+    assert native_skips == [True]
+
+
+@pytest.mark.parametrize("argv", [
+    ["--no-skip-permissions"],
+    ["resume", "{id}", "--no-skip-permissions"],
+])
+def test_no_skip_permissions_flag_beats_the_config(homes, ok_versions, chat_cfgs, argv):
+    from tandem import paths
+
+    old = _mk_session(homes)
+    paths.tandem_home().mkdir(parents=True, exist_ok=True)
+    (paths.tandem_home() / "config.toml").write_text("skip_permissions = true\n")
+    argv = [a.format(id=old.tandem_id) for a in argv]
+    result = click.testing.CliRunner().invoke(cli.main, argv)
+    assert result.exit_code == 0, result.output
+    assert [c.skip_permissions for c in chat_cfgs] == [False]
+
+
+def test_no_skip_permissions_flag_beats_the_config_in_native(homes, ok_versions, native_skips):
+    from tandem import paths
+
+    paths.tandem_home().mkdir(parents=True, exist_ok=True)
+    (paths.tandem_home() / "config.toml").write_text("skip_permissions = true\n")
+    result = click.testing.CliRunner().invoke(cli.main, ["native", "--no-skip-permissions"])
+    assert result.exit_code == 0, result.output
+    assert native_skips == [False]
+
+
+def test_a_subcommand_flag_beats_the_group_flag(homes, ok_versions, chat_cfgs):
+    # the nearer spelling wins, as `resume --on` beats a group `--on`
+    old = _mk_session(homes)
+    result = click.testing.CliRunner().invoke(
+        cli.main, ["--skip-permissions", "resume", old.tandem_id, "--no-skip-permissions"])
+    assert result.exit_code == 0, result.output
+    assert [c.skip_permissions for c in chat_cfgs] == [False]
+
+
+@pytest.mark.parametrize("argv", [
+    ["--skip-permissions", "status"], ["--skip-permissions", "run", "hi"],
+    ["--no-skip-permissions", "doctor"],
+])
+def test_skip_permissions_flag_rejected_where_no_session_opens(homes, ok_versions, entered, argv):
+    from tandem.config import load_skip_permissions
+
+    result = click.testing.CliRunner().invoke(cli.main, argv)
+    assert result.exit_code == 2
+    assert "--skip-permissions only applies" in result.output
+    assert load_skip_permissions() is False

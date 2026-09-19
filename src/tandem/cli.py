@@ -148,6 +148,19 @@ _HARNESS_CHOICE = click.Choice(["claude", "codex", "opencode"])
 _ON_HELP = "Harness for the first prompt [default: first usable, or last-used on resume]."
 _NEW_HELP = "Pair a fresh session (the default)."
 _CONTINUE_HELP = "Continue the most recently used session across all directories."
+_skip_permissions_option = click.option(
+    "--skip-permissions/--no-skip-permissions", "skip_permissions", default=None,
+    help="Run claude and codex without their permission prompts for this "
+         "launch [default: the skip_permissions config key].")
+
+
+def _apply_skip_permissions(value: bool | None) -> None:
+    """One launch's `--[no-]skip-permissions`. A subcommand's callback runs
+    after the group's, so the nearer spelling wins, as it does for `--on`."""
+    if value is not None:
+        from .config import set_skip_permissions
+
+        set_skip_permissions(value)
 
 
 @click.group(invoke_without_command=True)
@@ -156,9 +169,11 @@ _CONTINUE_HELP = "Continue the most recently used session across all directories
 @click.option("--new", "fresh", is_flag=True, help=_NEW_HELP)
 @click.option("--continue", "-c", "continue_last", is_flag=True, help=_CONTINUE_HELP)
 @click.option("--active", type=_HARNESS_CHOICE, default=None, hidden=True)
+@_skip_permissions_option
 @click.pass_context
 def main(ctx: click.Context, harness: str | None, fresh: bool,
-         continue_last: bool, active: str | None) -> None:
+         continue_last: bool, active: str | None,
+         skip_permissions: bool | None) -> None:
     """Run Claude Code and Codex as one paired session.
 
     With no subcommand, starts a fresh chat. Use `tandem resume [ID]` to
@@ -178,6 +193,13 @@ def main(ctx: click.Context, harness: str | None, fresh: bool,
         raise click.UsageError(
             "--on, --new and --continue only apply to chat sessions; "
             "use bare tandem or tandem resume.")
+    if skip_permissions is not None and ctx.invoked_subcommand not in (None, "resume", "native"):
+        # one-off relays, subagent dispatch and doctor probes never bypass:
+        # taking the flag there would promise something it does not do
+        raise click.UsageError(
+            "--skip-permissions only applies to the sessions tandem opens: "
+            "tandem, tandem resume, tandem native and tandem native resume.")
+    _apply_skip_permissions(skip_permissions)
     if ctx.invoked_subcommand is None:
         _chat(harness, fresh, continue_last=continue_last)
 
@@ -321,12 +343,14 @@ def status() -> None:
 
 @click.command(name="resume")
 @click.argument("tandem_id", required=False)
-def native_resume(tandem_id: str | None) -> None:
+@_skip_permissions_option
+def native_resume(tandem_id: str | None, skip_permissions: bool | None) -> None:
     """Resume a paired session (most recent for this directory by default).
 
     The id is printed when you leave a session, and shown by `tandem status`
     and `tandem sessions`.
     """
+    _apply_skip_permissions(skip_permissions)
     cwd = _cwd()
     with StateStore() as store:
         if tandem_id is None:
@@ -473,13 +497,16 @@ def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
 @main.command()
 @click.argument("tandem_id", required=False)
 @click.option("--on", "harness", type=_HARNESS_CHOICE, default=None, help=_ON_HELP)
+@_skip_permissions_option
 @click.pass_context
-def resume(ctx: click.Context, tandem_id: str | None, harness: str | None) -> None:
+def resume(ctx: click.Context, tandem_id: str | None, harness: str | None,
+           skip_permissions: bool | None) -> None:
     """Resume a chat by ID, or choose from sessions across all directories.
 
     Restores the conversation, last-used harness and model pins. The session
     uses its saved working directory, regardless of where you launch tandem.
     Use `tandem native resume [ID]` for the CLIs' own interfaces."""
+    _apply_skip_permissions(skip_permissions)
     parent_options = ctx.parent.params if ctx.parent is not None else {}
     _chat(harness if harness is not None else parent_options.get("harness"),
           False, tandem_id or "")
@@ -947,12 +974,14 @@ def plugin_install_cmd() -> None:
     help="Initially active harness for the fresh session "
          "[default: first usable harness]",
 )
+@_skip_permissions_option
 @click.pass_context
-def native(ctx: click.Context, active: str | None) -> None:
+def native(ctx: click.Context, active: str | None, skip_permissions: bool | None) -> None:
     """Pair a fresh session and enter the active CLI's own TUI.
 
     Flip between the CLIs from the bar; `tandem native resume` continues an
     earlier session."""
+    _apply_skip_permissions(skip_permissions)
     if ctx.invoked_subcommand is not None:
         if active is not None:
             raise click.UsageError("--active only applies to a fresh `tandem native` session.")

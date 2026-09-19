@@ -314,6 +314,17 @@ def _no_inherited_session(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_skip_permissions_override():
+    """`--skip-permissions` sets a process-wide override; one CLI test's flag
+    must never become the next test's permissions bypass."""
+    from tandem import config
+
+    config.set_skip_permissions(None)
+    yield
+    config.set_skip_permissions(None)
+
+
+@pytest.fixture(autouse=True)
 def _warm_gate_closed(monkeypatch):
     """No test may boot a hidden harness for real. Under plain `pytest` stdin
     is not a terminal and the warm gate is shut anyway, but `pytest -s` on a

@@ -606,3 +606,11 @@ def test_first_turn_picks_up_meters_for_sessions_it_created(env_factory, monkeyp
     code, _ = drive_chat(env, first_turn=lambda: exists.append(1))
     assert code == 0
     assert built == ["claude", "codex"]
+
+
+def test_status_says_when_permissions_are_skipped(env_factory):
+    env = env_factory()
+    w, *_ = make_window(env, cfg=ChatConfig(skip_permissions=True))
+    assert "permissions skipped" in w.status_line()
+    w, *_ = make_window(env)
+    assert "permissions" not in w.status_line()
