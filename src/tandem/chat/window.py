@@ -8,6 +8,7 @@ plus one byte on the wake pipe, so the loop never polls."""
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import queue
 import select
@@ -36,7 +37,7 @@ from .files import list_paths
 from .render import Screen
 from .runtime.factory import make_runtimes
 
-WINDOW_COMMANDS = ("/quit", "/status")
+WINDOW_COMMANDS = ("/quit", "/status", "/skip-permissions")
 _BUSY_TICK = 0.12            # the spinner's frame is 0.1 s; slower and it visibly skips
 _LONG_TURN_SECONDS = 15.0    # a turn this long ends with the bell
 
@@ -47,7 +48,7 @@ def route_hint(participants: list[str]) -> str:
 
 
 def window_command(text: str) -> str:
-    """Tandem's own two, recognized as a whole leading word — `/quitter` is
+    """Tandem's own few, recognized as a whole leading word — `/quitter` is
     somebody else's. Everything else the composer submits belongs to the
     harness, slash commands included."""
     head = text.strip().split(maxsplit=1)
@@ -124,9 +125,32 @@ class Window:
         default = self.dispatcher.default
         self.bar.active = default
         self.bar.others = [h for h in self.session.participants if h != default]
+        self.bar.marks = {h: "skip-perms" for h in self._skipping()}
         meter = self.meters.get(default)
         usage = meter.state.get("text", "") if meter is not None else ""
         return self.bar.line(False, usage, self.usage_state.get("limits") or {})
+
+    def _skipping(self) -> list[str]:
+        """The harnesses whose next turn asks nothing. opencode never: the
+        setting does not reach it. codex only while no explicit
+        `[chat] codex_approval_policy` overrules the default it sets."""
+        if not self.cfg.skip_permissions:
+            return []
+        skipping = ["claude"]
+        if self.cfg.codex_approval_policy in ("", "never"):
+            skipping.append("codex")
+        return skipping
+
+    def set_skip_permissions(self, arg: str) -> None:
+        """`/skip-permissions [on|off]`, bare = the other way. This window
+        only, like the launch flag: nothing is written to the config."""
+        if arg not in ("", "on", "off"):
+            self.screen.note("usage: /skip-permissions [on|off]")
+            return
+        skip = arg == "on" if arg else not self.cfg.skip_permissions
+        self.cfg = dataclasses.replace(self.cfg, skip_permissions=skip)
+        self.dispatcher.set_cfg(self.cfg)
+        self.screen.note(f"permissions {'skipped' if skip else 'asked'} from the next turn")
 
     def status_line(self) -> str:
         """What `/status` prints: the session this window is driving, where
@@ -285,6 +309,9 @@ class Window:
                     return False
                 if command == "/status":
                     self.screen.note(self.status_line())
+                    continue
+                if command == "/skip-permissions":
+                    self.set_skip_permissions(action.text.strip()[len(command):].strip())
                     continue
                 note = self.dispatcher.submit(action.text)
                 if note.startswith("error: "):

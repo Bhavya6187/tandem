@@ -29,11 +29,12 @@ class StubDispatcher:
     def __init__(self):
         self.submitted, self.pumps, self.interrupts = [], 0, 0
         self.busy, self.default, self.note = False, "claude", ""
-        self.pins, self.queue = {}, []
+        self.pins, self.queue, self.cfgs = {}, [], []
     def submit(self, text): self.submitted.append(text); return self.note
     def pump(self): self.pumps += 1
     def interrupt(self): self.interrupts += 1
     def pin(self, harness): return self.pins.get(harness, "")
+    def set_cfg(self, cfg): self.cfgs.append(cfg)
     def close(self): pass
 
 
@@ -647,6 +648,69 @@ def test_status_says_when_permissions_are_skipped(env_factory):
     assert "permissions skipped" in w.status_line()
     w, *_ = make_window(env)
     assert "permissions" not in w.status_line()
+
+
+def test_the_bar_marks_the_slots_that_skip_permissions(env_factory):
+    """`/status` has to be asked; the bar is always there. opencode is never
+    marked: the setting does not reach it."""
+    env = env_factory()
+    env.session.participants.append("opencode")
+    w, *_ = make_window(env, cfg=ChatConfig(skip_permissions=True))
+    w.bar.cols = 100
+    line = w.bar_line()
+    assert "claude ● skip-perms" in line and "codex ○ skip-perms" in line
+    assert "opencode ○ " in line and "opencode ○ skip-perms" not in line
+    w, *_ = make_window(env)
+    assert "skip-perms" not in w.bar_line()
+
+
+def test_an_explicit_codex_approval_policy_keeps_codex_unmarked(env_factory):
+    """`[chat] codex_approval_policy` wins over skip_permissions in the
+    runtime, so a codex that still asks must not read as one that does not."""
+    env = env_factory()
+    w, *_ = make_window(env, cfg=ChatConfig(skip_permissions=True, codex_approval_policy="on-request"))
+    line = w.bar_line()
+    assert "claude ● skip-perms" in line and "codex ○ skip-perms" not in line
+    w, *_ = make_window(env, cfg=ChatConfig(skip_permissions=True, codex_approval_policy="never"))
+    assert "codex ○ skip-perms" in w.bar_line()
+
+
+class TestSkipPermissionsCommand:
+    """`/skip-permissions [on|off]`: this window's switch, from the next turn
+    on. The runtimes spawn per turn and read the config as they do."""
+
+    def test_bare_command_toggles_and_reaches_the_runtimes(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        assert w.handle_input(b"/skip-permissions\r") is True
+        assert d.submitted == []
+        assert w.cfg.skip_permissions is True and d.cfgs == [w.cfg]
+        assert "permissions skipped from the next turn" in out.text()
+        assert "claude ● skip-perms" in out.text()              # the bar is repainted with it
+        w.handle_input(b"/skip-permissions\r")
+        assert w.cfg.skip_permissions is False and d.cfgs[-1] is w.cfg
+        assert "permissions asked from the next turn" in out.text()
+        assert "skip-perms" not in w.bar_line()
+
+    def test_on_and_off_say_which_way(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        w.handle_input(b"/skip-permissions off\r")
+        assert w.cfg.skip_permissions is False
+        w.handle_input(b"/skip-permissions on\r"); w.handle_input(b"/skip-permissions on\r")
+        assert w.cfg.skip_permissions is True
+        assert "permissions skipped" in w.status_line()
+
+    def test_the_rest_of_the_config_rides_along(self, env_factory):
+        env = env_factory()
+        w, d, *_ = make_window(env, cfg=ChatConfig(tool_output_lines=3, codex_sandbox="read-only"))
+        w.handle_input(b"/skip-permissions on\r")
+        assert d.cfgs[-1] == ChatConfig(tool_output_lines=3, codex_sandbox="read-only",
+                                        skip_permissions=True)
+
+    def test_anything_else_is_a_usage_note_and_changes_nothing(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        assert w.handle_input(b"/skip-permissions maybe\r") is True
+        assert "usage: /skip-permissions [on|off]" in out.text()
+        assert w.cfg.skip_permissions is False and d.cfgs == [] and d.submitted == []
 
 
 # -- the activity line, the closing row, the bell ---------------------------------

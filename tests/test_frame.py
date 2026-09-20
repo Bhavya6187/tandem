@@ -653,6 +653,25 @@ def test_bar_paint_carries_limits():
     assert "7d 12%".encode() in bar.paint(armed=False, limits={"codex": "7d 12%"})
 
 
+def test_bar_line_marks_lead_their_slot():
+    # a per-slot mark (the chat window's `skip-perms`) reads before the stats:
+    # it says how the slot runs, the numbers only how far it has run
+    bar = StatusBar(rows=40, cols=100, active="claude", others=["codex", "opencode"])
+    bar.marks = {"claude": "skip-perms", "codex": "skip-perms"}
+    line = bar.line(armed=False, usage="12% ctx", limits={"codex": "7d 12%"})
+    assert "claude ● skip-perms · 12% ctx │ codex ○ skip-perms · 7d 12% │ opencode ○   ^] flips" in line
+
+
+def test_bar_line_marks_outlive_every_stat():
+    # the mark is a safety fact, not a statistic: elision never drops it
+    usage = "12% ctx · 7.6M↑ 312k↓"
+    limits = {"claude": "5h 4% 7d 4%", "codex": "7d 12%"}
+    bare = " claude ● skip-perms │ codex ○ skip-perms   ^] flips"
+    bar = StatusBar(rows=40, cols=len(bare), active="claude", others=["codex"])
+    bar.marks = {"claude": "skip-perms", "codex": "skip-perms"}
+    assert bar.line(armed=False, usage=usage, limits=limits) == bare
+
+
 def test_status_bar_hint_replaces_the_flip_trailer():
     from tandem.frame import StatusBar
 

@@ -238,6 +238,10 @@ class StatusBar:
         # and passes its own trailer as `hint`.
         self.key_label = key_label
         self.hint = hint
+        # Per-slot words that say how a harness runs (the chat window's
+        # `skip-perms`), not how far it has run: they lead the slot and no
+        # elision tier drops them.
+        self.marks: dict[str, str] = {}
 
     def resize(self, rows: int, cols: int) -> None:
         self.rows = rows
@@ -262,8 +266,9 @@ class StatusBar:
 
         def compose(stats: list[str], with_limits: bool) -> str:
             def slot(name: str, glyph: str, extra: list[str]) -> str:
+                mark = self.marks.get(name, "")
                 lim = limits.get(name, "") if with_limits else ""
-                bits = [*extra] + ([lim] if lim else [])
+                bits = ([mark] if mark else []) + [*extra] + ([lim] if lim else [])
                 return f"{name} {glyph}" + (f" {' · '.join(bits)}" if bits else "")
             slots = [slot(self.active, "●", stats)]
             slots += [slot(o, "○", []) for o in self.others]
