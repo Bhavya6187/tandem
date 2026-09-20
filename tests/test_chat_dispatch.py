@@ -463,6 +463,15 @@ def test_a_submit_between_a_turn_and_its_pump_waits_its_turn(env_factory):
     assert runtime.peak == 1
 
 
+def test_set_cfg_reaches_every_runtime(setup):
+    """The window's `/skip-permissions`: each runtime reads its cfg as a turn
+    starts, so the next turn — on any harness — runs under the new one."""
+    env, d, runtimes, events = setup
+    cfg = object()
+    d.set_cfg(cfg)
+    assert all(rt.cfg is cfg for rt in runtimes.values())
+
+
 def test_route_error_is_a_note_and_runs_nothing(setup):
     env, d, rts, events = setup
     note = d.submit("/opencode do it")

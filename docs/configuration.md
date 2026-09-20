@@ -46,10 +46,11 @@ skip_permissions = true
 
 This removes the harnesses' own safety rails: commands run and files
 change without asking, and codex runs unsandboxed. Set it only if that
-is what you want. In the chat window `/status` reads `permissions
-skipped` while it is on, claude's questions to you (`AskUserQuestion`)
-still appear, and an explicit `[chat] codex_approval_policy` /
-`codex_sandbox` still wins over the switch for codex. opencode is
+is what you want. In the chat window the bar marks each slot it applies
+to with `skip-perms` and `/status` reads `permissions skipped` while it
+is on, claude's questions to you (`AskUserQuestion`) still appear, and an
+explicit `[chat] codex_approval_policy` / `codex_sandbox` still wins over
+the switch for codex. opencode is
 untouched — it has no such flag, and its permissions live in its own
 `opencode.json`. One-off relays (`tandem run`), subagent dispatch, and
 doctor probes are unaffected.
@@ -69,6 +70,13 @@ tandem resume <id> --skip-permissions
 tandem native --skip-permissions
 tandem native resume --skip-permissions
 ```
+
+Inside a chat window, `/skip-permissions` flips it for that window —
+`/skip-permissions on` / `off` to say which way. It takes effect from the
+next turn (a turn already running keeps the mode it started under) and,
+like the flag, is never written to the config or saved with the session.
+`tandem native` has no such switch: there the harness was launched with
+its flag, and only a relaunch changes it.
 
 It is a usage error on every other command (`tandem run`, `tandem sub`,
 `tandem doctor`, …), which never bypass permissions either way.
@@ -168,8 +176,10 @@ prompt headless inside the harness that ran the last one, unless the prompt star
 `/opencode` (optionally `/codex:gpt-5.5` to pin a model for that harness,
 `/codex:default` to clear it). A bare route switches the default without a
 turn. Tandem's own window commands are `/quit` (leave the window, as two
-Ctrl-Cs do) and `/status` (print the session id, the default harness, the
-participants and any model pins); every other leading `/word` goes to the
+Ctrl-Cs do), `/status` (print the session id, the default harness, the
+participants and any model pins) and `/skip-permissions [on|off]` (turn
+claude's and codex's permission prompts off or on from the next turn —
+see [`skip_permissions`](#skip_permissions--no-permission-prompts-in-claude-and-codex)); every other leading `/word` goes to the
 current harness as its own slash command, and `@path` mentions reach it
 untouched.
 
