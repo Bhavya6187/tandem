@@ -84,6 +84,21 @@ def test_submit_and_notes(env_factory):
     assert "error: nope" in out.text()
 
 
+def test_a_multiline_draft_grows_the_composer_and_submits_whole(env_factory):
+    env = env_factory(); w, d, out, _ = make_window(env)
+    w.handle_input(b"one\x1b\rtwo")                          # option-enter
+    assert w.screen.region_rows == 20
+    assert "\x1b[23;1H\x1b[2K> one" in out.text() and "\x1b[24;1H\x1b[2K  two" in out.text()
+    w.handle_input(b"\r")
+    assert d.submitted == ["one\ntwo"] and w.screen.region_rows == 21
+
+
+def test_a_tall_draft_stops_growing_at_the_screens_cap(env_factory):
+    env = env_factory(); w, d, out, _ = make_window(env)
+    w.handle_input(b"\n" * 20)                               # ctrl-j
+    assert w.screen.region_rows == 24 - 2 - 8
+
+
 class TestWindowCommands:
     """`/quit` and `/status` are tandem's own and never reach a harness; every
     other leading `/word` is the harness's own slash command."""

@@ -1,14 +1,17 @@
 """The conversation view, in raw ANSI on the main screen.
 
-Rows 1..rows-3 are a DECSTBM scroll region the conversation prints into, so
-the terminal's own scrollback and mouse wheel keep working; rows-2 is a
-separator, rows-1 the status bar (reverse video, like the frame's), rows the
-composer. Output is append-only: a tool call is a row when it starts, its
-output tail, and a status row when it ends — nothing is redrawn later.
+The top of the screen is a DECSTBM scroll region the conversation prints
+into, so the terminal's own scrollback and mouse wheel keep working; under
+it sit a separator, the status bar (reverse video, like the frame's) and the
+composer, which is one row until the draft needs more — the region gives up
+rows as the composer grows and takes them back when it shrinks. Output is
+append-only: a tool call is a row when it starts, its output tail, and a
+status row when it ends — nothing is redrawn later.
 
 The cursor lives in the region while a turn streams and in the composer
-while the window waits for input. `_col` tracks where the region's bottom
-row was left so a return from the composer resumes mid-line. Widths are
+while the window waits for input. `_row` and `_col` track where the region
+was left so a return from the composer resumes mid-line; the row is the
+region's last until a shrinking composer hands rows back under it. Widths are
 counted in terminal cells by `_cells`: the styled painters hand `print`
 strings that already carry SGR wrappers, which move the cursor by nothing,
 and a W/F glyph moves it by two. Every newline is CRLF — the window runs
@@ -66,7 +69,8 @@ class Screen:
         self.cols = max(10, cols)
         self.cfg = cfg
         self.color = color
-        self._col = 0
+        self._bottom = 1                # composer rows under the bar
+        self._row, self._col = self.region_rows, 0
         self._focus = "region"          # "region" | "composer"
         self._speaker_shown = False
         self._turn_harness = ""
@@ -77,7 +81,11 @@ class Screen:
 
     @property
     def region_rows(self) -> int:
-        return max(1, self.rows - 3)
+        return max(1, self.rows - 2 - self._bottom)
+
+    @property
+    def composer_max_rows(self) -> int:
+        return max(1, min(8, self.rows // 3))
 
     # -- plumbing ------------------------------------------------------------
 
@@ -96,23 +104,24 @@ class Screen:
         if fresh:
             self._w(f"{_CSI}r{_CSI}{self.rows};1H" + "\r\n" * self.rows)
         self._w(f"{_CSI}?2004h" + self._region_cmd() + f"{_CSI}{self.region_rows};1H")
-        self._col, self._focus = 0, "region"
+        self._row, self._col, self._focus = self.region_rows, 0, "region"
 
     def leave(self) -> None:
         # the separator, bar and composer are painted rows like any other:
         # left behind they scroll into the terminal's scrollback as soon as
         # the shell prompt returns, so erase from the top of the block down
-        self._w(f"{_CSI}r{_CSI}?2004l{_CSI}{self.rows - 2};1H{_CSI}J\r\n")
+        self._w(f"{_CSI}r{_CSI}?2004l{_CSI}{self.region_rows + 1};1H{_CSI}J\r\n")
 
     def resize(self, rows: int, cols: int) -> None:
         self.rows, self.cols = max(4, rows), max(10, cols)
-        self._col = min(self._col, self.cols - 1)
+        self._bottom = min(self._bottom, self.rows - 3)
+        self._row, self._col = self.region_rows, min(self._col, self.cols - 1)
         self._w("\x1b7" + self._region_cmd() + "\x1b8")
         self._focus = "composer"        # force a reposition before the next region write
 
     def _goto_region(self) -> None:
         if self._focus != "region":
-            self._w(f"{_CSI}{self.region_rows};{self._col + 1}H")
+            self._w(f"{_CSI}{self._row};{self._col + 1}H")
             self._focus = "region"
 
     def print(self, text: str) -> None:
@@ -126,19 +135,23 @@ class Screen:
         segments = text.split("\n")
         for i, seg in enumerate(segments):
             if i:
-                self._w("\r\n")
-                self._col = 0
+                self._newline()
             if seg:
                 self._w(seg)
                 # a segment wider than the row is wrapped by the terminal
                 # itself; the cursor lands in the next row at the remainder
                 total = self._col + _cells(seg)
+                self._row = min(self.region_rows, self._row + max(0, total - 1) // self.cols)
                 self._col = total % self.cols
                 if total and self._col == 0:
                     # exactly on the edge: the terminal's pending-wrap state
                     # does not survive a cursor move, so end the line here
                     # rather than guess
-                    self._w("\r\n")
+                    self._newline()
+
+    def _newline(self) -> None:
+        self._w("\r\n")
+        self._row, self._col = min(self.region_rows, self._row + 1), 0
 
     def line(self, text: str = "") -> None:
         if self._col:
@@ -281,16 +294,40 @@ class Screen:
 
     # -- bottom block ------------------------------------------------------------
 
-    def paint_bottom(self, bar_line: str, composer_text: str, cursor_col: int,
-                     focus_composer: bool) -> None:
-        r = self.rows
-        out = ["\x1b7",
-               f"{_CSI}{r - 2};1H" + self._dim("─" * self.cols),
-               f"{_CSI}{r - 1};1H{_CSI}7m" + bar_line[: self.cols].ljust(self.cols) + f"{_CSI}0m",
-               f"{_CSI}{r};1H{_CSI}2K" + composer_text[: self.cols]]
+    def _fit_bottom(self, n: int) -> str:
+        """Make the composer `n` rows tall. Growing takes rows off the region's
+        end: what the conversation has on them is scrolled up first — off the
+        region's top, into scrollback — and the cursor's row goes with it.
+        Shrinking hands rows back blank; the conversation stays where it is
+        and `_row` lets it carry on from there."""
+        old_top, old = self.region_rows + 1, self._bottom
+        self._bottom = n
+        if n > old:
+            push = max(0, self._row - self.region_rows)
+            self._row -= push
+            return (f"{_CSI}{old_top - 1};1H" + "\n" * push if push else "") + self._region_cmd()
+        return self._region_cmd() + "".join(f"{_CSI}{r};1H{_CSI}2K"
+                                            for r in range(old_top, self.region_rows + 1))
+
+    def paint_bottom(self, bar_line: str, composer_rows: list[str], cursor_row: int,
+                     cursor_col: int, focus_composer: bool) -> None:
+        composer_rows = composer_rows[: self.rows - 3] or [""]
+        moved = len(composer_rows) != self._bottom
+        out = ["\x1b7"]
+        if moved:
+            out.append(self._fit_bottom(len(composer_rows)))
+        top = self.region_rows + 1
+        out += [f"{_CSI}{top};1H" + self._dim("─" * self.cols),
+                f"{_CSI}{top + 1};1H{_CSI}7m" + bar_line[: self.cols].ljust(self.cols) + f"{_CSI}0m"]
+        out += [f"{_CSI}{top + 2 + i};1H{_CSI}2K" + row[: self.cols]
+                for i, row in enumerate(composer_rows)]
         if focus_composer:
-            out.append(f"{_CSI}{r};{min(cursor_col, self.cols - 1) + 1}H")
+            row = top + 2 + min(cursor_row, len(composer_rows) - 1)
+            out.append(f"{_CSI}{row};{min(cursor_col, self.cols - 1) + 1}H")
             self._focus = "composer"
+        elif moved:
+            # ESC 8 would restore where the cursor was; a push moved the line it was on
+            out.append(f"{_CSI}{self._row};{self._col + 1}H")
         else:
             out.append("\x1b8")
         self._w("".join(out))

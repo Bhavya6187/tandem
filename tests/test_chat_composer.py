@@ -1,3 +1,5 @@
+import pytest
+
 from tandem.chat.composer import Answer, Cancel, Composer, CtrlC, Interrupt, Repaint, Submit
 from tandem.chat.events import ApprovalRequest, QuestionRequest
 
@@ -85,9 +87,17 @@ def test_bracketed_paste_keeps_newlines():
     c = Composer()
     feed(c, b"\x1b[200~line one\nline two\x1b[201~")
     assert c.text == "line one\nline two"
-    row, col = c.line(40)
-    assert row == "> line one (+1 lines)"
+    assert c.rows(40, 8) == (["> line one", "  line two"], 1, 10)
     assert feed(c, "\r") == [Submit("line one\nline two")]
+
+
+def test_paste_newlines_are_normalized():
+    """Terminals paste a line break as CR (iTerm2, Terminal.app) or CRLF; left
+    raw it is a control character in the draft, not a row."""
+    c = Composer()
+    feed(c, b"\x1b[200~a\rb\r\nc\r")
+    feed(c, b"\nd\x1b[201~")                        # a CRLF split across two reads is one break
+    assert c.text == "a\nb\nc\nd"
 
 
 def test_paste_end_split_across_reads():
@@ -104,20 +114,133 @@ def test_utf8_split_across_reads():
     assert c.text == "é"
 
 
-def test_line_scrolls_around_the_cursor():
+@pytest.mark.parametrize("key", [b"\x1b\r",          # option-enter
+                                 b"\n",              # ctrl-j
+                                 b"\\\r",            # backslash, then enter
+                                 b"\x1b[13;2u",      # shift-enter, kitty / CSI-u
+                                 b"\x1b[27;2;13~"])  # shift-enter, modifyOtherKeys
+def test_newline_keys_insert_a_line_break_instead_of_submitting(key):
     c = Composer()
-    feed(c, "x" * 50)
-    row, col = c.line(20)
-    assert len(row) == 19 and row.startswith("> ") and col == 19   # 17 visible chars, cursor after the last
+    feed(c, "one")
+    assert feed(c, key) == []
+    feed(c, "two")
+    assert c.text == "one\ntwo"
+    assert feed(c, "\r") == [Submit("one\ntwo")]
+
+
+def test_a_backslash_the_cursor_is_not_behind_still_submits():
+    c = Composer()
+    feed(c, "a\\b"); feed(c, b"\x1b[D" * 2)           # a|\b
+    assert feed(c, "\r") == [Submit("a\\b")]
+
+
+def test_newline_keys_answer_nothing_in_approval_mode():
+    c = Composer()
+    c.begin_approval(ApprovalRequest("command", "rm x"))
+    assert feed(c, b"\n") == [] and feed(c, b"\x1b\r") == []
+    assert c.text == "" and c.mode == "approval"
+
+
+def test_up_and_down_move_between_lines_and_keep_the_column():
+    c = Composer()
+    feed(c, b"abcdef\nxy\n123456")
+    feed(c, b"\x1b[D" * 2)                          # 1234|56
+    feed(c, b"\x1b[A"); feed(c, "!")                # a shorter line clamps to its end
+    assert c.text == "abcdef\nxy!\n123456"
+    feed(c, b"\x1b[A"); feed(c, "^")
+    assert c.text == "abc^def\nxy!\n123456"
+    feed(c, b"\x1b[B"); feed(c, b"\x1b[B"); feed(c, "_")
+    assert c.text == "abc^def\nxy!\n1234_56"
+
+
+def test_up_and_down_follow_wrapped_rows_once_the_draft_is_laid_out():
+    c = Composer()
+    feed(c, "abcdefghij")
+    assert c.rows(8, 8) == (["> abcdef", "  ghij"], 1, 6)
+    feed(c, b"\x1b[A"); feed(c, "^")                # same line, the row above
+    assert c.text == "abcd^efghij"
+
+
+def test_history_is_reached_from_the_first_and_last_line_only():
+    c = Composer()
+    feed(c, "old\r"); feed(c, b"one\ntwo")
+    feed(c, b"\x1b[A"); assert c.text == "one\ntwo"     # up from line two: line one
+    feed(c, b"\x1b[A"); assert c.text == "old"          # up from line one: history
+    feed(c, b"\x1b[B"); assert c.text == "one\ntwo"     # and back to the draft
+    feed(c, b"\x1b[B"); assert c.text == "one\ntwo"     # no newer entry: stays
+
+
+def test_line_keys_act_on_the_current_line():
+    c = Composer()
+    feed(c, b"one\ntwo three\nfour")
+    feed(c, b"\x1b[A")                               # two |three… column 4
+    feed(c, b"\x01"); feed(c, "<")                   # ctrl-a
+    feed(c, b"\x05"); feed(c, ">")                   # ctrl-e
+    assert c.text == "one\n<two three>\nfour"
+    feed(c, b"\x1b[H"); feed(c, "[")                 # home
+    feed(c, b"\x1b[F"); feed(c, "]")                 # end
+    assert c.text == "one\n[<two three>]\nfour"
+    feed(c, b"\x1b[D" * 7); feed(c, b"\x0b")        # ctrl-k kills to the end of the line
+    assert c.text == "one\n[<two \nfour"
+    feed(c, b"\x15")                                 # ctrl-u kills to its start
+    assert c.text == "one\n\nfour"
+
+
+def test_kill_at_a_line_edge_joins_the_lines():
+    c = Composer()
+    feed(c, b"one\ntwo")
+    feed(c, b"\x01"); feed(c, b"\x15")              # ctrl-u at the start of line two
+    assert c.text == "onetwo" and c.cur == 3
+    feed(c, b"\x15"); feed(c, b"\x15")
+    assert c.text == "two"
+    c = Composer()
+    feed(c, b"one\ntwo"); feed(c, b"\x1b[A"); feed(c, b"\x0b")   # ctrl-k at the end of line one
+    assert c.text == "onetwo" and c.cur == 3
+
+
+def test_rows_wrap_a_long_line_under_the_prompt():
+    c = Composer()
+    feed(c, "x" * 40)
+    rows, r, col = c.rows(20, 8)
+    assert rows == ["> " + "x" * 18, "  " + "x" * 18, "  " + "x" * 4] and (r, col) == (2, 6)
     feed(c, b"\x01")
-    row, col = c.line(20)
-    assert row == "> " + "x" * 18 and col == 2
+    assert c.rows(20, 8)[1:] == (0, 2)
+
+
+def test_the_cursor_gets_a_row_of_its_own_past_a_full_one():
+    c = Composer()
+    feed(c, "x" * 18)
+    assert c.rows(20, 8) == (["> " + "x" * 18, "  "], 1, 2)
+
+
+def test_rows_count_wide_glyphs_as_two_cells():
+    c = Composer()
+    feed(c, "日本語日本")                                # 10 cells into 8
+    assert c.rows(10, 8) == (["> 日本語日", "  本"], 1, 4)
+
+
+def test_rows_scroll_to_keep_the_cursor_in_view():
+    c = Composer()
+    feed(c, b"\n".join(str(n).encode() for n in range(10)))
+    assert c.rows(20, 3) == (["  7", "  8", "  9"], 2, 3)
+    feed(c, b"\x1b[A" * 2)                           # inside the view: it holds still
+    assert c.rows(20, 3) == (["  7", "  8", "  9"], 0, 3)
+    feed(c, b"\x1b[A")                               # above it: one row up
+    assert c.rows(20, 3) == (["  6", "  7", "  8"], 0, 3)
+    feed(c, b"\x1b[A" * 6)
+    assert c.rows(20, 3) == (["> 0", "  1", "  2"], 0, 3)
+
+
+def test_rows_show_a_pasted_tab_as_one_cell():
+    c = Composer()
+    feed(c, b"\x1b[200~a\tb\x1b[201~")
+    assert c.text == "a\tb" and c.rows(20, 8) == (["> a b"], 0, 5)
 
 
 def test_approval_mode_keys():
     c = Composer()
     c.begin_approval(ApprovalRequest("command", "rm x"))
-    assert c.line(60)[0].startswith(" [y]es [a]lways [n]o")
+    assert c.rows(60, 8)[0][0].startswith(" [y]es [a]lways [n]o")
     assert feed(c, "q") == []                     # not a choice
     assert feed(c, "A") == [Answer("always")]
     assert feed(c, b"\x1b") == [Cancel()]
@@ -144,7 +267,7 @@ def test_approval_answers_only_on_the_first_character_of_a_read():
 def test_approval_keys_honor_the_offered_choices():
     c = Composer()
     c.begin_approval(ApprovalRequest("command", "rm x", choices=("allow", "deny")))
-    assert c.line(60)[0].startswith(" [y]es [n]o")
+    assert c.rows(60, 8)[0][0].startswith(" [y]es [n]o")
     assert feed(c, "a") == []                     # not on offer: not an answer
     assert feed(c, "n") == [Answer("deny")]
 
@@ -152,7 +275,7 @@ def test_approval_keys_honor_the_offered_choices():
 def test_question_mode_digit_and_free_text():
     c = Composer()
     c.begin_question(QuestionRequest("Which?", ("red", "blue")))
-    assert c.line(60)[0] == "? "
+    assert c.rows(60, 8) == (["? "], 0, 2)
     assert feed(c, "2") == [Answer("blue")]
     c.begin_question(QuestionRequest("Name?", ()))
     assert feed(c, "9") == [] and c.text == "9"    # no option 9: it is text

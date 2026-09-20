@@ -68,7 +68,7 @@ def test_print_tracks_the_column_and_returns_to_the_region_after_the_bottom_pain
     s, out = screen
     s.enter(); s.print("hello")
     assert s._col == 5
-    s.paint_bottom("bar", "> hi", 4, focus_composer=True)
+    s.paint_bottom("bar", ["> hi"], 0, 4, focus_composer=True)
     out.text(clear=True)
     s.print(" world")
     assert out.text().startswith("\x1b[21;6H world")
@@ -174,7 +174,7 @@ def test_col_counts_cells_not_escape_bytes(screen):
     assert s._col == 6
     s.print("漢字")                        # two cells apiece
     assert s._col == 10
-    s.paint_bottom("bar", "> x", 3, focus_composer=True)
+    s.paint_bottom("bar", ["> x"], 0, 3, focus_composer=True)
     out.text(clear=True)
     s.print("!")
     assert out.text().startswith("\x1b[21;11H!")
@@ -304,15 +304,112 @@ def test_leave_clears_the_bottom_rows(screen):
 def test_bottom_block_rows_and_cursor(screen):
     s, out = screen
     s.enter(); out.text(clear=True)
-    s.paint_bottom("claude ● │ codex ○", "> hello", 7, focus_composer=True)
+    s.paint_bottom("claude ● │ codex ○", ["> hello"], 0, 7, focus_composer=True)
     t = out.text()
     assert "\x1b[22;1H" in t and "─" * 40 in t          # separator row
     assert "\x1b[23;1H\x1b[7m" in t and "claude ● │ codex ○" in t   # bar, reverse video
     assert "\x1b[24;1H\x1b[2K> hello" in t               # composer row
     assert t.endswith("\x1b[24;8H")                       # cursor after the text
     out.text(clear=True)
-    s.paint_bottom("bar", "> x", 3, focus_composer=False)
+    s.paint_bottom("bar", ["> x"], 0, 3, focus_composer=False)
     assert out.text().endswith("\x1b8")                   # cursor restored to the region
+
+
+def test_a_taller_composer_pushes_the_conversation_up_before_taking_its_rows(screen):
+    """The rows a growing composer takes hold conversation. Scrolled out of
+    the old region first, they land in scrollback; painted over, they are
+    gone."""
+    s, out = screen
+    s.enter(); s.print("streaming"); out.text(clear=True)
+    s.paint_bottom("bar", ["> one", "  two", "  three"], 2, 7, focus_composer=True)
+    t = out.text()
+    assert s.region_rows == 19
+    push, region = "\x1b[21;1H\n\n", "\x1b[1;19r"
+    assert push in t and t.index(push) < t.index(region) < t.index("\x1b[20;1H")
+    assert "\x1b[20;1H" + "─" * 40 in t and "\x1b[21;1H\x1b[7mbar" in t
+    assert ("\x1b[22;1H\x1b[2K> one" in t and "\x1b[23;1H\x1b[2K  two" in t
+            and "\x1b[24;1H\x1b[2K  three" in t)
+    assert t.endswith("\x1b[24;8H")
+    out.text(clear=True)
+    s.print("!")                                           # the line it was on moved up with the rest
+    assert out.text().startswith("\x1b[19;10H!")
+
+
+def test_a_shorter_composer_hands_its_rows_back_and_output_continues_in_place(screen):
+    """After a submit the block shrinks. The freed rows are erased and rejoin
+    the region; the conversation carries on right under its last line rather
+    than jumping to the new bottom row and leaving a gap."""
+    s, out = screen
+    s.enter()
+    s.paint_bottom("bar", ["> one", "  two", "  three"], 2, 7, focus_composer=True)
+    out.text(clear=True)
+    s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True)
+    t = out.text()
+    assert s.region_rows == 21 and "\x1b[1;21r" in t
+    assert "\x1b[20;1H\x1b[2K" in t and "\x1b[21;1H\x1b[2K" in t
+    assert "\x1b[22;1H" + "─" * 40 in t and "\x1b[24;1H\x1b[2K> " in t
+    out.text(clear=True)
+    s.print("a\nb\nc\nd")
+    assert out.text().startswith("\x1b[19;1Ha")
+    s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True); out.text(clear=True)
+    s.print("!")
+    assert out.text().startswith("\x1b[21;2H!")           # 19, 20, 21, and the region scrolls from there
+
+
+def test_growing_into_rows_the_conversation_has_not_reached_scrolls_nothing(screen):
+    s, out = screen
+    s.enter()
+    s.paint_bottom("bar", ["> 1", "  2", "  3"], 2, 3, focus_composer=True)
+    s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True)      # the conversation stays on row 19
+    out.text(clear=True)
+    s.paint_bottom("bar", ["> 1", "  2"], 1, 3, focus_composer=True)
+    t = out.text()
+    assert "\n" not in t and "\x1b[1;20r" in t
+    out.text(clear=True)
+    s.print("!")
+    assert out.text().startswith("\x1b[19;1H!")
+
+
+def test_the_row_follows_a_chunk_the_terminal_wrapped():
+    out = Out()
+    s = Screen(out, 24, 10, ChatConfig(), color=False)
+    s.enter()
+    s.paint_bottom("bar", ["> 1", "  2", "  3"], 2, 3, focus_composer=True)
+    s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True)      # row 19 of 21
+    s.print("x" * 25)                                             # wraps onto 20, then 21
+    s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True); out.text(clear=True)
+    s.print("!")
+    assert out.text().startswith("\x1b[21;6H!")
+
+
+def test_an_unfocused_paint_that_moved_the_region_puts_the_cursor_back_itself(screen):
+    """ESC 8 restores where the cursor was; the push moved the line it was on."""
+    s, out = screen
+    s.enter(); s.print("hi"); out.text(clear=True)
+    s.paint_bottom("bar", ["> 1", "  2"], 1, 3, focus_composer=False)
+    assert out.text().endswith("\x1b[20;3H")
+
+
+def test_leave_erases_a_tall_block_from_its_top(screen):
+    s, out = screen
+    s.enter()
+    s.paint_bottom("bar", ["> 1", "  2", "  3"], 2, 3, focus_composer=True)
+    out.text(clear=True); s.leave()
+    assert "\x1b[20;1H\x1b[J" in out.text()
+
+
+def test_resize_keeps_a_row_for_the_conversation(screen):
+    s, out = screen
+    s.enter()
+    s.paint_bottom("bar", ["> "] + ["  x"] * 7, 7, 3, focus_composer=True)
+    assert s.region_rows == 14
+    s.resize(6, 40)
+    assert s.region_rows >= 1 and s.composer_max_rows == 2
+
+
+def test_composer_max_rows_is_a_third_of_the_screen_up_to_eight():
+    cfg = ChatConfig()
+    assert [Screen(Out(), rows, 40, cfg).composer_max_rows for rows in (4, 12, 24, 60)] == [1, 4, 8, 8]
 
 
 def test_resize_reissues_the_region(screen):

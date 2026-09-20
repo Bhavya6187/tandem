@@ -35,7 +35,8 @@ tandem
 `tandem` starts a fresh chat: one composer for every CLI. Prompts run on
 the last-used harness; start one with `/claude`, `/codex`, or `/opencode` to
 run it there and make that the default. `tandem --on codex` chooses the
-harness for the first prompt.
+harness for the first prompt. Enter sends; **Option-Enter**, **Ctrl-J**, or a
+`\` before Enter starts a new line, and the composer grows to fit the draft.
 
 Sessions have their own IDs, so you can keep multiple conversations in the
 same project. Resume from any directory; the session uses its saved working
