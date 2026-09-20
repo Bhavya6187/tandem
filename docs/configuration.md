@@ -178,8 +178,10 @@ directory's files and directories (git's tracked and untracked-but-not-ignored
 files in a repository, a walk that skips dot-directories elsewhere) and
 narrows as you type. Up/Down choose, Tab or Enter completes the path, Esc
 closes the list; choosing a directory keeps picking inside it. A path with a
-space is written `@"my notes.txt"`. The mention is sent as written: claude
-expands it, codex and opencode read the file with a tool.
+space is written `@"my notes.txt"`. The mention is sent as written, and each
+harness takes it the way its own TUI would have: claude expands it, opencode
+gets the file attached to the message (for a path inside the session
+directory), codex reads it with a tool.
 
 ```toml
 [chat]

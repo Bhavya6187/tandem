@@ -9,7 +9,7 @@ import pytest
 
 from tandem.chat.events import (ApprovalRequest, Failure, QuestionRequest, TextDelta, ThinkingDelta,
                                 ToolFinished, ToolOutput, ToolStarted, TurnFinished)
-from tandem.chat.runtime.opencode import OpencodeRuntime, TurnState
+from tandem.chat.runtime.opencode import OpencodeRuntime, TurnState, mention_parts
 from tandem.config import ChatConfig
 
 sys.path.insert(0, str(Path(__file__).parent / "fakes"))
@@ -226,3 +226,71 @@ def test_server_is_told_which_session_it_belongs_to(tmp_path, monkeypatch):
     finally:
         rt.close()
     assert seen[0]["TANDEM_SESSION_ID"] == "tdm-opencode"
+
+
+# -- @path mentions become file parts, as opencode's own TUI sends them ---------
+
+@pytest.fixture
+def proj(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("")
+    (tmp_path / "my notes.txt").write_text("")
+    return tmp_path
+
+
+def test_a_mention_of_an_existing_file_becomes_a_file_part(proj):
+    prompt = "explain @src/app.py please"
+    assert mention_parts(prompt, str(proj)) == [{
+        "type": "file", "mime": "text/plain", "filename": "src/app.py",
+        "url": (proj / "src" / "app.py").resolve().as_uri(),
+        "source": {"type": "file", "path": "src/app.py",
+                   "text": {"value": "@src/app.py", "start": 8, "end": 19}}}]
+
+
+def test_a_quoted_mention_carries_a_path_with_a_space(proj):
+    [part] = mention_parts('read @"my notes.txt" now', str(proj))
+    assert part["filename"] == "my notes.txt"
+    assert part["url"].endswith("/my%20notes.txt")
+    assert part["source"]["text"] == {"value": '@"my notes.txt"', "start": 5, "end": 20}
+
+
+def test_a_directory_mention_is_a_directory_part(proj):
+    [part] = mention_parts("what is in @src/", str(proj))
+    assert part["mime"] == "application/x-directory" and part["filename"] == "src/"
+
+
+def test_a_mention_of_nothing_on_disk_stays_text(proj):
+    assert mention_parts("ping @alice about @src/missing.py", str(proj)) == []
+
+
+def test_an_at_sign_inside_a_word_is_not_a_mention(proj):
+    (proj / "example.com").write_text("")
+    assert mention_parts("mail me@example.com", str(proj)) == []
+
+
+def test_sentence_punctuation_after_a_mention_is_not_part_of_the_path(proj):
+    [part] = mention_parts("did you read @src/app.py?", str(proj))
+    assert part["filename"] == "src/app.py"
+    assert part["source"]["text"] == {"value": "@src/app.py", "start": 13, "end": 24}
+
+
+def test_a_path_outside_the_session_directory_stays_text(proj, tmp_path_factory):
+    """opencode asks before it reads outside the project; a part would skip the asking."""
+    outside = tmp_path_factory.mktemp("outside") / "secret.txt"
+    outside.write_text("")
+    assert mention_parts(f"read @{outside} and @../{outside.parent.name}/secret.txt", str(proj)) == []
+
+
+def test_a_file_mentioned_twice_is_attached_once(proj):
+    assert len(mention_parts("@src/app.py vs @src/app.py", str(proj))) == 1
+
+
+def test_the_turn_posts_the_prompt_verbatim_with_its_file_parts(fake, proj):
+    f = fake("tool"); rec = Recorder()
+    session = SimpleNamespace(cwd=str(proj), tandem_id="tdm-opencode")
+    rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
+    rt.run_turn(session, SID, "explain @src/app.py", "", rec.emit, rec)
+    parts = f.posts[0]["parts"]
+    assert parts[0] == {"type": "text", "text": "explain @src/app.py"}
+    assert [p["filename"] for p in parts[1:]] == ["src/app.py"]
+    rt.close()
