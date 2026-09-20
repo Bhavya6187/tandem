@@ -662,14 +662,32 @@ def test_bar_line_marks_lead_their_slot():
     assert "claude ● skip-perms · 12% ctx │ codex ○ skip-perms · 7d 12% │ opencode ○   ^] flips" in line
 
 
+def test_bar_line_says_a_mark_every_slot_shares_once():
+    # the same word on every slot is one fact about the window, not one per
+    # harness: it reads once, after the slots, and the slots keep their stats
+    bar = StatusBar(rows=40, cols=100, active="claude", others=["codex"])
+    bar.marks = {"claude": "skip-perms", "codex": "skip-perms"}
+    line = bar.line(armed=False, usage="12% ctx", limits={"codex": "7d 12%"})
+    assert " claude ● 12% ctx │ codex ○ 7d 12%   skip-perms   ^] flips" in line
+    assert line.count("skip-perms") == 1
+    # a slot that differs brings the per-slot marks back
+    bar.marks = {"claude": "skip-perms", "codex": "plan"}
+    line = bar.line(armed=False)
+    assert "claude ● skip-perms │ codex ○ plan   ^] flips" in line
+
+
 def test_bar_line_marks_outlive_every_stat():
     # the mark is a safety fact, not a statistic: elision never drops it
     usage = "12% ctx · 7.6M↑ 312k↓"
     limits = {"claude": "5h 4% 7d 4%", "codex": "7d 12%"}
-    bare = " claude ● skip-perms │ codex ○ skip-perms   ^] flips"
-    bar = StatusBar(rows=40, cols=len(bare), active="claude", others=["codex"])
+    bare = " claude ● skip-perms │ codex ○ skip-perms │ opencode ○   ^] flips"
+    bar = StatusBar(rows=40, cols=len(bare), active="claude", others=["codex", "opencode"])
     bar.marks = {"claude": "skip-perms", "codex": "skip-perms"}
     assert bar.line(armed=False, usage=usage, limits=limits) == bare
+    shared = " claude ● │ codex ○   skip-perms   ^] flips"
+    bar = StatusBar(rows=40, cols=len(shared), active="claude", others=["codex"])
+    bar.marks = {"claude": "skip-perms", "codex": "skip-perms"}
+    assert bar.line(armed=False, usage=usage, limits=limits) == shared
 
 
 def test_status_bar_hint_replaces_the_flip_trailer():
