@@ -53,7 +53,11 @@ class JsonlTailer:
         try:
             size = self.path.stat().st_size
         except OSError:
-            return []
+            if self.offset:
+                # read once, gone now (claude's EnterWorktree renames it
+                # away): "no news" here would drop every later turn unseen
+                raise TranscriptMissing(self.path, self.offset)
+            return []       # not created yet: the harness writes it on its first turn
         if size < self.offset:
             # File shrank: the harness rewrote it (not observed in the pinned
             # versions). Refusing to guess is safer than re-syncing dupes.
@@ -89,6 +93,12 @@ class TranscriptTruncated(RuntimeError):
     def __init__(self, path: Path, offset: int, size: int):
         super().__init__(f"{path} shrank from {offset} to {size} bytes")
         self.path, self.offset, self.size = path, offset, size
+
+
+class TranscriptMissing(RuntimeError):
+    def __init__(self, path: Path, offset: int):
+        super().__init__(f"{path} is gone after {offset} bytes of it were synced")
+        self.path, self.offset = path, offset
 
 
 class _WakeHandler(FileSystemEventHandler):

@@ -28,7 +28,7 @@ import uuid
 from collections import deque
 from typing import Callable
 
-from ... import paths
+from ...harness import get_adapter
 from ..events import (Answers, ApprovalRequest, LiveEvent, QuestionRequest, TextDelta,
                       ThinkingDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished,
                       TurnOutcome)
@@ -155,7 +155,8 @@ class ClaudeRuntime:
     def run_turn(self, session, native_id: str | None, prompt: str, model: str,
                  emit: Callable[[LiveEvent], None], answers: Answers) -> TurnOutcome:
         assert native_id, "claude session ids are minted at pair time"
-        fresh = not paths.claude_transcript_path(session.cwd, native_id).exists()
+        # no claude child outlives its turn, so nothing is appending to a moved file
+        fresh = get_adapter("claude").reclaim_transcript(session.cwd, native_id) is None
         self._interrupted = False
         self._streamed_text = False
         proc = subprocess.Popen(

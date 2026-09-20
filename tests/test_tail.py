@@ -54,6 +54,21 @@ class TestJsonlTailer:
     def test_missing_file_is_quiet(self, tmp_path):
         assert JsonlTailer(tmp_path / "nope.jsonl").poll() == []
 
+    def test_file_gone_after_bytes_were_consumed_is_loud(self, tmp_path):
+        """Not-created-yet is quiet; a file that was read and then vanished
+        (claude's EnterWorktree renames it away) must not read as "no news"."""
+        from tandem.tailer import TranscriptMissing
+
+        p = tmp_path / "t.jsonl"
+        p.write_text('{"a":1}\n')
+        tailer = JsonlTailer(p)
+        tailer.poll()
+        p.unlink()
+        with pytest.raises(TranscriptMissing) as err:
+            tailer.poll()
+        assert str(p) in str(err.value)
+        assert "8 bytes" in str(err.value)
+
 
 class CollectSink:
     """Parses like the real sinks do (sinks own translation)."""

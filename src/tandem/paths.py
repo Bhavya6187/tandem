@@ -6,6 +6,7 @@ CLIs (claude 2.1.220, codex-cli 0.145.0) — see docs/formats.md.
 
 from __future__ import annotations
 
+import glob
 import os
 import re
 from pathlib import Path
@@ -53,6 +54,20 @@ def claude_project_dir(cwd: str | Path) -> Path:
 
 def claude_transcript_path(cwd: str | Path, session_id: str) -> Path:
     return claude_project_dir(cwd) / f"{session_id}.jsonl"
+
+
+def claude_locate_transcript(session_id: str) -> Path | None:
+    """The transcript for `session_id` under ANY project dir, newest first.
+    claude's EnterWorktree tool renames the live transcript into the
+    worktree's project dir mid-session (observed: claude 2.1.277), so the
+    session cwd's slug is not always where the file is."""
+    found = []
+    for p in (claude_home() / "projects").glob(f"*/{glob.escape(session_id)}.jsonl"):
+        try:
+            found.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
+    return max(found)[1] if found else None
 
 
 def claude_installed_plugins_path() -> Path:

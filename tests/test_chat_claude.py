@@ -109,6 +109,38 @@ def test_resume_when_transcript_exists(env):
     assert argv[:3] == ["-p", "--resume", "sid-2"]
 
 
+def _relocated(sid):
+    from tandem import paths
+    return paths.claude_home() / "projects" / "-proj--claude-worktrees-wt" / f"{sid}.jsonl"
+
+
+def test_relocated_transcript_is_brought_home_and_resumed(env):
+    """EnterWorktree renamed the transcript into the worktree's project dir
+    (observed: claude 2.1.277). `--session-id` there would start the same id
+    over with no history, in a second file."""
+    from tandem import paths
+    moved = _relocated("sid-3"); moved.parent.mkdir(parents=True); moved.write_text('{"n":1}\n')
+    rec = Recorder("allow")
+    env.runtime.run_turn(env.session, "sid-3", "go", "", rec.emit, rec)
+    argv = json.loads((env.tmp / "argv.json").read_text())
+    assert argv[:3] == ["-p", "--resume", "sid-3"]
+    home = paths.claude_transcript_path(env.session.cwd, "sid-3")
+    assert home.read_text() == '{"n":1}\n'
+    assert not moved.exists()
+
+
+def test_relocated_sidecar_dir_comes_home_with_the_transcript(env):
+    from tandem import paths
+    moved = _relocated("sid-4"); moved.parent.mkdir(parents=True); moved.write_text("{}\n")
+    sidecar = moved.with_suffix(""); (sidecar / "tool-results").mkdir(parents=True)
+    (sidecar / "tool-results" / "big.txt").write_text("out")
+    rec = Recorder("allow")
+    env.runtime.run_turn(env.session, "sid-4", "go", "", rec.emit, rec)
+    home = paths.claude_transcript_path(env.session.cwd, "sid-4")
+    assert (home.with_suffix("") / "tool-results" / "big.txt").read_text() == "out"
+    assert not sidecar.exists()
+
+
 def test_approve_flow_always_adds_session_rule(env):
     rec = Recorder("always")
     env.runtime.run_turn(env.session, "sid-1", "make x", "", rec.emit, rec)

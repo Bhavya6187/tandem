@@ -424,3 +424,53 @@ class TestCloseNote:
         texts = shadow_texts(env.codex_shadow)
         assert texts[-2] == "[via claude-code] all good?"
         assert texts[-1] == "[tandem] the turn on claude ended: failed"
+
+
+class TestRelocatedClaudeTranscript:
+    """claude's EnterWorktree tool renames the live transcript into the
+    worktree's project dir mid-session (observed: claude 2.1.277). The
+    session cwd's slug then holds no file for the id."""
+
+    def _relocate(self, env):
+        from tandem import paths
+
+        moved = (paths.claude_home() / "projects" / "-proj--claude-worktrees-wt"
+                 / env.claude_shadow.name)
+        moved.parent.mkdir(parents=True)
+        env.claude_shadow.rename(moved)
+        return moved
+
+    def test_drain_follows_the_transcript_to_its_new_project_dir(self, env_factory):
+        env = env_factory()
+        write_line(env.claude_shadow, claude_user("before the move"))
+        ops.drain_source(env.store, env.session, "claude")
+        moved = self._relocate(env)
+        write_line(moved, claude_user("after the move"))
+
+        assert ops.drain_source(env.store, env.session, "claude") >= 1
+        texts = shadow_texts(env.codex_shadow)
+        assert any("after the move" in t for t in texts)
+        assert sum("before the move" in t for t in texts) == 1     # cursor carried over
+
+    def test_drain_is_loud_when_a_consumed_transcript_is_gone(self, env_factory):
+        env = env_factory()
+        write_line(env.claude_shadow, claude_user("synced once"))
+        ops.drain_source(env.store, env.session, "claude")
+        env.claude_shadow.unlink()
+
+        with pytest.raises(SyncSetupError) as err:
+            ops.drain_source(env.store, env.session, "claude")
+        assert "claude transcript missing" in str(err.value)
+        assert env.session.native_id("claude") in str(err.value)
+
+    def test_drain_stays_quiet_before_the_first_turn(self, env_factory):
+        env = env_factory(seed_active=False)       # claude writes the file itself
+        assert ops.drain_source(env.store, env.session, "claude") == 0
+
+    def test_a_relocated_transcript_is_not_reseeded(self, env_factory):
+        """Seeding is for a claude that never ran. A file that only moved
+        must not get a second, empty sibling at the old path."""
+        env = env_factory()
+        self._relocate(env)
+        ops.prepare_turn(env.store, env.session, "codex")
+        assert not env.claude_shadow.exists()
