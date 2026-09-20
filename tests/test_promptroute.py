@@ -85,3 +85,43 @@ def test_codex_model_verbatim_without_catalog(monkeypatch):
 
 def test_newline_after_route_still_routes():
     assert parse_route("/codex\nfix it", PARTS) == (Route("codex", None), "fix it")
+
+
+@pytest.mark.parametrize("sigil", ["/", "@"])
+def test_model_routes_resolve_with_either_sigil(monkeypatch, sigil):
+    monkeypatch.setattr(promptroute.modelcat, "load_catalog",
+                        lambda: [{"slug": "gpt-6-astra"}])
+    assert parse_route(f"{sigil}codex:astra go", PARTS) == (
+        Route("codex", "gpt-6-astra"), "go")
+    assert parse_route(f"{sigil}claude:fable go", PARTS) == (
+        Route("claude", "fable"), "go")
+    assert parse_route(f"{sigil}opencode:openai/gpt-6-astra go", PARTS) == (
+        Route("opencode", "openai/gpt-6-astra"), "go")
+    assert parse_route(f"{sigil}codex:default", PARTS) == (Route("codex", ""), "")
+
+
+def test_at_routes_preserve_file_mentions_and_embedded_text():
+    for prompt in ("@codex explain", "@codex/README.md explain",
+                   "@codex.py explain", "please @codex:astra go",
+                   "@claude:haiku/file explain"):
+        assert parse_route(prompt, PARTS) is None
+
+
+def test_at_route_checks_participation_and_unknown_model(monkeypatch):
+    with pytest.raises(RouteError):
+        parse_route("@codex:astra go", ["claude"])
+    monkeypatch.setattr(promptroute.modelcat, "load_catalog",
+                        lambda: [{"slug": "gpt-6-astra"}])
+    with pytest.raises(RouteError):
+        parse_route("@codex:typo go", PARTS)
+
+
+@pytest.mark.parametrize("sigil", ["/", "@"])
+def test_claude_versioned_name_becomes_the_full_id(sigil):
+    assert parse_route(f"{sigil}claude:fable-5.1 go", PARTS) == (
+        Route("claude", "claude-fable-5-1"), "go")
+
+
+def test_claude_unknown_model_is_an_error():
+    with pytest.raises(RouteError):
+        parse_route("/claude:fabel go", PARTS)

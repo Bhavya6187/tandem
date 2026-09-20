@@ -1,14 +1,10 @@
-"""The chat window's routing grammar: a leading `/harness[:model]`.
-
-`/` is the command sigil in all three TUIs and `@` is their file-mention
-sigil (headless claude still expands `@file`), so routes are spelled with
-`/` and `@` is never touched. Everything that is not one of the three
-harness names at the very start of the prompt is not tandem's: it goes to
-the current harness verbatim, slash commands included.
+"""The chat window's routing grammar: leading `/harness[:model]` or
+`@harness:model`. Bare @mentions remain file mentions; only an explicit
+model selector opts into @ routing. Other text passes through verbatim.
 
 Returning None means "not a route". Raising RouteError means the user
 clearly wrote a route that tandem cannot honor (a non-participant, or a
-codex model the catalog rejects) — the composer shows the message and
+model name its harness would reject) — the composer shows the message and
 keeps the prompt for editing rather than sending it anywhere.
 """
 
@@ -27,7 +23,7 @@ HARNESSES = ("claude", "codex", "opencode")
 # model name may not carry a slash either, with one exception below.
 _MODEL = r"[A-Za-z0-9._-]+"
 _ROUTE_RE = re.compile(
-    rf"/({'|'.join(HARNESSES)})(?::({_MODEL}(?:/{_MODEL})*))?(?=\s|$)")
+    rf"[/@]({'|'.join(HARNESSES)})(?::({_MODEL}(?:/{_MODEL})*))?(?=\s|$)")
 
 
 @dataclass(frozen=True)
@@ -50,6 +46,8 @@ def parse_route(
     if m is None:
         return None
     harness, model = m.group(1), m.group(2)
+    if text.startswith("@") and model is None:
+        return None
     # The exception: opencode names its models `provider/modelID`, and the
     # id may itself carry slashes (`openrouter/anthropic/claude-sonnet-4`),
     # because opencode splits on the first one only. A slash belongs inside
@@ -67,11 +65,13 @@ def parse_route(
         return Route(harness), body
     if model == "default":
         return Route(harness, ""), body
-    if harness == "codex":
-        try:
+    try:
+        if harness == "codex":
             model = modelcat.resolve(model, modelcat.load_catalog())
-        except modelcat.UnknownModel as exc:
-            raise RouteError(str(exc)) from exc
+        elif harness == "claude":
+            model = modelcat.resolve_claude(model)
+    except modelcat.UnknownModel as exc:
+        raise RouteError(str(exc)) from exc
     return Route(harness, model), body
 
 

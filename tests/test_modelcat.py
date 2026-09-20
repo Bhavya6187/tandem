@@ -362,3 +362,35 @@ def test_model_footer_names_the_empty_model_codex_default():
 def test_model_label_is_the_shared_name_for_what_ran():
     assert modelcat.model_label("gpt-5.4-mini") == "gpt-5.4-mini"
     assert modelcat.model_label("") == "codex default"
+
+
+class TestResolveClaude:
+    @pytest.mark.parametrize("name", ["fable", "opus", "sonnet", "haiku", "Fable"])
+    def test_bare_family_stays_an_alias(self, name):
+        # the CLI maps a family alias to its latest model; pinning a
+        # version here would go stale
+        assert modelcat.resolve_claude(name) == name.lower()
+
+    @pytest.mark.parametrize("name,want", [
+        ("fable-5-1", "claude-fable-5-1"),
+        ("fable-5.1", "claude-fable-5-1"),
+        ("fable5.1", "claude-fable-5-1"),
+        ("Fable-5-1", "claude-fable-5-1"),
+        ("opus-5", "claude-opus-5"),
+        ("haiku-4-5-20251001", "claude-haiku-4-5-20251001"),
+    ])
+    def test_family_with_version_becomes_the_full_id(self, name, want):
+        assert modelcat.resolve_claude(name) == want
+
+    @pytest.mark.parametrize("name", [
+        "claude-fable-5-1", "claude-3-5-sonnet-20241022",
+        "us.anthropic.claude-opus-5-v1",
+    ])
+    def test_a_name_that_says_claude_passes_verbatim(self, name):
+        assert modelcat.resolve_claude(name) == name
+
+    @pytest.mark.parametrize("name", ["fabel", "gpt-5.5", "fable-latest", "5-1"])
+    def test_anything_else_is_unknown_and_names_the_families(self, name):
+        with pytest.raises(modelcat.UnknownModel) as exc:
+            modelcat.resolve_claude(name)
+        assert "fable, opus, sonnet, haiku" in str(exc.value)

@@ -554,11 +554,36 @@ class TestSubModelHeader:
         self._catalog()
         calls = self._capture(monkeypatch)
         r = click.testing.CliRunner().invoke(
-            cli.main, ["sub", "-m", "flag-model"],
+            cli.main, ["sub", "-m", "gpt-5.4-mini"],
             input="tandem-model: sol\ntask\n")
         assert r.exit_code == 0
         assert calls["task"] == "task"
-        assert calls["kw"]["model"] == "flag-model"
+        assert calls["kw"]["model"] == "gpt-5.4-mini"
+
+    @pytest.mark.parametrize("header", ["", "tandem-model: unknown-header\n"])
+    def test_flag_shorthand_resolves_before_dispatch(self, env_factory, monkeypatch, header):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "-m", "sol"], input=header + "task\n")
+        assert r.exit_code == 0, r.output
+        assert calls["task"] == "task"
+        assert calls["kw"]["model"] == "gpt-5.6-sol"
+
+    def test_unknown_flag_fails_before_dispatch(self, env_factory, monkeypatch):
+        import click.testing
+        env = env_factory(active="claude")
+        cli = self._cli_env(env, monkeypatch)
+        self._catalog()
+        calls = self._capture(monkeypatch)
+        r = click.testing.CliRunner().invoke(
+            cli.main, ["sub", "-m", "typo"], input="task\n")
+        assert r.exit_code != 0
+        assert "unknown model" in r.output
+        assert not calls
 
     def test_unknown_model_fails_before_codex(self, env_factory, monkeypatch):
         import click.testing
@@ -728,9 +753,9 @@ class TestSubModelHeader:
         calls = self._capture(monkeypatch)
         pinstash.stash("task", "mystery-model")
         r = click.testing.CliRunner().invoke(
-            cli.main, ["sub", "-m", "flag-model"], input="task\n")
+            cli.main, ["sub", "-m", "gpt-5.4-mini"], input="task\n")
         assert r.exit_code == 0
-        assert calls["kw"]["model"] == "flag-model"
+        assert calls["kw"]["model"] == "gpt-5.4-mini"
 
     def test_unknown_recovered_pin_fails_loud(self, env_factory, monkeypatch):
         # same contract as an in-band header: resolution failures are loud

@@ -164,6 +164,39 @@ def resolve(name: str, models: list[dict] | None) -> str:
         + ", ".join(m["slug"] for m in visible))
 
 
+# Claude keeps no catalog on disk to resolve against — its model table is
+# compiled into the binary — so this is the one hardcoded list: the family
+# names, which outlive any version. The CLI already maps a bare family to
+# its latest model; what it does not do is accept `fable-5-1` for
+# `claude-fable-5-1` (observed live, claude 2.1.277: the turn fails with
+# "There's an issue with the selected model").
+CLAUDE_FAMILIES = ("fable", "opus", "sonnet", "haiku")
+_CLAUDE_VERSIONED_RE = re.compile(
+    rf"({'|'.join(CLAUDE_FAMILIES)})[-.]?(\d+(?:[-.]\d+)*)", re.IGNORECASE)
+
+
+def resolve_claude(name: str) -> str:
+    """What to hand `claude --model` for a user-worded name.
+
+    A bare family stays the CLI's own alias, so it keeps meaning "latest";
+    a family with a version becomes the full id; a name that already says
+    `claude` (a full id, a bedrock or vertex one) passes verbatim. Anything
+    else raises UnknownModel before the pin is written: a bad pin fails
+    every later turn until the user clears it."""
+    low = name.lower()
+    if low in CLAUDE_FAMILIES:
+        return low
+    if "claude" in low:
+        return name
+    m = _CLAUDE_VERSIONED_RE.fullmatch(name)
+    if m:
+        return f"claude-{m.group(1).lower()}-{m.group(2).replace('.', '-')}"
+    raise UnknownModel(
+        f"unknown model {name!r}; claude families: "
+        + ", ".join(CLAUDE_FAMILIES)
+        + " (optionally with a version, e.g. fable-5-1)")
+
+
 def model_label(slug: str) -> str:
     """What to call the model that actually ran, for humans and for the
     dispatching session. Empty means nobody picked one — a standin header,
