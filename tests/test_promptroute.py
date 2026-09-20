@@ -87,38 +87,30 @@ def test_newline_after_route_still_routes():
     assert parse_route("/codex\nfix it", PARTS) == (Route("codex", None), "fix it")
 
 
-@pytest.mark.parametrize("sigil", ["/", "@"])
-def test_model_routes_resolve_with_either_sigil(monkeypatch, sigil):
+def test_model_routes_resolve_by_harness(monkeypatch):
     monkeypatch.setattr(promptroute.modelcat, "load_catalog",
                         lambda: [{"slug": "gpt-6-astra"}])
-    assert parse_route(f"{sigil}codex:astra go", PARTS) == (
+    assert parse_route("/codex:astra go", PARTS) == (
         Route("codex", "gpt-6-astra"), "go")
-    assert parse_route(f"{sigil}claude:fable go", PARTS) == (
+    assert parse_route("/claude:fable go", PARTS) == (
         Route("claude", "fable"), "go")
-    assert parse_route(f"{sigil}opencode:openai/gpt-6-astra go", PARTS) == (
+    assert parse_route("/opencode:openai/gpt-6-astra go", PARTS) == (
         Route("opencode", "openai/gpt-6-astra"), "go")
-    assert parse_route(f"{sigil}codex:default", PARTS) == (Route("codex", ""), "")
 
 
-def test_at_routes_preserve_file_mentions_and_embedded_text():
-    for prompt in ("@codex explain", "@codex/README.md explain",
-                   "@codex.py explain", "please @codex:astra go",
-                   "@claude:haiku/file explain"):
+def test_at_is_never_a_route():
+    # `@` belongs to the file picker and the harnesses' own mentions: even a
+    # well-formed harness:model behind it goes out as ordinary text, and a
+    # non-participant or an unknown model behind it is nobody's error
+    for prompt in ("@codex explain", "@codex:astra go", "@claude:fable-5.1 go",
+                   "@codex:default", "@opencode:openai/gpt-6-astra go",
+                   "@codex/README.md explain", "@claude:no-such-model go"):
         assert parse_route(prompt, PARTS) is None
+    assert parse_route("@codex:astra go", ["claude"]) is None
 
 
-def test_at_route_checks_participation_and_unknown_model(monkeypatch):
-    with pytest.raises(RouteError):
-        parse_route("@codex:astra go", ["claude"])
-    monkeypatch.setattr(promptroute.modelcat, "load_catalog",
-                        lambda: [{"slug": "gpt-6-astra"}])
-    with pytest.raises(RouteError):
-        parse_route("@codex:typo go", PARTS)
-
-
-@pytest.mark.parametrize("sigil", ["/", "@"])
-def test_claude_versioned_name_becomes_the_full_id(sigil):
-    assert parse_route(f"{sigil}claude:fable-5.1 go", PARTS) == (
+def test_claude_versioned_name_becomes_the_full_id():
+    assert parse_route("/claude:fable-5.1 go", PARTS) == (
         Route("claude", "claude-fable-5-1"), "go")
 
 
