@@ -157,7 +157,28 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
     def transcript_path(self, cwd: str, session_id: str) -> Path | None:
         p = paths.claude_transcript_path(cwd, session_id)
-        return p if p.exists() else None
+        if p.exists():
+            return p
+        # claude's EnterWorktree renames it under the worktree's slug
+        return paths.claude_locate_transcript(session_id)
+
+    def reclaim_transcript(self, cwd: str, session_id: str) -> Path | None:
+        """The transcript at the path `claude --resume` reads from `cwd`,
+        renamed back there if claude moved it (its per-session sidecar dir
+        too). Only safe while no claude process has the session open: a live
+        one keeps appending by path and would start a second file."""
+        home = paths.claude_transcript_path(cwd, session_id)
+        if home.exists():
+            return home
+        moved = paths.claude_locate_transcript(session_id)
+        if moved is None:
+            return None
+        home.parent.mkdir(parents=True, exist_ok=True)
+        sidecar = moved.with_suffix("")
+        if sidecar.is_dir() and not home.with_suffix("").exists():
+            sidecar.rename(home.with_suffix(""))
+        moved.rename(home)
+        return home
 
     def expected_transcript_path(self, cwd: str, session_id: str) -> Path:
         return paths.claude_transcript_path(cwd, session_id)

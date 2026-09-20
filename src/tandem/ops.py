@@ -58,6 +58,12 @@ def drain_source(
     no reply, and a shadow left on a user message is not resumable."""
     transcript = source_transcript(session, source)
     if transcript is None:
+        # not written yet is fine; read once and gone now is lost turns
+        if any(store.get_cursor(session.tandem_id, source, t).byte_offset
+               for t in session.targets_for(source)):
+            raise SyncSetupError(
+                f"{source} transcript missing ({session.native_id(source)}) "
+                "after part of it was synced")
         return 0
     total = 0
     for target in session.targets_for(source):
@@ -158,10 +164,10 @@ def _claude_needs_seed(store: StateStore, session: PairedSession) -> bool:
     """claude has an id but no file, and tandem has never consumed a byte of
     it. Only then may the file be seeded: a consumed-then-missing file is
     data loss, and the drain's hard error is the right answer there."""
-    expected = get_adapter("claude").expected_transcript_path(
+    found = get_adapter("claude").transcript_path(
         session.cwd, session.native_id("claude")
     )
-    if expected.exists():
+    if found is not None:       # under another project dir counts: it only moved
         return False
     return all(
         store.get_cursor(session.tandem_id, "claude", t).byte_offset == 0

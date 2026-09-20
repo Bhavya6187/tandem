@@ -25,7 +25,7 @@ from .harness import get_adapter
 from .ptyrun import FrameIO, PtyControl, _winsize, run_in_pty
 from .ratelimit import RateLimitPoller
 from .state import PairedSession, StateStore, SyncCursor
-from .tailer import TailedLine, TranscriptTruncated, TranscriptWatcher
+from .tailer import TailedLine, TranscriptMissing, TranscriptTruncated, TranscriptWatcher
 from .util import json_line
 from .warm import WarmChild, _shadow_size, build_launch, spawn_hidden
 
@@ -419,7 +419,7 @@ class TailLoop:
 
         try:
             lines = self.reader.poll()
-        except TranscriptTruncated as exc:
+        except (TranscriptTruncated, TranscriptMissing) as exc:
             self.errors.append(str(exc))
             return 0
         consumed = 0
