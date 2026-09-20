@@ -14,19 +14,27 @@ message.updated (learn assistant/user message ids), message.part.updated
 learn part types), message.part.delta (field "text"), permission.asked,
 question.asked, session.error. The POST returning is the turn boundary.
 Default opencode config auto-allows bash; a permission event only appears
-when the user's opencode config asks — opencode's rule, not tandem's."""
+when the user's opencode config asks — opencode's rule, not tandem's.
+
+An `@path` in the prompt that names a file or directory inside the session
+directory rides along as a file part (FilePartInput, schema read from
+`/doc` on 1.18.30), which is what opencode's own TUI sends for a picked
+file: the server puts the contents in the message, where the text alone
+would cost the model a tool call to go and read it."""
 
 from __future__ import annotations
 
 import http.client
 import json
 import queue
+import re
 import socket
 import subprocess
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
@@ -36,6 +44,49 @@ from ..events import (Answers, ApprovalRequest, Failure, LiveEvent, QuestionRequ
 from . import child_env, first_line, summarize_args, terminate
 
 _REPLY = {"allow": "once", "always": "always", "deny": "reject"}
+# a mention starts a word: `me@example.com` is not one. Quoted, it may hold spaces.
+_MENTION = re.compile(r'(?<!\S)@(?:"([^"\n]+)"|(\S+))')
+_TRAILING = ".,;:!?)"
+
+
+def mention_parts(prompt: str, cwd: str) -> list[dict]:
+    """A file part for each `@path` that is on disk under `cwd`. Anything
+    else stays text — a handle, a path that does not exist, and a path outside
+    the session directory, which opencode asks about before it reads and a
+    part would hand over unasked."""
+    try:
+        root = Path(cwd).resolve()
+    except OSError:
+        return []
+    parts, seen = [], set()
+    for m in _MENTION.finditer(prompt):
+        quoted, bare = m.group(1), m.group(2)
+        found = _on_disk(root, quoted) if quoted else (
+            _on_disk(root, bare) or _on_disk(root, bare.rstrip(_TRAILING)))
+        if found is None or found[1] in seen:
+            continue
+        written, target = found
+        seen.add(target)
+        end = m.end() if quoted else m.start() + 1 + len(written)
+        parts.append({
+            "type": "file",
+            "mime": "application/x-directory" if target.is_dir() else "text/plain",
+            "filename": written, "url": target.as_uri(),
+            "source": {"type": "file", "path": written,
+                       "text": {"value": prompt[m.start():end], "start": m.start(), "end": end}}})
+    return parts
+
+
+def _on_disk(root: Path, written: str) -> tuple[str, Path] | None:
+    if not written:
+        return None
+    try:
+        target = (root / Path(written).expanduser()).resolve()
+        if target.exists() and target.is_relative_to(root):
+            return written, target
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return None
 
 
 @dataclass
@@ -308,7 +359,7 @@ class OpencodeRuntime:
     def run_turn(self, session, native_id: str | None, prompt: str, model: str,
                  emit: Callable[[LiveEvent], None], answers: Answers) -> TurnOutcome:
         assert native_id, "opencode sessions are created at pair time"
-        body: dict = {"parts": [{"type": "text", "text": prompt}]}
+        body: dict = {"parts": [{"type": "text", "text": prompt}, *mention_parts(prompt, session.cwd)]}
         if model:
             if "/" not in model:
                 msg = f"opencode models are spelled provider/model, got {model!r}"

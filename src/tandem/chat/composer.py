@@ -10,17 +10,25 @@ before Enter, and Shift-Enter where the terminal reports it all break the
 line, and a bracketed paste keeps its newlines. `rows` lays the draft out
 as the rows the window paints — long lines wrapped, a tall draft scrolled
 around the cursor. A partial escape sequence at the end of a read is
-carried to the next one; a lone Esc is a key."""
+carried to the next one; a lone Esc is a key.
+
+A word that starts with `@` is a file mention, and while the cursor is on
+one the picker is open: the paths that match it are listed under the draft,
+Up/Down choose, Tab or Enter puts the choice in the draft, Esc closes the
+list. The paths come from a callable the window hands in — nothing here
+reads the filesystem — and the mention itself is sent as written."""
 
 from __future__ import annotations
 
 import codecs
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Union
 from unicodedata import east_asian_width
 
 from .events import ApprovalRequest, QuestionRequest, offered_labels
+from .files import match
 
 
 @dataclass(frozen=True)
@@ -71,6 +79,8 @@ _META = {ord("b"): "word_left", ord("f"): "word_right", ord("d"): "word_delete",
 _MODIFIED_ENTER = re.compile(r"13;[2-9]\d*u|27;[2-9]\d*;13~")
 _NO_WRAP = 1 << 30
 _WORD_ARROW = {"left": "word_left", "right": "word_right"}
+_PICKER_ROWS = 6
+_PICKER_MATCHES = 50
 
 
 def approval_row(choices: tuple[str, ...] | None = None) -> str:
@@ -78,7 +88,8 @@ def approval_row(choices: tuple[str, ...] | None = None) -> str:
 
 
 class Composer:
-    def __init__(self, history_limit: int = 200):
+    def __init__(self, history_limit: int = 200,
+                 paths: Callable[[], list[str]] | None = None):
         self.buf: list[str] = []
         self.cur = 0
         self.history: list[str] = []
@@ -94,6 +105,14 @@ class Composer:
         self._avail = _NO_WRAP          # the width `rows` last wrapped to: Up/Down follow those rows
         self._top = 0
         self._goal: tuple[int, int] | None = None   # (cursor, column) a run of Up/Down aims for
+        self._list_paths = paths
+        self._paths: list[str] = []
+        self._listed_at: int | None = None          # where the mention the paths were listed for starts
+        self._dismissed: int | None = None          # where the mention Esc closed the picker on starts
+        self._matched: tuple[int, str] | None = None
+        self._matches: list[str] = []
+        self.selected = 0
+        self._pick_top = 0
 
     # -- modes ---------------------------------------------------------------
 
@@ -144,7 +163,10 @@ class Composer:
                 if name == "paste_start":
                     self._paste = True
                 elif name == "esc":
-                    actions.append(Cancel() if self.mode != "prompt" else Interrupt())
+                    if self.candidates:
+                        self._dismissed = self._mention()[0]
+                    else:
+                        actions.append(Cancel() if self.mode != "prompt" else Interrupt())
                 elif name:
                     self._key(name)
                 continue
@@ -172,6 +194,9 @@ class Composer:
             elif b == 0x0B:
                 end = self._line_end()
                 del self.buf[self.cur:end + 1 if end == self.cur else end]
+            elif b == 0x09:
+                if self.candidates:
+                    self._accept()
             elif b < 0x20:
                 pass                              # other control bytes: ignored
             else:
@@ -179,6 +204,7 @@ class Composer:
                 while i < len(data) and data[i] >= 0x20 and data[i] not in (0x7F, 0x1B):
                     i += 1
                 self._typed(self._decoder.decode(data[j:i]), actions, first=j == 0)
+        self._sync_picker()
         return actions
 
     def _escape(self, data: bytes) -> tuple[str, int]:
@@ -265,10 +291,66 @@ class Composer:
             self.cur = start
         elif name == "word_delete":
             del self.buf[self.cur:self._word_right()]
+        elif name in ("up", "down") and self.candidates:
+            self.selected = (self.selected + (1 if name == "down" else -1)) % len(self.candidates)
         elif name == "up":
             self._vertical(-1) or self._history_step(-1)
         elif name == "down":
             self._vertical(1) or self._history_step(1)
+
+    # -- the @ picker ----------------------------------------------------------
+
+    def _mention(self) -> tuple[int, str] | None:
+        """(where the `@` word under the cursor starts, what follows the `@`
+        up to the cursor), in prompt mode with somewhere to list paths from."""
+        if self.mode != "prompt" or self._list_paths is None:
+            return None
+        start = self.cur
+        while start > 0 and not self.buf[start - 1].isspace():
+            start -= 1
+        if start == self.cur or self.buf[start] != "@":
+            return None
+        return start, "".join(self.buf[start + 1:self.cur])
+
+    @property
+    def candidates(self) -> list[str]:
+        """The paths the picker is offering; empty is a closed picker."""
+        return self._sync_picker()
+
+    def _sync_picker(self) -> list[str]:
+        """Bring the picker in line with the draft. The paths are listed once
+        per mention, not once per keystroke; the selection starts over when
+        the query changes."""
+        mention = self._mention()
+        if mention is None:
+            self._listed_at = self._dismissed = None
+            return []
+        start, query = mention
+        if start == self._dismissed:
+            return []
+        self._dismissed = None
+        if start != self._listed_at:
+            self._paths, self._listed_at, self._matched = self._list_paths(), start, None
+        if mention != self._matched:
+            # a path typed out in full is not offered back: Enter has to submit
+            self._matches = [p for p in match(query, self._paths, _PICKER_MATCHES + 1)
+                             if p != query][:_PICKER_MATCHES]
+            self._matched, self.selected, self._pick_top = mention, 0, 0
+        return self._matches
+
+    def _accept(self) -> None:
+        """The chosen path takes the mention's place. A directory leaves the
+        cursor on it, so the picker goes on into it."""
+        start, _ = self._mention()
+        path = self.candidates[self.selected]
+        end = self.cur
+        while end < len(self.buf) and not self.buf[end].isspace():
+            end += 1
+        text = f'@"{path}"' if any(ch.isspace() for ch in path) else "@" + path
+        if not path.endswith("/"):
+            text += " "
+        self.buf[start:end] = list(text)
+        self.cur = start + len(text)
 
     def _line_start(self) -> int:
         i = self.cur
@@ -334,6 +416,10 @@ class Composer:
 
     def _set(self, text: str) -> None:
         self.buf, self.cur = list(text), len(text)
+        # a recalled prompt that ends in a mention does not open the picker:
+        # the next Up has to keep stepping through history
+        mention = self._mention()
+        self._dismissed = mention[0] if mention else None
 
     def _insert(self, text: str) -> None:
         if text:
@@ -356,6 +442,9 @@ class Composer:
 
     def _enter(self, actions: list[Action]) -> None:
         if self.mode == "approval":
+            return
+        if self.candidates:
+            self._accept()
             return
         if self.cur and self.buf[self.cur - 1] == "\\":   # a backslash before Enter continues the line
             self.buf[self.cur - 1] = "\n"
@@ -404,11 +493,22 @@ class Composer:
         prompt = "? " if self.mode == "question" else "> "
         self._avail = max(1, cols - len(prompt))
         rows, _, (r, col) = self._layout(self._avail)
+        picks = self.candidates
+        n = min(len(picks), _PICKER_ROWS, max_rows - 1)
+        max_rows -= n
         top = min(self._top, max(0, len(rows) - max_rows), r)
         self._top = top = max(top, r - max_rows + 1)
-        shown = [(" " * len(prompt) if n else prompt) + row
-                 for n, row in enumerate(rows)][top:top + max_rows]
+        shown = [(" " * len(prompt) if i else prompt) + row
+                 for i, row in enumerate(rows)][top:top + max_rows]
+        # the picker's rows ride under the draft and scroll with the selection
+        self._pick_top = min(max(self._pick_top, self.selected - n + 1), self.selected)
+        shown += [("  ❯ " if i == self.selected else "    ") + _printable(picks[i])
+                  for i in range(self._pick_top, self._pick_top + n)]
         return shown, r - top, len(prompt) + col
+
+
+def _printable(text: str) -> str:
+    return "".join(ch if ch >= " " and ch != "\x7f" else "?" for ch in text)
 
 
 def _width(ch: str) -> int:

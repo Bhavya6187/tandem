@@ -356,7 +356,8 @@ def hermetic_frame():
         f.write("[frame]\nrate_limits = false\n")
 
 
-def drive_chat(env, *, launch=None, runtimes=None, ping=True, **chat_kwargs) -> tuple[int, str]:
+def drive_chat(env, *, launch=None, runtimes=None, ping=True, keys=b"ping\r",
+               expect=b"echo:ping", **chat_kwargs) -> tuple[int, str]:
     """Run the real loop over a pty: wait for the composer, submit `ping`,
     wait for the echo, then quit with two Ctrl-Cs. Returns (exit code,
     everything the window painted). The quit is sent even when the echo never
@@ -381,8 +382,8 @@ def drive_chat(env, *, launch=None, runtimes=None, ping=True, **chat_kwargs) -> 
             if not pull():
                 return
         if ping:                                      # else: open the window and leave
-            os.write(master, b"ping\r")
-            while time.monotonic() < deadline and b"echo:ping" not in captured:
+            os.write(master, keys)
+            while time.monotonic() < deadline and expect not in captured:
                 if not pull():
                     return
         os.write(master, b"\x03\x03")
@@ -416,6 +417,18 @@ def test_run_chat_on_a_pty(env_factory):
     assert code == 0
     assert "echo:ping" in text and "\x1b[r" in text
     assert f"tandem resume {env.session.tandem_id}" in text
+
+
+def test_at_sign_picks_a_file_from_the_session_directory(env_factory, monkeypatch, tmp_path):
+    """Listed from the session's cwd, not the process's: Tab completes the
+    mention, and the prompt goes out with it as written."""
+    env = env_factory()
+    hermetic_frame()
+    open(os.path.join(env.session.cwd, "picked.txt"), "w").close()
+    monkeypatch.chdir(tmp_path)
+    code, text = drive_chat(env, keys=b"read @pick\t\r", expect=b"echo:read @picked.txt")
+    assert code == 0
+    assert "echo:read @picked.txt" in text
 
 
 def test_resume_from_another_directory_restores_history_and_continues_native_session(
