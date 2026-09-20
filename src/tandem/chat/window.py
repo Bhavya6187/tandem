@@ -32,6 +32,7 @@ from .dispatch import Dispatcher
 from .events import (ApprovalRequest, Failure, Idle, LimitsUpdate, LiveEvent, QuestionRequest,
                      TextDelta, ThinkingDelta, ToolFinished, ToolOutput, ToolStarted,
                      TurnFinished, TurnStarted)
+from .files import list_paths
 from .render import Screen
 from .runtime.factory import make_runtimes
 
@@ -362,7 +363,7 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
             view = view[n:]
 
     screen = Screen(write, rows, cols, cfg, color="NO_COLOR" not in os.environ)
-    composer = Composer()
+    composer = Composer(paths=lambda: list_paths(session.cwd))
     answers = WindowAnswers(post)
     runtimes = runtimes if runtimes is not None else make_runtimes(session, cfg)
     meters: dict = {}

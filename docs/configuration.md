@@ -173,6 +173,14 @@ participants and any model pins); every other leading `/word` goes to the
 current harness as its own slash command, and `@path` mentions reach it
 untouched.
 
+Typing `@` opens a file picker under the draft. It lists the session
+directory's files and directories (git's tracked and untracked-but-not-ignored
+files in a repository, a walk that skips dot-directories elsewhere) and
+narrows as you type. Up/Down choose, Tab or Enter completes the path, Esc
+closes the list; choosing a directory keeps picking inside it. A path with a
+space is written `@"my notes.txt"`. The mention is sent as written: claude
+expands it, codex and opencode read the file with a tool.
+
 ```toml
 [chat]
 tool_output_lines = 8        # lines of tool output shown per call (rest elided)

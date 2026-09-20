@@ -289,3 +289,185 @@ def test_question_mode_non_decimal_digit_is_text():
     assert feed(c, "²") == [] and c.text == "²"    # a "digit" int() cannot read
     c.begin_question(QuestionRequest("Which?", ("red", "blue")))
     assert feed(c, "2") == [Answer("blue")]        # a real one still picks
+
+
+# -- the @ file picker ---------------------------------------------------------
+
+PATHS = ["README.md", "docs/", "docs/render-notes.md", "my notes.txt", "src/",
+         "src/tandem/chat/render.py", "src/tandem/chat/window.py"]
+
+
+def picking(paths=PATHS):
+    return Composer(paths=lambda: list(paths))
+
+
+def test_at_sign_opens_the_picker_on_the_word_under_the_cursor():
+    c = picking()
+    feed(c, "look at @ren")
+    assert c.candidates == ["docs/render-notes.md", "src/tandem/chat/render.py",
+                            "src/tandem/chat/window.py"]      # r-e-n in order: the fuzzy tail
+    assert c.selected == 0
+
+
+def test_without_a_path_source_at_sign_is_just_text():
+    c = Composer()
+    feed(c, "@ren")
+    assert c.candidates == []
+    assert feed(c, "\r") == [Submit("@ren")]
+
+
+def test_an_at_sign_inside_a_word_is_not_a_mention():
+    c = picking()
+    feed(c, "mail me@ren")
+    assert c.candidates == []
+
+
+def test_enter_accepts_the_selection_instead_of_submitting():
+    c = picking()
+    feed(c, "look at @ren")
+    feed(c, b"\x1b[B")                            # down
+    assert c.selected == 1
+    assert feed(c, "\r") == []
+    assert c.text == "look at @src/tandem/chat/render.py " and c.cur == len(c.text)
+    assert c.candidates == []
+    assert feed(c, "\r") == [Submit("look at @src/tandem/chat/render.py ")]
+
+
+def test_tab_accepts_too():
+    c = picking()
+    feed(c, "@read")
+    assert feed(c, "\t") == []
+    assert c.text == "@README.md "
+
+
+def test_selection_wraps_and_up_does_not_touch_history():
+    c = picking()
+    feed(c, "earlier\r")
+    feed(c, "@ren")
+    feed(c, b"\x1b[A")                            # up from the first wraps to the last
+    assert c.selected == 2 and c.text == "@ren"
+    feed(c, b"\x1b[B")
+    assert c.selected == 0
+
+
+def test_typing_resets_the_selection():
+    c = picking()
+    feed(c, "@r")
+    feed(c, b"\x1b[B")
+    feed(c, "e")
+    assert c.selected == 0
+
+
+def test_esc_dismisses_the_picker_before_it_interrupts():
+    c = picking()
+    feed(c, "@ren")
+    assert feed(c, b"\x1b") == []
+    assert c.candidates == [] and c.text == "@ren"
+    feed(c, "d")                                  # still the dismissed word
+    assert c.candidates == []
+    assert feed(c, b"\x1b") == [Interrupt()]
+    assert feed(c, "\r") == [Submit("@rend")]
+
+
+def test_a_new_mention_reopens_after_a_dismissal():
+    c = picking()
+    feed(c, "@ren")
+    feed(c, b"\x1b")
+    feed(c, " @win")
+    assert c.candidates == ["src/tandem/chat/window.py"]
+
+
+def test_enter_submits_when_nothing_matches():
+    c = picking()
+    assert feed(c, "@zzz\r") == [Submit("@zzz")]
+
+
+def test_a_fully_typed_path_is_not_offered_back():
+    c = picking()
+    assert feed(c, "@README.md\r") == [Submit("@README.md")]
+
+
+def test_accepting_a_directory_keeps_picking_inside_it():
+    c = picking()
+    feed(c, "@doc")
+    feed(c, "\r")
+    assert c.text == "@docs/"
+    assert c.candidates == ["docs/render-notes.md"]
+
+
+def test_a_path_with_a_space_is_quoted():
+    c = picking()
+    feed(c, "@my")
+    feed(c, "\t")
+    assert c.text == '@"my notes.txt" '
+
+
+def test_backspacing_over_the_at_sign_closes_the_picker():
+    c = picking()
+    feed(c, "@r")
+    feed(c, b"\x7f\x7f")
+    assert c.candidates == [] and c.text == ""
+
+
+def test_accepting_mid_word_replaces_the_whole_word():
+    c = picking()
+    feed(c, "@readXX tail")
+    feed(c, b"\x1b[D" * 7)                        # cursor after "@read"
+    assert c.candidates[0] == "README.md"
+    feed(c, "\t")
+    assert c.text == "@README.md  tail" and c.cur == len("@README.md ")
+
+
+def test_paths_are_listed_once_per_mention():
+    calls = []
+
+    def paths():
+        calls.append(1)
+        return list(PATHS)
+
+    c = Composer(paths=paths)
+    feed(c, "@re")
+    feed(c, "n")
+    c.rows(40, 8)
+    assert len(calls) == 1
+    feed(c, "\t")
+    feed(c, "@w")
+    assert len(calls) == 2
+
+
+def test_the_picker_is_prompt_mode_only():
+    c = picking()
+    c.begin_question(QuestionRequest("which file?"))
+    feed(c, "@ren")
+    assert c.candidates == []
+    assert feed(c, "\r") == [Answer("@ren")]
+
+
+def test_picker_rows_sit_under_the_draft_with_the_selection_marked():
+    c = picking()
+    feed(c, "see @ren")
+    feed(c, b"\x1b[B")
+    rows, row, col = c.rows(40, 8)
+    assert rows == ["> see @ren", "    docs/render-notes.md", "  ❯ src/tandem/chat/render.py",
+                    "    src/tandem/chat/window.py"]
+    assert (row, col) == (0, len("> see @ren"))
+
+
+def test_picker_rows_scroll_to_keep_the_selection_in_view():
+    c = picking([f"f{n}.txt" for n in range(9)])
+    feed(c, "@f")
+    feed(c, b"\x1b[B" * 7)
+    rows, row, _ = c.rows(40, 4)                  # one draft row, three picker rows
+    assert rows == ["> @f", "    f5.txt", "    f6.txt", "  ❯ f7.txt"] and row == 0
+
+
+def test_a_recalled_prompt_ending_in_a_mention_does_not_trap_history():
+    c = picking()
+    feed(c, "first\r")
+    feed(c, "see @ren")
+    feed(c, b"\x1b")                              # close the picker, then send as typed
+    feed(c, "\r")
+    feed(c, b"\x1b[A")
+    assert c.text == "see @ren" and c.candidates == []
+    feed(c, b"\x1b[A")
+    assert c.text == "first"
