@@ -26,6 +26,7 @@ from ..ptyrun import _winsize
 from ..ratelimit import RateLimitPoller
 from ..runner import UsageFeed
 from ..state import SyncCursor
+from .activity import Activity
 from .composer import Answer, Cancel, Composer, CtrlC, Interrupt, Repaint, Submit
 from .dispatch import Dispatcher
 from .events import (ApprovalRequest, Failure, Idle, LimitsUpdate, LiveEvent, QuestionRequest,
@@ -35,6 +36,8 @@ from .render import Screen
 from .runtime.factory import make_runtimes
 
 WINDOW_COMMANDS = ("/quit", "/status")
+_BUSY_TICK = 0.12            # the spinner's frame is 0.1 s; slower and it visibly skips
+_LONG_TURN_SECONDS = 15.0    # a turn this long ends with the bell
 
 
 def route_hint(participants: list[str]) -> str:
@@ -106,11 +109,12 @@ class Window:
     def __init__(self, session, store, cfg, screen: Screen, composer: Composer,
                  dispatcher, answers: WindowAnswers, bar: StatusBar, usage_state: dict,
                  meters: dict, poller: RateLimitPoller | None = None,
-                 stdin_fd: int | None = None):
+                 stdin_fd: int | None = None, clock: Callable[[], float] = time.monotonic):
         self.session, self.store, self.cfg = session, store, cfg
         self.screen, self.composer, self.dispatcher = screen, composer, dispatcher
         self.answers, self.bar, self.usage_state, self.meters, self.poller = answers, bar, usage_state, meters, poller
         self.stdin_fd = stdin_fd
+        self.activity = Activity(clock)
         self._ctrlc_at = 0.0
 
     # -- painting ------------------------------------------------------------
@@ -139,7 +143,22 @@ class Window:
 
     def paint(self) -> None:
         rows, row, col = self.composer.rows(self.screen.cols, self.screen.composer_max_rows)
-        self.screen.paint_bottom(self.bar_line(), rows, row, col, focus_composer=True)
+        queued = len(getattr(self.dispatcher, "queue", ()))
+        self.screen.paint_bottom(self.bar_line(), rows, row, col, focus_composer=True,
+                                 activity=self.activity.text(queued, self.screen.cols - 4),
+                                 urgent=self.activity.waiting)
+
+    @property
+    def tick_seconds(self) -> float:
+        """How long the loop may sleep before a repaint. A running turn's
+        spinner and timer move on their own clock — a thinking model posts
+        nothing for them to ride on; a line waiting on the user is static,
+        like the idle rule."""
+        return _BUSY_TICK if self.activity.active and not self.activity.waiting else 1.0
+
+    def _ring(self) -> None:
+        if self.cfg.bell:
+            self.screen.bell()
 
     def resize(self, rows: int, cols: int) -> None:
         """SIGWINCH: the scroll region and the bar move together, and the
@@ -185,6 +204,8 @@ class Window:
 
     def handle_event(self, ev: LiveEvent) -> None:
         s = self.screen
+        was_active = self.activity.active
+        self.activity.on_event(ev)
         if isinstance(ev, TurnStarted):
             s.turn_started(ev)
         elif isinstance(ev, TextDelta):
@@ -201,12 +222,18 @@ class Window:
             self._flush_input()
             s.approval(ev)
             self.composer.begin_approval(ev)
+            self._ring()
         elif isinstance(ev, QuestionRequest):
             self._flush_input()
             s.question(ev)
             self.composer.begin_question(ev)
+            self._ring()
         elif isinstance(ev, TurnFinished):
-            s.turn_finished(ev)
+            s.turn_finished(ev, self.activity.last_elapsed if was_active else None)
+            # whoever sat through a short turn saw it end; a long one is
+            # the one they left for another window
+            if was_active and self.activity.last_elapsed >= _LONG_TURN_SECONDS:
+                self._ring()
         elif isinstance(ev, Failure):
             s.failure(ev)
         elif isinstance(ev, LimitsUpdate):
@@ -246,6 +273,7 @@ class Window:
             return False
         self.composer.end_answer()
         self.answers.resolve("deny")
+        self.activity.answered()
         return True
 
     def handle_input(self, data: bytes) -> bool:
@@ -273,6 +301,7 @@ class Window:
                 if self.composer.mode != "prompt":
                     self.composer.end_answer()
                     self.answers.resolve(action.text)
+                    self.activity.answered()
             elif isinstance(action, Cancel):
                 if self._deny_pending():
                     self.dispatcher.interrupt()
@@ -371,7 +400,7 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
             poller.ensure_started()
         win.paint()
         while True:
-            ready, _, _ = select.select([stdin_fd, wake_r], [], [], 1.0)
+            ready, _, _ = select.select([stdin_fd, wake_r], [], [], win.tick_seconds)
             if wake_r in ready:
                 kinds = os.read(wake_r, 4096)
                 if b"W" in kinds:
@@ -393,7 +422,7 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
                 if not data or not win.handle_input(data):
                     break
             if not ready:
-                win.paint()                              # the bar's rate-limit figures refresh on their own clock
+                win.paint()         # the rate-limit figures and the activity line move on their own clock
     finally:
         closing = True                               # post() is a no-op from here
         dispatcher.close()                           # returns with the worker joined

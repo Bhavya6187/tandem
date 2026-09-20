@@ -12,7 +12,7 @@ from conftest import claude_assistant, claude_user, write_line
 
 from tandem.chat.composer import Composer
 from tandem.chat.events import (ApprovalRequest, Idle, LimitsUpdate, QuestionRequest, TextDelta,
-                                TurnFinished, TurnOutcome, TurnStarted)
+                                ToolStarted, TurnFinished, TurnOutcome, TurnStarted)
 from tandem.chat.render import Screen
 from tandem.chat.window import Window, WindowAnswers, route_hint, run_chat
 from tandem.config import ChatConfig
@@ -29,7 +29,7 @@ class StubDispatcher:
     def __init__(self):
         self.submitted, self.pumps, self.interrupts = [], 0, 0
         self.busy, self.default, self.note = False, "claude", ""
-        self.pins = {}
+        self.pins, self.queue = {}, []
     def submit(self, text): self.submitted.append(text); return self.note
     def pump(self): self.pumps += 1
     def interrupt(self): self.interrupts += 1
@@ -37,7 +37,12 @@ class StubDispatcher:
     def close(self): pass
 
 
-def make_window(env, cfg=None, stdin_fd=None):
+class Clock:
+    def __init__(self): self.now = 500.0
+    def __call__(self): return self.now
+
+
+def make_window(env, cfg=None, stdin_fd=None, clock=None):
     cfg = cfg or ChatConfig()
     out = Out()
     screen = Screen(out, 24, 60, cfg, color=False)
@@ -45,7 +50,7 @@ def make_window(env, cfg=None, stdin_fd=None):
     d = StubDispatcher()
     bar = StatusBar(24, 60, "claude", ["codex"], hint="/claude /codex route")
     w = Window(env.session, env.store, cfg, screen, Composer(), d, answers, bar, {"limits": {}}, {},
-               stdin_fd=stdin_fd)
+               stdin_fd=stdin_fd, **({"clock": clock} if clock else {}))
     return w, d, out, answers
 
 
@@ -629,3 +634,107 @@ def test_status_says_when_permissions_are_skipped(env_factory):
     assert "permissions skipped" in w.status_line()
     w, *_ = make_window(env)
     assert "permissions" not in w.status_line()
+
+
+# -- the activity line, the closing row, the bell ---------------------------------
+
+
+def last_separator(out) -> str:
+    """The separator row as the latest paint left it (row 22 of 24)."""
+    t = out.text()
+    start = t.rindex("\x1b[22;1H") + len("\x1b[22;1H")
+    return t[start:t.index("\x1b[", start)]
+
+
+def test_a_running_turn_shows_on_the_separator_and_idle_clears_it(env_factory):
+    clock = Clock(); env = env_factory(); w, d, out, _ = make_window(env, clock=clock)
+    w.handle_event(TurnStarted("codex", "", "go"))
+    assert last_separator(out).startswith("── ⠋ codex · starting · 0s ")
+    clock.now += 5
+    w.handle_event(ToolStarted("c1", "Bash", "ls"))
+    assert last_separator(out).startswith("── ⠋ codex · running Bash · 5s ")
+    w.handle_event(TurnFinished("completed", "")); w.handle_event(Idle())
+    assert last_separator(out) == "─" * 60
+
+
+def test_the_timer_keeps_counting_between_events(env_factory):
+    """A thinking model posts nothing: the select timeout's repaint is the
+    only thing that moves the line."""
+    clock = Clock(); env = env_factory(); w, d, out, _ = make_window(env, clock=clock)
+    w.handle_event(TurnStarted("codex", "", "go"))
+    clock.now += 7
+    w.paint()
+    assert " · 7s " in last_separator(out)
+
+
+def test_the_loop_ticks_fast_only_while_something_animates(env_factory):
+    env = env_factory(); w, d, out, _ = make_window(env)
+    assert w.tick_seconds == 1.0
+    w.handle_event(TurnStarted("codex", "", "go"))
+    assert w.tick_seconds < 0.2
+    w.handle_event(ApprovalRequest("command", "ls"))
+    assert w.tick_seconds == 1.0                   # a waiting line is static
+    w.handle_event(TurnFinished("completed", "")); w.handle_event(Idle())
+    assert w.tick_seconds == 1.0
+
+
+def test_queued_prompts_show_on_the_activity_line(env_factory):
+    env = env_factory(); w, d, out, _ = make_window(env)
+    d.queue = ["a", "b"]
+    w.handle_event(TurnStarted("codex", "", "go"))
+    assert "+2 queued" in last_separator(out)
+
+
+def test_the_closing_row_says_how_long_the_turn_took(env_factory):
+    clock = Clock(); env = env_factory(); w, d, out, _ = make_window(env, clock=clock)
+    w.handle_event(TurnStarted("codex", "", "go"))
+    clock.now += 42
+    w.handle_event(TurnFinished("completed", ""))
+    assert "  ✓ done · 42s\r\n" in out.text()
+
+
+def test_a_request_rings_once_and_says_who_is_waiting(env_factory):
+    env = env_factory(); w, d, out, _ = make_window(env)
+    w.handle_event(TurnStarted("claude", "", "go"))
+    w.handle_event(ApprovalRequest("command", "ls"))
+    assert last_separator(out).startswith("── ● claude is waiting for your answer ")
+    w.paint(); w.paint()
+    assert out.text().count("\x07") == 1
+
+
+def test_an_answer_puts_the_line_back_to_work(env_factory):
+    env = env_factory(); w, d, out, answers = make_window(env)
+    w.handle_event(TurnStarted("claude", "", "go"))
+    w.handle_event(ApprovalRequest("command", "ls"))
+    w.handle_input(b"y")
+    assert "claude · working" in last_separator(out)
+
+
+def test_walking_away_from_a_request_puts_the_line_back_to_work(env_factory):
+    env = env_factory(); w, d, out, answers = make_window(env)
+    w.handle_event(TurnStarted("claude", "", "go"))
+    w.handle_event(ApprovalRequest("command", "ls"))
+    w.handle_input(b"\x1b")
+    assert "is waiting" not in last_separator(out)
+
+
+def test_a_long_turn_rings_when_it_ends_and_a_short_one_does_not(env_factory):
+    clock = Clock(); env = env_factory(); w, d, out, _ = make_window(env, clock=clock)
+    w.handle_event(TurnStarted("claude", "", "go"))
+    clock.now += 3
+    w.handle_event(TurnFinished("completed", "")); w.handle_event(Idle())
+    assert "\x07" not in out.text()
+    w.handle_event(TurnStarted("claude", "", "go"))
+    clock.now += 40
+    w.handle_event(TurnFinished("completed", "")); w.handle_event(Idle())
+    assert out.text().count("\x07") == 1
+
+
+def test_bell_off_never_rings(env_factory):
+    clock = Clock(); env = env_factory()
+    w, d, out, _ = make_window(env, cfg=ChatConfig(bell=False), clock=clock)
+    w.handle_event(TurnStarted("claude", "", "go"))
+    w.handle_event(ApprovalRequest("command", "ls"))
+    clock.now += 40
+    w.handle_event(TurnFinished("completed", "")); w.handle_event(Idle())
+    assert "\x07" not in out.text()

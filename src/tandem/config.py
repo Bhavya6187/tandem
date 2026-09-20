@@ -206,6 +206,7 @@ class ChatConfig:
     tool_output_lines: int = 8          # tail printed per tool call
     history_turns: int = 50             # turns painted at startup
     show_thinking: bool = False
+    bell: bool = True                   # ring when a turn needs an answer, or ends after a long run
     claude_setting_sources: tuple[str, ...] = _SETTING_SOURCES
     codex_approval_policy: str = ""     # "" = inherit ~/.codex/config.toml
     codex_sandbox: str = ""             # "" = inherit
@@ -239,6 +240,7 @@ def load_chat_config() -> ChatConfig:
         tool_output_lines=max(0, pick("tool_output_lines", int, d.tool_output_lines)),
         history_turns=max(0, pick("history_turns", int, d.history_turns)),
         show_thinking=pick("show_thinking", bool, d.show_thinking),
+        bell=pick("bell", bool, d.bell),
         claude_setting_sources=sources,
         codex_approval_policy=pick("codex_approval_policy", str,
                                    d.codex_approval_policy, _CODEX_APPROVAL_POLICIES),

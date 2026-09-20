@@ -178,6 +178,7 @@ untouched.
 tool_output_lines = 8        # lines of tool output shown per call (rest elided)
 history_turns = 50           # turns painted from the transcript at startup
 show_thinking = false        # reasoning summaries, dimmed
+bell = true                  # ring when a turn needs an answer, or ends after 15 s or more
 claude_setting_sources = ["user", "project", "local"]   # what headless claude loads
 # codex_approval_policy = "on-request"   # default: inherit ~/.codex/config.toml
 # codex_sandbox = "workspace-write"      # default: inherit
@@ -187,6 +188,15 @@ Keys: Enter sends; Esc interrupts the running turn; Ctrl-C once interrupts,
 twice within two seconds quits; Ctrl-L repaints. An approval prompt takes
 `y`, `a` (allow for the rest of the session), or `n`; a question takes its
 option number or typed text.
+
+The rule above the status bar is the activity line. While a turn runs it
+names the harness, what it is doing (`starting`, `thinking`, `running
+Bash`, `writing`), and for how long; when the turn needs an approval or an
+answer it turns bold and says so; idle, it is a plain rule. Every turn ends
+with a closing row — `✓ done`, `■ interrupted` or `✗ failed` — with its
+length. With `bell = true` the terminal bell rings when a turn needs an
+answer and when one that ran 15 s or more ends, so a window left in the
+background can call you back.
 
 Headless claude and codex app-server skip the folder-trust prompts their
 TUIs show; opencode's default config auto-allows `bash` and only asks when

@@ -222,6 +222,15 @@ def test_chat_config_reads_and_validates(tmp_path, monkeypatch):
     assert cfg.codex_sandbox == ""            # wrong type -> default
 
 
+def test_chat_bell_is_on_unless_turned_off(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, '[chat]\nshow_thinking = true\n')
+    assert load_chat_config().bell is True
+    _write_config(tmp_path, monkeypatch, '[chat]\nbell = false\n')
+    assert load_chat_config().bell is False
+    _write_config(tmp_path, monkeypatch, '[chat]\nbell = "no"\n')
+    assert load_chat_config().bell is True     # wrong type -> default
+
+
 def test_chat_config_keeps_known_codex_vocabularies(tmp_path, monkeypatch):
     _write_config(
         tmp_path, monkeypatch,
