@@ -37,6 +37,25 @@ def test_enter_sets_the_region_and_bracketed_paste(screen):
     assert s.region_rows == 21
 
 
+def test_a_fresh_enter_scrolls_the_old_screen_into_scrollback(screen):
+    """The window opens on whatever the terminal was showing — a previous
+    session, the shell. Left in place, the region's first rows overwrite it
+    cell by cell. One LF per row from the bottom row, before the region is
+    set, pushes it all into scrollback rather than erasing it."""
+    s, out = screen
+    s.enter(fresh=True)
+    t = out.text()
+    push = f"\x1b[{s.rows};1H" + "\r\n" * s.rows
+    assert push in t and "\x1b[2J" not in t and "\x1b[3J" not in t
+    assert t.index(push) < t.index("\x1b[1;21r")
+
+
+def test_a_repaint_enter_keeps_the_conversation_on_screen(screen):
+    s, out = screen
+    s.enter()
+    assert "\r\n" not in out.text()
+
+
 def test_leave_resets_everything(screen):
     s, out = screen
     s.enter(); out.text(clear=True); s.leave()
