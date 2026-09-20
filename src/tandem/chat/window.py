@@ -138,8 +138,8 @@ class Window:
         return " · ".join(parts)
 
     def paint(self) -> None:
-        text, col = self.composer.line(self.screen.cols)
-        self.screen.paint_bottom(self.bar_line(), text, col, focus_composer=True)
+        rows, row, col = self.composer.rows(self.screen.cols, self.screen.composer_max_rows)
+        self.screen.paint_bottom(self.bar_line(), rows, row, col, focus_composer=True)
 
     def resize(self, rows: int, cols: int) -> None:
         """SIGWINCH: the scroll region and the bar move together, and the
