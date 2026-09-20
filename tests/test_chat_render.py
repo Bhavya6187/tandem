@@ -127,7 +127,7 @@ def test_turn_and_tool_rows(screen):
     assert "  ▸ exec pytest -q\r\n    l1\r\n    l2\r\n" in t
     assert "l3" not in t
     assert "    … +2 lines\r\n    ok · exit 0\r\n" in t
-    assert "\r\n  completed · 1000↑ 200↓\r\n" in t
+    assert "\r\n  ✓ done · 1000↑ 200↓\r\n" in t
     assert not re.search(r"(?<!\r)\n", t)   # raw tty: never a bare LF
 
 
@@ -440,3 +440,87 @@ def test_history_paints_normalized_events(screen):
     t = out.text()
     assert "you → claude  fix it\r\n" in t and "claude\r\nDone.\r\n" in t
     assert "  ▸ Bash pytest\r\n    12 passed\r\n" in t
+
+
+# -- the activity line and the closing row -------------------------------------
+
+
+def _separator(text: str, row: int = 22) -> str:
+    """What was painted on the separator row, up to the next cursor move."""
+    start = text.index(f"\x1b[{row};1H") + len(f"\x1b[{row};1H")
+    return text[start:text.index("\x1b[", start)]
+
+
+def test_the_separator_carries_the_activity_at_full_width(screen):
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True, activity="⠋ claude · thinking · 3s")
+    row = _separator(out.text())
+    assert row == "── ⠋ claude · thinking · 3s " + "─" * 12
+    assert len(row) == 40
+
+
+def test_an_activity_wider_than_the_row_is_cut_not_wrapped(screen):
+    """One cell past the edge wraps onto the bar's row and the bar's paint
+    then lands a row low."""
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True, activity="x" * 80)
+    assert len(_separator(out.text())) == 40
+
+
+def test_an_idle_separator_is_the_plain_rule(screen):
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True, activity="⠋ claude · writing · 1s")
+    out.text(clear=True)
+    s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True)
+    assert _separator(out.text()) == "─" * 40
+
+
+def test_a_waiting_activity_is_bold_not_dim():
+    out = Out()
+    s = Screen(out, rows=24, cols=40, cfg=ChatConfig(), color=True)
+    s.enter(); out.text(clear=True)
+    s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True,
+                   activity="● claude is waiting for your answer", urgent=True)
+    t = out.text()
+    assert "\x1b[22;1H\x1b[1m── ● claude is waiting" in t
+    out.text(clear=True)
+    s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True, activity="⠋ claude · writing · 1s")
+    assert "\x1b[22;1H\x1b[2m── ⠋ claude" in out.text()
+
+
+@pytest.mark.parametrize("event, elapsed, want", [
+    (TurnFinished("completed", ""), 42.0, "  ✓ done · 42s"),
+    (TurnFinished("completed", "1000↑ 200↓"), 42.0, "  ✓ done · 42s · 1000↑ 200↓"),
+    (TurnFinished("interrupted", ""), 8.2, "  ■ interrupted · 8s"),
+    (TurnFinished("failed", ""), 3.0, "  ✗ failed · 3s"),
+    (TurnFinished("completed", ""), None, "  ✓ done"),
+])
+def test_every_turn_ends_with_a_closing_row(screen, event, elapsed, want):
+    """A completed turn with no usage used to end on nothing at all: a
+    finished answer and a model still thinking looked the same."""
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.turn_started(TurnStarted("claude", "", "go")); s.text_delta(TextDelta("ok"))
+    out.text(clear=True)
+    s.turn_finished(event, elapsed)
+    assert out.text() == "\r\n" + want + "\r\n"
+
+
+def test_the_activity_cannot_drive_the_terminal(screen):
+    """The phase names the running tool, and a tool name is the harness's
+    string like any other."""
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True, activity="⠋ codex · running \x1b[2Jx")
+    assert "\x1b[2J" not in out.text() and "running x" in out.text()
+
+
+def test_a_wide_glyph_in_the_activity_counts_two_cells(screen):
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True, activity="漢" * 30)
+    row = _separator(out.text())
+    assert row == "── " + "漢" * 18 + " "

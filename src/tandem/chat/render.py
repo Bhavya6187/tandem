@@ -27,6 +27,7 @@ from ..events import AssistantMessage, ToolCall, ToolResult, UserMessage
 from .events import (ApprovalRequest, Failure, QuestionRequest, TextDelta, ThinkingDelta,
                      ToolFinished, ToolOutput, ToolStarted, TurnFinished, TurnStarted,
                      offered_labels)
+from .activity import elapsed_text
 from .runtime import first_line, summarize_args
 
 _CSI = "\x1b["
@@ -59,6 +60,19 @@ def _safe(text: str) -> str:
 def _cells(text: str) -> int:
     return sum(2 if east_asian_width(ch) in ("W", "F") else 1
                for ch in _CSI_RE.sub("", text))
+
+
+def _clip(text: str, cells: int) -> str:
+    """The longest prefix of unstyled `text` that fits in `cells`."""
+    used = 0
+    for i, ch in enumerate(text):
+        used += 2 if east_asian_width(ch) in ("W", "F") else 1
+        if used > cells:
+            return text[:i]
+    return text
+
+
+_CLOSING = {"completed": "✓ done", "interrupted": "■ interrupted", "failed": "✗ failed"}
 
 
 class Screen:
@@ -257,13 +271,18 @@ class Screen:
         if not ev.options:
             self.line(self._dim("    (type an answer)"))
 
-    def turn_finished(self, ev: TurnFinished) -> None:
+    def turn_finished(self, ev: TurnFinished, elapsed: float | None = None) -> None:
+        """Every turn gets a closing row, a completed one with nothing to
+        report included: the region is append-only, and without it a finished
+        answer and a model gone quiet look the same."""
         if self._col:
             self.print("\n")
+        bits = [_CLOSING.get(ev.status, _safe(ev.status))]
+        if elapsed is not None:
+            bits.append(elapsed_text(elapsed))
         if ev.usage:
-            self.line(self._dim(f"  {ev.status} · {ev.usage}"))
-        elif ev.status != "completed":
-            self.line(self._dim(f"  {ev.status}"))
+            bits.append(ev.usage)
+        self.line(self._dim("  " + " · ".join(bits)))
 
     def failure(self, ev: Failure) -> None:
         # a failure message is usually the harness's own: a stderr tail, a
@@ -272,6 +291,9 @@ class Screen:
 
     def note(self, text: str) -> None:
         self.line(self._dim(text))
+
+    def bell(self) -> None:
+        self._w("\x07")                 # moves nothing, so it is safe from either focus
 
     def history(self, events, source: str) -> None:
         """Paint transcript events the adapters already parsed, tagged by the
@@ -309,15 +331,27 @@ class Screen:
         return self._region_cmd() + "".join(f"{_CSI}{r};1H{_CSI}2K"
                                             for r in range(old_top, self.region_rows + 1))
 
+    def _separator(self, activity: str, urgent: bool) -> str:
+        """The rule over the bar, carrying the activity line while a turn
+        runs: `── ⠹ claude · thinking · 12s ────`. Exactly `cols` cells — one
+        more wraps onto the bar's row."""
+        if not activity:
+            return self._dim("─" * self.cols)
+        text = "── " + _clip(_safe(activity), max(0, self.cols - 4)) + " "
+        text = _clip(text, self.cols)
+        text += "─" * (self.cols - _cells(text))
+        return self._bold(text) if urgent else self._dim(text)
+
     def paint_bottom(self, bar_line: str, composer_rows: list[str], cursor_row: int,
-                     cursor_col: int, focus_composer: bool) -> None:
+                     cursor_col: int, focus_composer: bool, *, activity: str = "",
+                     urgent: bool = False) -> None:
         composer_rows = composer_rows[: self.rows - 3] or [""]
         moved = len(composer_rows) != self._bottom
         out = ["\x1b7"]
         if moved:
             out.append(self._fit_bottom(len(composer_rows)))
         top = self.region_rows + 1
-        out += [f"{_CSI}{top};1H" + self._dim("─" * self.cols),
+        out += [f"{_CSI}{top};1H" + self._separator(activity, urgent),
                 f"{_CSI}{top + 1};1H{_CSI}7m" + bar_line[: self.cols].ljust(self.cols) + f"{_CSI}0m"]
         out += [f"{_CSI}{top + 2 + i};1H{_CSI}2K" + row[: self.cols]
                 for i, row in enumerate(composer_rows)]
