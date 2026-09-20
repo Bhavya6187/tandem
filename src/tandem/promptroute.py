@@ -1,6 +1,11 @@
-"""The chat window's routing grammar: leading `/harness[:model]` or
-`@harness:model`. Bare @mentions remain file mentions; only an explicit
-model selector opts into @ routing. Other text passes through verbatim.
+"""The chat window's routing grammar: a leading `/harness[:model]`.
+
+`/` is the command sigil in all three TUIs and `@` is their file-mention
+sigil (headless claude still expands `@file`, and the window's own picker
+opens on it), so routes are spelled with `/` and `@` is never touched.
+Everything that is not one of the three harness names at the very start of
+the prompt is not tandem's: it goes to the current harness verbatim, slash
+commands included.
 
 Returning None means "not a route". Raising RouteError means the user
 clearly wrote a route that tandem cannot honor (a non-participant, or a
@@ -23,7 +28,7 @@ HARNESSES = ("claude", "codex", "opencode")
 # model name may not carry a slash either, with one exception below.
 _MODEL = r"[A-Za-z0-9._-]+"
 _ROUTE_RE = re.compile(
-    rf"[/@]({'|'.join(HARNESSES)})(?::({_MODEL}(?:/{_MODEL})*))?(?=\s|$)")
+    rf"/({'|'.join(HARNESSES)})(?::({_MODEL}(?:/{_MODEL})*))?(?=\s|$)")
 
 
 @dataclass(frozen=True)
@@ -46,8 +51,6 @@ def parse_route(
     if m is None:
         return None
     harness, model = m.group(1), m.group(2)
-    if text.startswith("@") and model is None:
-        return None
     # The exception: opencode names its models `provider/modelID`, and the
     # id may itself carry slashes (`openrouter/anthropic/claude-sonnet-4`),
     # because opencode splits on the first one only. A slash belongs inside
