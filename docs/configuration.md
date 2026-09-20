@@ -180,8 +180,20 @@ Ctrl-Cs do), `/status` (print the session id, the default harness, the
 participants and any model pins) and `/skip-permissions [on|off]` (turn
 claude's and codex's permission prompts off or on from the next turn —
 see [`skip_permissions`](#skip_permissions--no-permission-prompts-in-claude-and-codex)); every other leading `/word` goes to the
-current harness as its own slash command, and `@path` mentions reach it
-untouched.
+current harness as its own slash command.
+
+You can also use `@harness:model`, for example `@codex:astra` or
+`@claude:fable`. The `@` form requires a model; bare `@codex` and `@path`
+remain file mentions. Codex shorthand is matched against its local model
+catalog: `astra` selects `gpt-6-astra` when that is the unique match.
+Unknown or ambiguous names are rejected with available model names.
+If the catalog is unavailable, the name passes through verbatim; use a full
+model ID in that case. Claude names go by family: `fable`, `opus`, `sonnet` or
+`haiku` alone is claude's own alias for the latest model of that family,
+`fable-5-1` or `fable-5.1` becomes `claude-fable-5-1`, a name that already
+contains `claude` passes through as written, and anything else is rejected.
+Opencode models are spelled `provider/model`. No model selector preserves
+the saved pin, and `@codex:default` clears it just like `/codex:default`.
 
 Typing `@` opens a file picker under the draft. It lists the session
 directory's files and directories (git's tracked and untracked-but-not-ignored

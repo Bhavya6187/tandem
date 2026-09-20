@@ -137,3 +137,9 @@ participant.
 Startup flags for the harnesses themselves (`[claude]` / `[codex]` /
 `[opencode]` args) are not a subagent setting; they live in the
 [configuration reference](configuration.md).
+
+Model names passed with `tandem sub --model` use the same local Codex catalog
+resolution as `tandem-model:` headers and chat routes. For example,
+`--model astra` resolves to `gpt-6-astra` when available. The flag takes
+precedence over the header. Without a flag or header, the configured default
+is preserved. If the catalog is unavailable, names pass through verbatim.

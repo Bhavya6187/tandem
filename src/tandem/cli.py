@@ -648,7 +648,7 @@ def _chat(harness: str | None, fresh: bool, resume_id: str | None = None,
 
 @main.command()
 @click.option("-m", "--model", default=None,
-              help="Codex model for this worker (config default otherwise).")
+              help="Codex model name or shorthand (config default otherwise).")
 @click.option("--context", "context_mode",
               type=click.Choice(["task", "full"]), default=None,
               help="Worker context: cold task-only, or a full fork of the "
@@ -697,18 +697,19 @@ def sub(model: str | None, context_mode: str | None, quiet: bool,
         # header path below (resolution, announcement, trailer). -m callers
         # never rode the header protocol, so they skip the lookup.
         requested = pinstash.lookup(task)
+    selected = model if model is not None else requested
     resolved = ""
-    if requested:
+    if selected:
         try:
-            resolved = modelcat.resolve(requested, modelcat.load_catalog())
+            resolved = modelcat.resolve(selected, modelcat.load_catalog())
         except modelcat.UnknownModel as e:
             click.secho(f"error: {e}", fg="red", err=True)
             sys.exit(1)
     cfg = load_subagents_config()
     # A standin header ("gpt") resolves to "" and falls through to the config
     # default here, exactly like no header at all; the flag still outranks both.
-    worker_model = model if model is not None else (resolved or cfg.model)
-    if requested and not quiet:
+    worker_model = resolved if model is not None else (resolved or cfg.model)
+    if selected and not quiet:
         click.secho(f"worker model: {modelcat.model_label(worker_model)}",
                     err=True)
     with StateStore() as store:
