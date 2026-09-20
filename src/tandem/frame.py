@@ -240,7 +240,8 @@ class StatusBar:
         self.hint = hint
         # Per-slot words that say how a harness runs (the chat window's
         # `skip-perms`), not how far it has run: they lead the slot and no
-        # elision tier drops them.
+        # elision tier drops them. A word every slot shares is said once,
+        # after the slots.
         self.marks: dict[str, str] = {}
 
     def resize(self, rows: int, cols: int) -> None:
@@ -264,16 +265,21 @@ class StatusBar:
         parts = [pt for pt in usage.split(" · ") if pt] if usage else []
         limits = limits or {}
 
+        # One word on every slot is a fact about the window: repeating it per
+        # slot only spends the columns the stats need.
+        words = {self.marks.get(name, "") for name in [self.active, *self.others]}
+        shared = words.pop() if len(words) == 1 else ""
+
         def compose(stats: list[str], with_limits: bool) -> str:
             def slot(name: str, glyph: str, extra: list[str]) -> str:
-                mark = self.marks.get(name, "")
+                mark = "" if shared else self.marks.get(name, "")
                 lim = limits.get(name, "") if with_limits else ""
                 bits = ([mark] if mark else []) + [*extra] + ([lim] if lim else [])
                 return f"{name} {glyph}" + (f" {' · '.join(bits)}" if bits else "")
             slots = [slot(self.active, "●", stats)]
             slots += [slot(o, "○", []) for o in self.others]
             trailer = self.hint if self.hint is not None else f"{self.key_label} flips"
-            return f" {' │ '.join(slots)}   {trailer}"
+            return f" {' │ '.join(slots)}   " + (f"{shared}   " if shared else "") + trailer
 
         # Elision order when the row is too narrow: the ↑↓ totals first, the
         # rate limits second, the ctx figure third — the numbers that decide a

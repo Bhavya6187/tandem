@@ -671,8 +671,9 @@ def test_an_explicit_codex_approval_policy_keeps_codex_unmarked(env_factory):
     w, *_ = make_window(env, cfg=ChatConfig(skip_permissions=True, codex_approval_policy="on-request"))
     line = w.bar_line()
     assert "claude ● skip-perms" in line and "codex ○ skip-perms" not in line
+    # with codex skipping too the word covers the window and is said once
     w, *_ = make_window(env, cfg=ChatConfig(skip_permissions=True, codex_approval_policy="never"))
-    assert "codex ○ skip-perms" in w.bar_line()
+    assert "claude ● │ codex ○   skip-perms   " in w.bar_line()
 
 
 class TestSkipPermissionsCommand:
@@ -685,7 +686,7 @@ class TestSkipPermissionsCommand:
         assert d.submitted == []
         assert w.cfg.skip_permissions is True and d.cfgs == [w.cfg]
         assert "permissions skipped from the next turn" in out.text()
-        assert "claude ● skip-perms" in out.text()              # the bar is repainted with it
+        assert "codex ○   skip-perms   " in out.text()          # the bar is repainted with it
         w.handle_input(b"/skip-permissions\r")
         assert w.cfg.skip_permissions is False and d.cfgs[-1] is w.cfg
         assert "permissions asked from the next turn" in out.text()

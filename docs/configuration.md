@@ -47,8 +47,8 @@ skip_permissions = true
 This removes the harnesses' own safety rails: commands run and files
 change without asking, and codex runs unsandboxed. Set it only if that
 is what you want. In the chat window the bar marks each slot it applies
-to with `skip-perms` and `/status` reads `permissions skipped` while it
-is on, claude's questions to you (`AskUserQuestion`) still appear, and an
+to with `skip-perms` (once, after the slots, when that is every slot) and
+`/status` reads `permissions skipped` while it is on, claude's questions to you (`AskUserQuestion`) still appear, and an
 explicit `[chat] codex_approval_policy` / `codex_sandbox` still wins over
 the switch for codex. opencode is
 untouched — it has no such flag, and its permissions live in its own
