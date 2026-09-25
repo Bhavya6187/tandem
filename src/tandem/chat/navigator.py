@@ -460,6 +460,11 @@ class Navigator:
             self.reviewer.close()
         except Exception:
             pass
+        # bounded: the killed reviewer ends the worker at once; a wedged one
+        # must not hold the window's quit for longer than this
+        t = self._thread
+        if t is not None and t.is_alive() and t is not threading.current_thread():
+            t.join(5.0)
 
     def join(self, timeout: float) -> None:
         """Tests: wait for the worker (and whatever it started) to finish."""

@@ -58,6 +58,7 @@ class CodexReviewer:
         self.cfg, self.store, self.binary = cfg, store, binary
         self._rt: CodexRuntime | None = None
         self._lock = threading.Lock()
+        self._closed = False        # the window quit: start nothing, leave no fork behind
 
     def review(self, session, model: str, prompt: str, schema: dict,
                shadow_lock: threading.Lock) -> ReviewResult:
@@ -72,6 +73,8 @@ class CodexReviewer:
         col = Collector()
         try:
             with self._lock:
+                if self._closed:
+                    raise ReviewError("closed")   # the finally deletes the fork
                 self._rt = rt
             outcome = rt.run_turn(session, fork_id, prompt, model, col, DenyAll())
         finally:
@@ -84,6 +87,7 @@ class CodexReviewer:
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             rt = self._rt
         if rt is not None:
             rt.close()
@@ -96,6 +100,7 @@ class ClaudeReviewer:
         self.cfg, self.binary = cfg, binary
         self._rt: ClaudeRuntime | None = None
         self._lock = threading.Lock()
+        self._closed = False        # the window quit: spawn nothing
 
     def review(self, session, model: str, prompt: str, schema: dict,
                shadow_lock: threading.Lock) -> ReviewResult:
@@ -124,6 +129,8 @@ class ClaudeReviewer:
         shadow_lock.acquire()
         try:
             with self._lock:
+                if self._closed:
+                    raise ReviewError("closed")   # the finally releases the shadow lock
                 self._rt = rt
             outcome = rt.run_turn(session, sid, prompt, model, col, DenyAll())
         finally:
@@ -141,6 +148,7 @@ class ClaudeReviewer:
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             rt = self._rt
         if rt is not None:
             rt.close()

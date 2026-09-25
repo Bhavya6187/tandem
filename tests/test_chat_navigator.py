@@ -505,6 +505,17 @@ def test_close_reaches_the_reviewer_and_stops_new_work(tmp_path):
     assert reviewer.calls == []
 
 
+def test_close_waits_for_the_review_in_flight(tmp_path):
+    nav, reviewer, posted, log = make_nav([CLEAN], tmp_path)
+    reviewer.gate.clear()
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION)
+    assert nav.mark() == "reviewing"
+    threading.Timer(0.1, reviewer.gate.set).start()
+    nav.close()                                     # returns once the worker is gone
+    assert reviewer.closed == 1 and nav._running is False
+    assert not nav._thread.is_alive() and len(finished(posted)) == 1
+
+
 def test_a_reply_the_log_cannot_encode_still_finishes_the_review(tmp_path):
     bad = ReviewResult({"verdict": "speak", "severity": "block", "note": "\ud800 bad",
                         "evidence": [{"file": "s.py", "line": 1, "why": "w"}]}, "")

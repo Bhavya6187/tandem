@@ -95,6 +95,24 @@ def test_codex_review_failure_is_a_review_error_and_still_deletes_the_fork(codex
     assert forks and not forks[0][1].exists()
 
 
+def test_a_codex_review_closed_while_forking_deletes_the_fork_and_spawns_nothing(codex_env, monkeypatch):
+    env = codex_env
+    r = CodexReviewer(ChatConfig(), env.store, binary=[sys.executable, str(FAKE_CODEX)])
+    forks = []
+    real_fork = ops.fork_shadow
+
+    def fork_then_close(store, session):
+        forks.append(real_fork(store, session))
+        r.close()                                   # the window quit while the fork was copied
+        return forks[-1]
+
+    monkeypatch.setattr(ops, "fork_shadow", fork_then_close)
+    with pytest.raises(ReviewError, match="closed"):
+        r.review(env.session, "", "p", {}, threading.Lock())
+    assert forks and not forks[0][1].exists()
+    assert not (env.tmp / "argv.json").exists()     # no app-server was spawned
+
+
 def test_codex_review_without_a_shadow_is_a_review_error(env_factory, monkeypatch):
     env = env_factory(active="codex", seed_active=False)       # codex has no id yet
     r = CodexReviewer(ChatConfig(), env.store, binary=[sys.executable, str(FAKE_CODEX)])
@@ -176,6 +194,18 @@ def test_claude_review_without_a_shadow_is_a_review_error(env_factory):
     r = ClaudeReviewer(ChatConfig(), binary=[sys.executable, str(FAKE_CLAUDE)])
     with pytest.raises(ReviewError):
         r.review(env.session, "", "p", {}, threading.Lock())
+
+
+def test_a_closed_claude_reviewer_starts_no_review_and_releases_the_lock(claude_env):
+    env = claude_env
+    r = ClaudeReviewer(ChatConfig(), binary=[sys.executable, str(FAKE_CLAUDE)])
+    r.close()
+    lock = threading.Lock()
+    with pytest.raises(ReviewError, match="closed"):
+        r.review(env.session, "", "p", {}, lock)
+    assert not lock.locked()
+    with pytest.raises(FileNotFoundError):
+        env.argv()                                  # claude was never spawned
 
 
 def test_claude_review_crash_is_a_review_error_and_releases_the_lock(claude_env, monkeypatch):
