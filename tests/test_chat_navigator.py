@@ -287,3 +287,185 @@ def test_log_read_skips_a_line_torn_mid_utf8_character(tmp_path):
     p = tmp_path / "x.jsonl"
     p.write_bytes('{"kind":"review","ts":"1"}\n{"kind":"review","prompt":"é'.encode("utf-8")[:-1])
     assert NavigatorLog.read(p) == [{"kind": "review", "ts": "1"}]
+
+
+from types import SimpleNamespace
+from tandem.chat.events import ReviewFinished, ReviewStarted
+from tandem.chat.navigator import Navigator, Note, ReviewError, ReviewResult
+from tandem.config import ChatConfig
+
+SESSION = SimpleNamespace(cwd="/tmp/nowhere", tandem_id="tdm-nav", participants=["claude", "codex"])
+
+
+class FakeReviewer:
+    """Scripted results, released one at a time so tests can observe the
+    in-flight state. `results` items are ReviewResult, or an Exception."""
+    harness = "codex"
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+        self.gate = threading.Event()
+        self.gate.set()
+        self.closed = 0
+
+    def review(self, session, model, prompt, schema, shadow_lock):
+        self.calls.append((model, prompt))
+        self.gate.wait(5)
+        r = self.results.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    def close(self):
+        self.closed += 1
+
+
+def speak(note="bad loop", file="s.py", line=12):
+    return ReviewResult({"verdict": "speak", "severity": "block", "note": note,
+                         "evidence": [{"file": file, "line": line, "why": "w"}]}, "")
+
+
+CLEAN = ReviewResult({"verdict": "clean"}, "")
+
+
+def make_nav(results, tmp_path, cfg=None, **kw):
+    posted = []
+    reviewer = FakeReviewer(results)
+    log = NavigatorLog(tmp_path / "log.jsonl")
+    opts = dict(headroom=lambda: True, clock=Clock(), diff=lambda cwd, paths, commands, **k: "DIFF")
+    opts.update(kw)
+    nav = Navigator("codex", cfg or ChatConfig(navigator="codex"), reviewer, posted.append, log, **opts)
+    return nav, reviewer, posted, log
+
+
+def finished(posted):
+    return [e for e in posted if isinstance(e, ReviewFinished)]
+
+
+def test_a_gated_turn_runs_one_review_and_posts_both_events(tmp_path):
+    nav, reviewer, posted, log = make_nav([CLEAN], tmp_path)
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION)
+    nav.join(5)
+    assert [type(e).__name__ for e in posted] == ["ReviewStarted", "ReviewFinished"]
+    assert posted[0].harness == "codex" and posted[1].verdict.verdict == "clean"
+    assert reviewer.calls[0][1].startswith("[tandem navigator]") and "DIFF" in reviewer.calls[0][1]
+    recs = NavigatorLog.read(log.path)
+    assert recs[-1]["gate"] == "review" and recs[-1]["verdict"] == "clean"
+    assert nav.mark() == "" and nav.pending() is None
+
+
+def test_a_skipped_turn_is_logged_and_runs_nothing(tmp_path):
+    nav, reviewer, posted, log = make_nav([CLEAN], tmp_path)
+    nav.turn_ended(facts_with(), SESSION)
+    nav.join(1)
+    assert posted == [] and reviewer.calls == []
+    assert NavigatorLog.read(log.path)[-1]["gate"] == "skip:quiet"
+
+
+def test_a_spoken_note_is_pending_marks_the_bar_and_rides_only_the_navigator_in_bar_mode(tmp_path):
+    nav, reviewer, posted, log = make_nav([speak()], tmp_path)
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION)
+    nav.join(5)
+    note = nav.pending()
+    assert isinstance(note, Note) and note.verdict.note == "bad loop" and nav.mark() == "note"
+    assert note.summary == "bad loop"
+    assert nav.take("claude") is None and nav.pending() is note        # bar mode: not for claude
+    got = nav.take("codex")
+    assert got is note and nav.pending() is None and nav.mark() == ""
+    assert "[tandem navigator] codex reviewed the previous claude turn and flagged (block): bad loop" in got.trailer()
+    assert got.trailer().startswith("\n\n") and "s.py:12 — w" in got.trailer()
+    recs = NavigatorLog.read(log.path)
+    assert recs[-1]["kind"] == "ridden" and recs[-1]["to"] == "codex" and recs[-1]["ref"] == note.ref
+
+
+def test_prompt_mode_rides_any_harness(tmp_path):
+    nav, *_ = make_nav([speak()], tmp_path, cfg=ChatConfig(navigator="codex", navigator_deliver="prompt"))
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION)
+    nav.join(5)
+    assert nav.take("claude") is not None
+
+
+def test_dismiss_with_feedback_logs_it(tmp_path):
+    nav, reviewer, posted, log = make_nav([speak()], tmp_path)
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION)
+    nav.join(5)
+    ref = nav.pending().ref
+    assert nav.dismiss("bad") is True and nav.pending() is None
+    assert nav.dismiss() is False
+    rec = NavigatorLog.read(log.path)[-1]
+    assert rec == {"ts": rec["ts"], "kind": "feedback", "ref": ref, "value": "bad"}
+
+
+def test_a_newer_turn_replaces_the_pending_one_while_a_review_runs(tmp_path):
+    nav, reviewer, posted, log = make_nav([CLEAN, CLEAN], tmp_path)
+    reviewer.gate.clear()
+    nav.turn_ended(facts_with(prompt="first", paths=("a.py",)), SESSION)
+    nav.turn_ended(facts_with(prompt="second", paths=("b.py",)), SESSION)
+    nav.turn_ended(facts_with(prompt="third", paths=("c.py",)), SESSION)
+    assert nav.mark() == "reviewing"
+    reviewer.gate.set()
+    nav.join(5)
+    assert len(finished(posted)) == 2
+    assert [f"{'a' if 'a.py' in p else 'c'}" for _, p in reviewer.calls] == ["a", "c"]
+    # the replaced turn is logged the moment it is replaced, before the
+    # first review finishes, so compare by prompt rather than by order
+    assert {r["prompt"]: r["gate"] for r in NavigatorLog.read(log.path) if r["kind"] == "review"} == {
+        "first": "review", "second": "skip:replaced", "third": "review"}
+
+
+def test_interval_and_dedupe(tmp_path):
+    clock = Clock()
+    # the second turn is skipped at the gate, so it pops no result
+    nav, reviewer, posted, log = make_nav([speak(), speak(file="t.py"), speak(file="t.py")],
+                                          tmp_path, cfg=ChatConfig(navigator="codex", navigator_interval=100),
+                                          clock=clock)
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(5)
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(5)       # inside the interval
+    assert NavigatorLog.read(log.path)[-1]["gate"] == "skip:interval"
+    clock.now += 101
+    nav.dismiss()
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(5)       # new evidence: spoken
+    assert finished(posted)[-1].verdict.spoken
+    clock.now += 101
+    nav.dismiss()
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(5)       # same evidence: dup
+    assert finished(posted)[-1].verdict.verdict == "dup" and nav.pending() is None
+
+
+def test_three_failures_disable_the_navigator_for_the_window(tmp_path):
+    boom = [ReviewError("no fork"), ReviewResult(None, "not json"), RuntimeError("bug")]
+    nav, reviewer, posted, log = make_nav(boom + [CLEAN], tmp_path)
+    for _ in range(4):
+        nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(5)
+    verdicts = [e.verdict.verdict for e in finished(posted)]
+    assert verdicts == ["error", "error", "off"]
+    assert "bug" in finished(posted)[-1].verdict.error
+    assert NavigatorLog.read(log.path)[-1]["gate"] == "skip:disabled"
+    assert reviewer.results == [CLEAN]                                     # never ran
+
+
+def test_a_success_resets_the_failure_count(tmp_path):
+    nav, reviewer, posted, log = make_nav([ReviewError("x"), ReviewError("y"), CLEAN, ReviewError("z"), CLEAN],
+                                          tmp_path)
+    for _ in range(5):
+        nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(5)
+    assert [e.verdict.verdict for e in finished(posted)] == ["error", "error", "clean", "error", "clean"]
+
+
+def test_headroom_is_asked_per_turn(tmp_path):
+    ok = [False]
+    nav, reviewer, posted, log = make_nav([CLEAN], tmp_path, headroom=lambda: ok[0])
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(1)
+    assert NavigatorLog.read(log.path)[-1]["gate"] == "skip:headroom"
+    ok[0] = True
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(5)
+    assert finished(posted)
+
+
+def test_close_reaches_the_reviewer_and_stops_new_work(tmp_path):
+    nav, reviewer, posted, log = make_nav([CLEAN], tmp_path)
+    nav.close()
+    assert reviewer.closed == 1
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(1)
+    assert reviewer.calls == []

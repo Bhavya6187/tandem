@@ -16,10 +16,11 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 from .. import paths
-from .events import Evidence, LiveEvent, TextDelta, ToolFinished, ToolStarted, Verdict
+from .events import (Evidence, LiveEvent, ReviewFinished, ReviewStarted, TextDelta, ToolFinished,
+                     ToolStarted, Verdict)
 
 # the command tool as each client names it (tandem's own labels for codex)
 COMMAND_TOOLS = frozenset({"Bash", "exec", "bash", "shell"})
@@ -304,3 +305,193 @@ class NavigatorLog:
         return {"reviewed": len(reviewed), "spoken": len(spoken),
                 "skipped": len(reviews) - len(reviewed), "good": good, "bad": bad,
                 "helpful": good / (good + bad) if good + bad else None}
+
+
+class ReviewError(RuntimeError):
+    """A review that could not run: no shadow, the fork failed, the
+    process died. Logged as an error verdict, never raised past the worker."""
+
+
+@dataclass
+class ReviewResult:
+    structured: object | None   # claude's structured_output, or None
+    text: str                   # the final assistant text (codex puts its JSON here)
+
+
+class Reviewer(Protocol):
+    harness: str
+
+    def review(self, session, model: str, prompt: str, schema: dict,
+               shadow_lock: threading.Lock) -> ReviewResult: ...
+
+    def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class Note:
+    ref: str                    # the log record it came from
+    navigator: str
+    turn_harness: str
+    verdict: Verdict
+
+    @property
+    def summary(self) -> str:
+        head = self.verdict.note.split("\n", 1)[0]
+        return head if len(head) <= 60 else head[:59] + "…"
+
+    def trailer(self) -> str:
+        """Appended after the user's text: their words lead, so titles and
+        the `[tandem` skip rules are untouched."""
+        lines = [f"[tandem navigator] {self.navigator} reviewed the previous {self.turn_harness} "
+                 f"turn and flagged ({self.verdict.severity or 'note'}): {self.verdict.note}"]
+        lines += [f"{e.file}:{e.line}" + (f" — {e.why}" if e.why else "") for e in self.verdict.evidence]
+        return "\n\n" + "\n".join(lines)
+
+
+_MAX_FAILURES = 3
+
+
+class Navigator:
+    """One review in flight, one pending slot (newest wins), one pending
+    note. `turn_ended` is called on the dispatcher's worker after sync and
+    returns at once; the review runs on this object's own thread and posts
+    ReviewStarted / ReviewFinished through the window's queue."""
+
+    def __init__(self, harness: str, cfg, reviewer: Reviewer, post: Callable[[LiveEvent], None],
+                 log: NavigatorLog, *, headroom: Callable[[], bool] = lambda: True,
+                 clock: Callable[[], float] = time.monotonic, diff=compute_diff):
+        self.harness, self.cfg, self.reviewer, self.post, self.log = harness, cfg, reviewer, post, log
+        self._headroom, self._clock, self._diff = headroom, clock, diff
+        self.shadow_lock = threading.Lock()
+        self._lock = threading.Lock()
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._pending: tuple[TurnFacts, object] | None = None
+        self._note: Note | None = None
+        self._spoken_evidence: set[tuple[str, int]] = set()
+        self._last_spoken = float("-inf")
+        self._failures = 0
+        self._disabled = False
+        self._closed = False
+
+    # -- what the dispatcher and the window ask ------------------------------
+
+    def turn_ended(self, facts: TurnFacts, session) -> None:
+        try:
+            reason = gate(facts, navigator=self.harness, headroom_ok=self._headroom(),
+                          interval_ok=self._clock() - self._last_spoken >= self.cfg.navigator_interval,
+                          disabled=self._disabled or self._closed)
+            if reason:
+                self.log.review(facts, reason, None)
+                return
+            with self._lock:
+                if self._running:
+                    if self._pending is not None:
+                        self.log.review(self._pending[0], "skip:replaced", None)
+                    self._pending = (facts, session)
+                    return
+                self._start(facts, session)
+        except Exception:                          # the navigator must never take the window down
+            pass
+
+    def take(self, harness: str) -> Note | None:
+        with self._lock:
+            note = self._note
+            if note is None or not (self.cfg.navigator_deliver == "prompt" or harness == self.harness):
+                return None
+            self._note = None
+        self.log.ridden(note.ref, harness)
+        return note
+
+    def pending(self) -> Note | None:
+        return self._note
+
+    def dismiss(self, feedback: str | None = None) -> bool:
+        with self._lock:
+            note, self._note = self._note, None
+        if note is None:
+            return False
+        if feedback in ("good", "bad"):
+            self.log.feedback(note.ref, feedback)
+        return True
+
+    def mark(self) -> str:
+        if self._running:
+            return "reviewing"
+        return "note" if self._note is not None else ""
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._pending = None
+        try:
+            self.reviewer.close()
+        except Exception:
+            pass
+
+    def join(self, timeout: float) -> None:
+        """Tests: wait for the worker (and whatever it started) to finish."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            t = self._thread
+            if t is None or not t.is_alive():
+                with self._lock:
+                    if not self._running:
+                        return
+            time.sleep(0.01)
+
+    # -- the worker ----------------------------------------------------------
+
+    def _start(self, facts: TurnFacts, session) -> None:
+        """Call with _lock held."""
+        self._running = True
+        self._thread = threading.Thread(target=self._run, args=(facts, session),
+                                        name="tandem-chat-navigator", daemon=True)
+        self._thread.start()
+
+    def _run(self, facts: TurnFacts, session) -> None:
+        self.post(ReviewStarted(self.harness))
+        started = self._clock()
+        model = self.cfg.navigator_model
+        try:
+            diff = self._diff(session.cwd, facts.paths, facts.commands)
+            result = self.reviewer.review(session, model, build_prompt(facts, diff), SCHEMA,
+                                          self.shadow_lock)
+            verdict = parse_verdict(result.structured, result.text, navigator=self.harness,
+                                    model=model, elapsed=self._clock() - started)
+        except Exception as exc:
+            verdict = Verdict("error", error=f"{type(exc).__name__}: {exc}"[:200],
+                              navigator=self.harness, model=model, elapsed=self._clock() - started)
+        verdict = self._settle(verdict)
+        ref = self.log.review(facts, "", verdict)
+        if verdict.spoken:
+            with self._lock:
+                self._note = Note(ref, self.harness, facts.harness, verdict)
+        self.post(ReviewFinished(self.harness, verdict))
+        with self._lock:
+            nxt, self._pending = self._pending, None
+            if nxt is not None and not self._closed and not self._disabled:
+                self._start(*nxt)
+            else:
+                self._running = False
+
+    def _settle(self, verdict: Verdict) -> Verdict:
+        """Failure counting, the three-strike switch, dedupe and the
+        spoken-interval clock — everything that turns a parsed reply into
+        the verdict the window paints and the log keeps."""
+        if verdict.verdict == "error":
+            self._failures += 1
+            if self._failures >= _MAX_FAILURES:
+                self._disabled = True
+                return Verdict("off", error=verdict.error, navigator=verdict.navigator,
+                               model=verdict.model, elapsed=verdict.elapsed)
+            return verdict
+        self._failures = 0
+        if verdict.spoken:
+            keys = {(e.file, e.line) for e in verdict.evidence}
+            if keys and keys <= self._spoken_evidence:
+                return Verdict("dup", navigator=verdict.navigator, model=verdict.model,
+                               elapsed=verdict.elapsed)
+            self._spoken_evidence |= keys
+            self._last_spoken = self._clock()
+        return verdict
