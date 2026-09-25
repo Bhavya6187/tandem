@@ -163,7 +163,7 @@ def parse_verdict(structured, text: str, *, navigator: str, model: str, elapsed:
                 raise ValueError("evidence item needs file and line")
             evidence.append(Evidence(str(e["file"]), int(e["line"]), str(e.get("why") or "")))
         return Verdict("speak", severity=severity, note=note, evidence=tuple(evidence), **base)
-    except (ValueError, TypeError) as exc:
+    except Exception as exc:  # the contract is "never raises": overflow, recursion, anything
         return Verdict("error", error=f"unparsable verdict: {exc}", **base)
 
 
@@ -171,7 +171,8 @@ def _git(cwd: str, args: list[str], run) -> str | None:
     """stdout of a git command, or None when git is absent, the cwd is not
     a repository, or the command fails — every one of those means 'no diff'."""
     try:
-        r = run(["git", "--no-pager", *args], cwd=cwd, capture_output=True, text=True, timeout=20)
+        r = run(["git", "--no-pager", *args], cwd=cwd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=20)
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -183,17 +184,28 @@ def compute_diff(cwd: str, paths: tuple[str, ...], commands: int, *,
     touched files plus the contents of any touched path git does not track;
     the whole tree's diff when no file was named but a command ran (it may
     have written anything). Capped; empty outside a repository."""
-    if _git(cwd, ["rev-parse", "--is-inside-work-tree"], run) is None:
+    top = _git(cwd, ["rev-parse", "--show-toplevel"], run)
+    if not top:
         return ""
     parts: list[str] = []
     if paths:
-        d = _git(cwd, ["diff", "--no-color", "--", *paths], run)
+        # git refuses the whole pathspec if one path lies outside the work
+        # tree, so keep only the paths inside it (relative to cwd)
+        root, here = Path(top.strip()).resolve(), Path(cwd).resolve()
+        inside = []
+        for p in paths:
+            try:
+                full = (here / p).resolve()
+            except (OSError, RuntimeError):   # a symlink loop, say
+                continue
+            if full == root or root in full.parents:
+                inside.append(os.path.relpath(full, here))
+        d = _git(cwd, ["diff", "--no-color", "--", *inside], run) if inside else None
         if d:
             parts.append(d)
-        tracked = _git(cwd, ["ls-files", "--", *paths], run) or ""
+        tracked = (_git(cwd, ["ls-files", "--", *inside], run) or "") if inside else ""
         tracked_set = set(tracked.split("\n"))
-        for p in paths:
-            rel = os.path.relpath(p, cwd) if os.path.isabs(p) else p
+        for rel in inside:
             if rel not in tracked_set:
                 try:
                     body = Path(cwd, rel).read_text(errors="replace")

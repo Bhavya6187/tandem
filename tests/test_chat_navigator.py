@@ -198,3 +198,36 @@ def test_diff_is_capped_with_a_marker(repo):
 def test_diff_outside_a_repo_is_empty_not_an_error(tmp_path):
     (tmp_path / "a.py").write_text("x\n")
     assert compute_diff(str(tmp_path), ("a.py",), 1) == ""
+
+
+def test_out_of_range_or_deeply_nested_replies_are_errors_not_exceptions():
+    huge = '{"verdict": "speak", "note": "n", "evidence": [{"file": "a", "line": 1e999}]}'
+    assert pv(text=huge).verdict == "error"
+    nested = '{"a":' * 50000 + '1' + '}' * 50000
+    assert pv(text=nested).verdict == "error"
+
+
+def test_diff_of_a_non_utf8_file_is_decoded_not_raised(repo):
+    (repo / "l.txt").write_bytes(b"caf\xe9\n")
+    subprocess.run(["git", "-C", str(repo), "add", "l.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "-m", "l"], check=True)
+    (repo / "l.txt").write_bytes(b"caf\xe9s\n")
+    assert "caf" in compute_diff(str(repo), ("l.txt",), 0)
+
+
+def test_a_touched_path_outside_the_repo_is_omitted(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "a.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(root), "add", "a.py"], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "-m", "a"], check=True)
+    (root / "a.py").write_text("x = 2\n")
+    outside = tmp_path / "elsewhere" / "scratch.txt"
+    outside.parent.mkdir()
+    outside.write_text("scratch\n")
+    d = compute_diff(str(root), (str(root / "a.py"), str(outside)), 0)
+    assert "-x = 1" in d and "+x = 2" in d
+    assert "(untracked)" not in d
