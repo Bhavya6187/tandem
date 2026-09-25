@@ -363,8 +363,9 @@ No new database state. The only persistent artefact is the log file.
 - A review still running at `/quit`: `Dispatcher.close` calls
   `navigator.close()`, which climbs the same kill ladder as the runtimes and
   deletes the fork.
-- A review running longer than 120 s (`REVIEW_TIMEOUT`) has its reviewer
-  closed, which kills it into an error verdict, and a reviewer's `close()`
+- A review running longer than 120 s (`REVIEW_TIMEOUT`) is cancelled: the
+  reviewer's `cancel()` kills that review into an error verdict and the
+  reviewer stays usable for the next turn. A reviewer's `close()`
   sets a flag checked before it spawns, so a quit that lands during the fork
   deletes the fork and starts nothing (`Navigator.close` then joins its
   worker for up to 5 s).

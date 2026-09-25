@@ -341,7 +341,9 @@ class Reviewer(Protocol):
     def review(self, session, model: str, prompt: str, schema: dict,
                shadow_lock: threading.Lock) -> ReviewResult: ...
 
-    def close(self) -> None: ...
+    def cancel(self) -> None: ...     # kill the running review; stay usable
+
+    def close(self) -> None: ...      # the window quit: kill and start nothing more
 
 
 @dataclass(frozen=True)
@@ -366,8 +368,8 @@ class Note:
 
 
 _MAX_FAILURES = 3
-# a review still running after this many seconds has its reviewer closed (the
-# process killed): the error verdict it ends in counts as one failure
+# a review still running after this many seconds is cancelled (its process
+# killed, the reviewer kept): the error verdict it ends in counts as one failure
 REVIEW_TIMEOUT = 120.0
 
 
@@ -499,7 +501,7 @@ class Navigator:
             self.post(ReviewStarted(self.harness))
             try:
                 diff = self._diff(session.cwd, facts.paths, facts.commands)
-                timer = threading.Timer(REVIEW_TIMEOUT, self.reviewer.close)
+                timer = threading.Timer(REVIEW_TIMEOUT, self.reviewer.cancel)
                 timer.daemon = True
                 timer.start()
                 result = self.reviewer.review(session, model, build_prompt(facts, diff), SCHEMA,

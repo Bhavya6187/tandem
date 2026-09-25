@@ -113,6 +113,14 @@ def test_a_codex_review_closed_while_forking_deletes_the_fork_and_spawns_nothing
     assert not (env.tmp / "argv.json").exists()     # no app-server was spawned
 
 
+def test_cancel_with_no_review_running_is_a_no_op_and_the_reviewer_stays_usable(codex_env):
+    env = codex_env
+    r = CodexReviewer(ChatConfig(), env.store, binary=[sys.executable, str(FAKE_CODEX)])
+    r.cancel()
+    out = r.review(env.session, "", "p", {}, threading.Lock())
+    assert out.text == "DONE"
+
+
 def test_codex_review_without_a_shadow_is_a_review_error(env_factory, monkeypatch):
     env = env_factory(active="codex", seed_active=False)       # codex has no id yet
     r = CodexReviewer(ChatConfig(), env.store, binary=[sys.executable, str(FAKE_CODEX)])

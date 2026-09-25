@@ -92,6 +92,14 @@ class CodexReviewer:
         if rt is not None:
             rt.close()
 
+    def cancel(self) -> None:
+        """Kill the running review only (the navigator's timeout); the
+        reviewer stays usable for the next one."""
+        with self._lock:
+            rt = self._rt
+        if rt is not None:
+            rt.close()
+
 
 class ClaudeReviewer:
     harness = "claude"
@@ -150,6 +158,14 @@ class ClaudeReviewer:
     def close(self) -> None:
         with self._lock:
             self._closed = True
+            rt = self._rt
+        if rt is not None:
+            rt.close()
+
+    def cancel(self) -> None:
+        """Kill the running review only (the navigator's timeout); the
+        reviewer stays usable for the next one."""
+        with self._lock:
             rt = self._rt
         if rt is not None:
             rt.close()
