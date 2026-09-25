@@ -347,6 +347,15 @@ def test_on_init_gets_the_session_id_the_child_announces():
     assert seen == ["fresh-id"]
 
 
+def test_a_subagent_init_does_not_re_fire_on_init():
+    seen = []
+    rt = ClaudeRuntime(ChatConfig(), on_init=seen.append)
+    rec = Recorder()
+    rt.handle_line({"type": "system", "subtype": "init", "session_id": "sub-id",
+                    "parent_tool_use_id": "toolu_x"}, rec.emit, rec, lambda o: None)
+    assert seen == []
+
+
 def test_rate_limit_event_carries_windows():
     rt = ClaudeRuntime(ChatConfig())
     rec = Recorder()

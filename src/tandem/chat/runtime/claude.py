@@ -172,7 +172,7 @@ class ClaudeRuntime:
                 emit(LimitsUpdate("claude", format_windows(windows),
                                   tuple((w.label, w.used_percent) for w in windows)))
             return None
-        if t == "system" and m.get("subtype") == "init":
+        if t == "system" and m.get("subtype") == "init" and not child:
             if self.on_init is not None and m.get("session_id"):
                 self.on_init(str(m["session_id"]))
             return None
