@@ -1050,3 +1050,58 @@ def test_skip_permissions_flag_rejected_where_no_session_opens(homes, ok_version
     assert result.exit_code == 2
     assert "--skip-permissions only applies" in result.output
     assert load_skip_permissions() is False
+
+
+def _nav_log(home, tandem_id, records):
+    from tandem.chat.navigator import log_path
+    p = log_path(tandem_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("".join(json.dumps(r) + "\n" for r in records))
+    return p
+
+
+NAV_RECORDS = [
+    {"ts": "2026-09-25T14:01:00.000001+00:00", "kind": "review", "turn_harness": "claude",
+     "prompt": "fix the loop", "gate": "review", "verdict": "speak", "severity": "block",
+     "note": "The retry loop swallows ShadowBusy", "evidence": [], "elapsed": 21.3,
+     "navigator": "codex", "model": "", "error": ""},
+    {"ts": "2026-09-25T14:03:00.000001+00:00", "kind": "review", "turn_harness": "claude",
+     "prompt": "explain", "gate": "skip:quiet", "verdict": "", "severity": "", "note": "",
+     "evidence": [], "elapsed": 0, "navigator": "codex", "model": "", "error": ""},
+    {"ts": "2026-09-25T14:05:00.000001+00:00", "kind": "review", "turn_harness": "opencode",
+     "prompt": "add tests", "gate": "review", "verdict": "clean", "severity": "", "note": "",
+     "evidence": [], "elapsed": 9.0, "navigator": "codex", "model": "", "error": ""},
+    {"ts": "2026-09-25T14:05:30.000001+00:00", "kind": "feedback",
+     "ref": "2026-09-25T14:01:00.000001+00:00", "value": "good"},
+]
+
+
+def test_navigator_log_prints_the_current_sessions_records_and_a_footer(homes, ok_versions, monkeypatch):
+    with StateStore() as store:
+        session = cli._pair_session(store, str(homes), "claude", ["claude", "codex"], seed=False)
+    _nav_log(homes, session.tandem_id, NAV_RECORDS)
+    r = click.testing.CliRunner().invoke(cli.main, ["navigator", "log"])
+    assert r.exit_code == 0, r.output
+    lines = r.output.rstrip("\n").split("\n")
+    assert lines[0].startswith("14:01") and "claude → codex" in lines[0] and "speak block" in lines[0]
+    assert "The retry loop swallows ShadowBusy" in lines[0] and lines[0].endswith("[good]")
+    assert lines[1].startswith("14:03") and "skip:quiet" in lines[1]
+    assert lines[2].startswith("14:05") and "clean" in lines[2]
+    assert lines[-1] == "reviewed 2 · spoken 1 · skipped 1 · helpful 1/1 (100%)"
+
+
+def test_navigator_log_limit_and_all(homes, ok_versions):
+    with StateStore() as store:
+        s1 = cli._pair_session(store, str(homes), "claude", ["claude", "codex"], seed=False)
+    _nav_log(homes, s1.tandem_id, NAV_RECORDS)
+    _nav_log(homes, "tdm-other", NAV_RECORDS[:1])
+    r = click.testing.CliRunner().invoke(cli.main, ["navigator", "log", "-n", "1"])
+    assert r.output.count("\n") == 2                       # one row + footer
+    assert "14:05" in r.output                              # the newest
+    r = click.testing.CliRunner().invoke(cli.main, ["navigator", "log", "--all"])
+    assert r.output.count("14:01") == 2 and "tdm-other" in r.output
+
+
+def test_navigator_log_without_a_session_or_records(homes, ok_versions):
+    r = click.testing.CliRunner().invoke(cli.main, ["navigator", "log"])
+    assert r.exit_code == 0 and "no navigator log" in r.output

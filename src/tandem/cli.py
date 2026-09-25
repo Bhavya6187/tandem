@@ -1060,6 +1060,64 @@ def plugin_install_cmd() -> None:
     sys.exit(0 if install_plugin() else 1)
 
 
+@main.group()
+def navigator() -> None:
+    """The chat navigator's review log (see `[chat] navigator`)."""
+
+
+def _nav_row(rec: dict, marks: dict[str, str], *, session_id: str | None = None) -> str:
+    when = rec.get("ts", "")[11:16]
+    who = rec.get("turn_harness", "?")
+    if rec.get("gate", "") != "review":
+        body = rec.get("gate", "")
+    else:
+        body = rec.get("verdict", "")
+        if rec.get("severity"):
+            body += f" {rec['severity']}"
+        if rec.get("note"):
+            body += f"  {rec['note'][:70]}"
+    parts = [when, f"{who} → {rec.get('navigator', '?')}" if rec.get("gate") == "review" else who, body]
+    if session_id:
+        parts.insert(1, session_id)
+    line = "  ".join(parts)
+    mark = marks.get(rec.get("ts", ""))
+    return f"{line}  [{mark}]" if mark else line
+
+
+@navigator.command(name="log")
+@click.option("-n", "--limit", "limit", type=int, default=20, show_default=True, help="Rows to show, newest last")
+@click.option("--all", "all_sessions", is_flag=True, help="Every session's log, not just this directory's")
+def navigator_log(limit: int, all_sessions: bool) -> None:
+    """Recent reviews and the helpful rate."""
+    from .chat.navigator import NavigatorLog, log_path
+
+    files: list[tuple[str | None, Path]] = []
+    if all_sessions:
+        root = paths.tandem_home() / "navigator"
+        files = [(p.stem, p) for p in sorted(root.glob("*.jsonl"))] if root.is_dir() else []
+    else:
+        with StateStore() as store:
+            session = _current_session(store, _cwd())
+        if session is not None:
+            files = [(None, log_path(session.tandem_id))]
+    records: list[tuple[str | None, dict]] = []
+    for sid, p in files:
+        records += [(sid, r) for r in NavigatorLog.read(p)]
+    if not records:
+        click.echo("no navigator log for this session" if not all_sessions else "no navigator log")
+        return
+    marks = {r["ref"]: r["value"] for _, r in records
+             if r.get("kind") == "feedback" and "ref" in r and "value" in r}
+    reviews = [(sid, r) for sid, r in records if r.get("kind") == "review"]
+    reviews.sort(key=lambda t: t[1].get("ts", ""))
+    for sid, r in reviews[-limit:] if limit > 0 else reviews:
+        click.echo(_nav_row(r, marks, session_id=sid))
+    st = NavigatorLog.stats([r for _, r in records])
+    helpful = ("n/a" if st["helpful"] is None
+               else f"{st['good']}/{st['good'] + st['bad']} ({round(st['helpful'] * 100)}%)")
+    click.echo(f"reviewed {st['reviewed']} · spoken {st['spoken']} · skipped {st['skipped']} · helpful {helpful}")
+
+
 @main.group(invoke_without_command=True)
 @click.option(
     "--active",
