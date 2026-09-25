@@ -17,7 +17,10 @@ from .navigator import ReviewError, ReviewResult
 from .runtime.claude import ClaudeRuntime
 from .runtime.codex import CodexRuntime
 
-_CLAUDE_REVIEW_TOOLS = ["Read", "Grep", "Glob", "Bash(git diff *)", "Bash(git log *)"]
+# read-only by allowlist, by denylist and by permission mode: a fork must never write,
+# and the diff it would reach for with git is already in the prompt
+_CLAUDE_REVIEW_TOOLS = ["Read", "Grep", "Glob"]
+_CLAUDE_DENIED_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit", "Agent", "Task"]
 
 
 class DenyAll:
@@ -102,7 +105,9 @@ class ClaudeReviewer:
             raise ReviewError("claude shadow transcript missing")
         cfg = dataclasses.replace(self.cfg, skip_permissions=False)
         extra = ["--fork-session", "--json-schema", json.dumps(schema),
-                 "--allowedTools", *_CLAUDE_REVIEW_TOOLS]
+                 "--permission-mode", "default",
+                 "--allowedTools", *_CLAUDE_REVIEW_TOOLS,
+                 "--disallowedTools", *_CLAUDE_DENIED_TOOLS]
         forked: dict = {}
         released = threading.Event()
 

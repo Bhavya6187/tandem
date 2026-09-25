@@ -134,8 +134,12 @@ def test_claude_review_forks_at_spawn_deletes_the_fork_and_returns_structured_ou
     argv = env.argv()
     assert "--fork-session" in argv and argv[argv.index("--json-schema") + 1] == '{"type": "object"}'
     i = argv.index("--allowedTools")
-    assert argv[i + 1:i + 6] == ["Read", "Grep", "Glob", "Bash(git diff *)", "Bash(git log *)"]
-    assert "--permission-mode" not in argv                          # never bypass on a review
+    assert argv[i + 1:i + 4] == ["Read", "Grep", "Glob"]
+    j = argv.index("--disallowedTools")
+    assert argv[j + 1:j + 7] == ["Edit", "Write", "MultiEdit", "NotebookEdit", "Agent", "Task"]
+    assert argv[argv.index("--permission-mode") + 1] == "default"   # never bypass on a review
+    assert argv.count("--permission-mode") == 1
+    assert not any("Bash(" in a for a in argv)                      # the diff is in the prompt
     assert argv[argv.index("--model") + 1] == "claude-x"
     assert not fork_file.exists() and shadow.read_bytes() == before
     assert not lock.locked()
