@@ -469,3 +469,55 @@ def test_close_reaches_the_reviewer_and_stops_new_work(tmp_path):
     assert reviewer.closed == 1
     nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(1)
     assert reviewer.calls == []
+
+
+def test_a_reply_the_log_cannot_encode_still_finishes_the_review(tmp_path):
+    bad = ReviewResult({"verdict": "speak", "severity": "block", "note": "\ud800 bad",
+                        "evidence": [{"file": "s.py", "line": 1, "why": "w"}]}, "")
+    nav, reviewer, posted, log = make_nav([bad, CLEAN], tmp_path,
+                                          cfg=ChatConfig(navigator="codex", navigator_interval=0))
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(5)
+    assert len(finished(posted)) == 1 and nav.mark() in ("", "note")
+    nav.dismiss()
+    assert nav.mark() == ""
+    nav.turn_ended(facts_with(paths=("b.py",)), SESSION); nav.join(5)
+    assert len(finished(posted)) == 2 and reviewer.results == []
+
+
+def test_a_post_that_raises_on_finish_does_not_wedge_the_worker(tmp_path):
+    posted = []
+    raised = []
+
+    def post(ev):
+        if isinstance(ev, ReviewFinished) and not raised:
+            raised.append(ev)
+            raise RuntimeError("queue gone")
+        posted.append(ev)
+
+    nav, reviewer, _, log = make_nav([CLEAN, CLEAN], tmp_path)
+    nav.post = post
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(5)
+    assert raised and nav.mark() == ""
+    nav.turn_ended(facts_with(paths=("b.py",)), SESSION); nav.join(5)
+    assert len(finished(posted)) == 1 and reviewer.results == []
+
+
+def test_a_close_during_the_gate_starts_no_review(tmp_path, monkeypatch):
+    # gate() reads `disabled` after headroom/clock, so a close inside the
+    # headroom callable would be seen by the gate itself; land it after the
+    # gate returns and before turn_ended takes the lock instead
+    import tandem.chat.navigator as navmod
+    real_gate = navmod.gate
+    holder = []
+
+    def gate_then_close(*a, **kw):
+        reason = real_gate(*a, **kw)
+        holder[0].close()
+        return reason
+
+    monkeypatch.setattr(navmod, "gate", gate_then_close)
+    nav, reviewer, posted, log = make_nav([CLEAN], tmp_path)
+    holder.append(nav)
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(1)
+    assert reviewer.calls == [] and posted == []
+    assert NavigatorLog.read(log.path)[-1]["gate"] == "skip:disabled"

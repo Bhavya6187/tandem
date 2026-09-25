@@ -255,7 +255,7 @@ class NavigatorLog:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 with open(self.path, "a", encoding="utf-8") as fh:
                     fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-            except OSError:
+            except (OSError, ValueError, TypeError):  # ValueError: a lone surrogate the file can't encode
                 pass                                # the log is a courtesy, never a blocker
             return record["ts"]
 
@@ -390,6 +390,9 @@ class Navigator:
                         self.log.review(self._pending[0], "skip:replaced", None)
                     self._pending = (facts, session)
                     return
+                if self._closed or self._disabled:  # close() or the third strike landed after the gate
+                    self.log.review(facts, "skip:disabled", None)
+                    return
                 self._start(facts, session)
         except Exception:                          # the navigator must never take the window down
             pass
@@ -450,30 +453,46 @@ class Navigator:
         self._thread.start()
 
     def _run(self, facts: TurnFacts, session) -> None:
-        self.post(ReviewStarted(self.harness))
         started = self._clock()
         model = self.cfg.navigator_model
+        verdict: Verdict | None = None
         try:
-            diff = self._diff(session.cwd, facts.paths, facts.commands)
-            result = self.reviewer.review(session, model, build_prompt(facts, diff), SCHEMA,
-                                          self.shadow_lock)
-            verdict = parse_verdict(result.structured, result.text, navigator=self.harness,
-                                    model=model, elapsed=self._clock() - started)
-        except Exception as exc:
-            verdict = Verdict("error", error=f"{type(exc).__name__}: {exc}"[:200],
-                              navigator=self.harness, model=model, elapsed=self._clock() - started)
-        verdict = self._settle(verdict)
-        ref = self.log.review(facts, "", verdict)
-        if verdict.spoken:
+            self.post(ReviewStarted(self.harness))
+            try:
+                diff = self._diff(session.cwd, facts.paths, facts.commands)
+                result = self.reviewer.review(session, model, build_prompt(facts, diff), SCHEMA,
+                                              self.shadow_lock)
+                verdict = parse_verdict(result.structured, result.text, navigator=self.harness,
+                                        model=model, elapsed=self._clock() - started)
+            except Exception as exc:
+                verdict = Verdict("error", error=f"{type(exc).__name__}: {exc}"[:200],
+                                  navigator=self.harness, model=model, elapsed=self._clock() - started)
+            verdict = self._settle(verdict)
+            ref = self.log.review(facts, "", verdict)
+            if verdict.spoken:
+                with self._lock:
+                    self._note = Note(ref, self.harness, facts.harness, verdict)
+        except Exception as exc:                   # a traceback here would paint over the screen
+            if verdict is None:
+                verdict = Verdict("error", error=f"{type(exc).__name__}: {exc}"[:200],
+                                  navigator=self.harness, model=model, elapsed=self._clock() - started)
+        finally:
+            # whatever happened above, the window hears the review end and
+            # the pending slot moves on — otherwise the worker wedges
+            try:
+                self.post(ReviewFinished(self.harness, verdict or Verdict(
+                    "error", error="review ended without a verdict", navigator=self.harness,
+                    model=model)))
+            except Exception:
+                pass
             with self._lock:
-                self._note = Note(ref, self.harness, facts.harness, verdict)
-        self.post(ReviewFinished(self.harness, verdict))
-        with self._lock:
-            nxt, self._pending = self._pending, None
-            if nxt is not None and not self._closed and not self._disabled:
-                self._start(*nxt)
-            else:
+                nxt, self._pending = self._pending, None
                 self._running = False
+                if nxt is not None and not self._closed and not self._disabled:
+                    try:
+                        self._start(*nxt)
+                    except Exception:
+                        self._running = False
 
     def _settle(self, verdict: Verdict) -> Verdict:
         """Failure counting, the three-strike switch, dedupe and the
