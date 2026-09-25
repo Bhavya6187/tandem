@@ -2,6 +2,8 @@
 entry (`_enter_session`) is monkeypatched; pairing runs for real under
 tmp homes (same env vars as conftest.Env)."""
 
+import json
+
 import click.testing
 import pytest
 
@@ -353,6 +355,145 @@ def test_sessions_shows_relative_last_used(homes):
     row = next(ln for ln in r.output.splitlines() if s.tandem_id in ln)
     assert "40d ago" in row
     assert last_used not in row
+
+
+# -- session titles ------------------------------------------------------------
+# A row's TITLE is the first real user prompt in one of its transcripts, so two
+# sessions in the same directory stop looking identical.
+
+
+def _write_claude_transcript(cwd, sid, entries):
+    from conftest import claude_user
+    from tandem import paths
+
+    path = paths.claude_transcript_path(str(cwd), sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        for e in entries:
+            f.write(json.dumps(claude_user(e) if isinstance(e, str) else e) + "\n")
+    return path
+
+
+def _write_codex_rollout(sid, prompts):
+    from tandem import paths
+
+    path = (paths.codex_sessions_dir() / "2026" / "09" / "25"
+            / f"rollout-2026-09-25T00-00-00-{sid}.jsonl")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [{"timestamp": "t", "type": "session_meta",
+              "payload": {"id": sid, "cwd": "/x", "originator": "codex_cli_rs"}}]
+    for text in prompts:
+        lines.append({"timestamp": "t", "type": "event_msg",
+                      "payload": {"type": "task_started", "turn_id": "x"}})
+        lines.append({"timestamp": "t", "type": "event_msg",
+                      "payload": {"type": "user_message", "message": text}})
+    with open(path, "w") as f:
+        for ln in lines:
+            f.write(json.dumps(ln) + "\n")
+    return path
+
+
+def _row_for(output, tandem_id):
+    return next(ln for ln in output.splitlines() if tandem_id in ln)
+
+
+def test_sessions_shows_first_prompt_as_title(homes, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "160")     # room for the whole title
+    s = _mk_session(homes, n=1)
+    _write_claude_transcript(homes, "c-1", ["fix the flaky sync test", "and then ship it"])
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    assert r.exit_code == 0, r.output
+    header = next(ln for ln in r.output.splitlines() if "ID" in ln and "DIRECTORY" in ln)
+    assert "TITLE" in header
+    assert header.index("TITLE") < header.index("DIRECTORY")
+    row = _row_for(r.output, s.tandem_id)
+    assert "fix the flaky sync test" in row
+    assert "and then ship it" not in row
+    # the title sits between the participants and the directory
+    assert row.index("claude+codex") < row.index("fix the flaky") < row.index(str(homes))
+
+
+def test_session_title_skips_tandem_notes_and_strips_attribution(homes, monkeypatch):
+    from tandem.constants import SEED_NOTE
+
+    monkeypatch.setenv("COLUMNS", "160")
+    s = _mk_session(homes, n=1)
+    seed = SEED_NOTE.format(tandem_id=s.tandem_id, other="codex")
+    _write_claude_transcript(homes, "c-1", [seed, "[via codex] tighten the retry loop"])
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    row = _row_for(r.output, s.tandem_id)
+    assert "tighten the retry loop" in row
+    assert "[via codex]" not in row and "[tandem]" not in row
+
+
+def test_session_title_falls_back_to_another_participant(homes, monkeypatch):
+    # the active harness (claude) never ran: its transcript is missing;
+    # codex holds the only prompt
+    monkeypatch.setenv("COLUMNS", "160")
+    s = _mk_session(homes, n=1)
+    _write_codex_rollout("x-1", ["from the codex side"])
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    row = _row_for(r.output, s.tandem_id)
+    assert "from the codex side" in row
+
+
+def test_session_title_prefers_the_active_harness(homes, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "160")
+    s = _mk_session(homes, active="codex", n=1)
+    _write_claude_transcript(homes, "c-1", ["[via codex] mirrored copy"])
+    _write_codex_rollout("x-1", ["the original words"])
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    row = _row_for(r.output, s.tandem_id)
+    assert "the original words" in row
+    assert "mirrored copy" not in row
+
+
+def test_session_title_placeholder_when_no_turns(homes):
+    s = _mk_session(homes, n=1)
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    assert r.exit_code == 0, r.output
+    assert "(no turns yet)" in _row_for(r.output, s.tandem_id)
+
+
+def test_session_title_is_one_line_and_truncated(homes, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "120")
+    s = _mk_session(homes, n=1)
+    # a pasted report opens with a rule: the title is the first line that
+    # says something, not the first line that exists
+    long = "-----\n\nfirst line   with  gaps " + "x" * 200 + "\nsecond line"
+    _write_claude_transcript(homes, "c-1", [long])
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    row = _row_for(r.output, s.tandem_id)
+    assert "first line with gaps" in row
+    assert "-----" not in row
+    assert "second line" not in row
+    assert "…" in row
+    assert "x" * 100 not in row
+    assert str(homes) in row       # the directory survives after the cut
+
+
+def test_session_title_never_tracebacks(homes, monkeypatch):
+    s = _mk_session(homes, n=1)
+    _write_claude_transcript(homes, "c-1", ["a prompt"])
+
+    def boom(*a, **k):
+        raise RuntimeError("adapter exploded")
+
+    monkeypatch.setattr(cli, "get_adapter", boom)
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    assert r.exit_code == 0, r.output
+    row = _row_for(r.output, s.tandem_id)
+    assert " ? " in row and str(homes) in row
+
+
+def test_chat_resume_picker_shows_titles(homes, ok_versions, chatted, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "160")
+    s = _mk_session(homes, n=1)
+    _write_claude_transcript(homes, "c-1", ["rename the bar meters"])
+    r = click.testing.CliRunner().invoke(cli.main, ["resume"], input="0\n")
+    assert s.tandem_id in r.output
+    assert "rename the bar meters" in _row_for(r.output, s.tandem_id)
+    assert chatted == []
 
 
 @pytest.mark.parametrize(
