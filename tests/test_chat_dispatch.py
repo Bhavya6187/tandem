@@ -817,3 +817,135 @@ def test_first_turn_hook_that_fails_fails_the_turn_and_is_retried(env_factory):
 def test_without_a_hook_nothing_is_pending(setup):
     _, d, _, _ = setup
     assert not d.first_turn_pending
+
+
+from tandem.chat.events import Evidence, ToolStarted, Verdict
+from tandem.chat.navigator import Note
+
+
+class StubNavigator:
+    """Records what the dispatcher hands it and scripts what it hands back."""
+
+    def __init__(self, note=None):
+        self.shadow_lock = threading.Lock()
+        self.note = note
+        self.takes, self.ended, self.closed = [], [], 0
+        self.lock_held_during_sync = []
+
+    def take(self, harness):
+        self.takes.append(harness)
+        n, self.note = self.note, None
+        return n if n is not None and harness == "codex" else None
+
+    def turn_ended(self, facts, session):
+        self.ended.append((facts, session))
+
+    def close(self):
+        self.closed += 1
+
+
+def make_note(text="bad loop"):
+    return Note("ref-1", "codex", "claude", Verdict("speak", severity="block", note=text,
+                                                     evidence=(Evidence("s.py", 12, "w"),)))
+
+
+def run_one(env, nav, text, harness="claude"):
+    events = []
+    done = threading.Event()
+
+    def emit(ev):
+        events.append(ev)
+        if isinstance(ev, Idle):
+            done.set()
+
+    runtimes = {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env)}
+    d = Dispatcher(env.store, env.session, runtimes, emit, Answers(), navigator=nav)
+    assert d.submit(text) == ""
+    assert done.wait(5)
+    return d, runtimes, events
+
+
+def test_facts_reach_the_navigator_after_sync(env_factory):
+    env = env_factory()
+    nav = StubNavigator()
+    d, runtimes, events = run_one(env, nav, "fix it")
+    assert len(nav.ended) == 1
+    facts, session = nav.ended[0]
+    assert facts.harness == "claude" and facts.prompt == "fix it" and facts.status == "completed"
+    assert facts.carried_note is False and facts.first_turn is False
+    assert facts.final_text == "claude says hi"
+    assert session.tandem_id == env.session.tandem_id
+    # turn_ended ran before Idle was announced
+    assert isinstance(events[-1], Idle)
+
+
+def test_the_first_turn_is_flagged(env_factory):
+    env = env_factory()
+    nav = StubNavigator()
+    events, done = [], threading.Event()
+    emit = lambda ev: (events.append(ev), isinstance(ev, Idle) and done.set())
+    runtimes = {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env)}
+    d = Dispatcher(env.store, env.session, runtimes, emit, Answers(), first_turn=lambda: None, navigator=nav)
+    d.submit("hello"); assert done.wait(5)
+    assert nav.ended[0][0].first_turn is True
+
+
+def test_a_pending_note_rides_the_prompt_as_a_trailer(env_factory):
+    env = env_factory()
+    nav = StubNavigator(note=make_note())
+    d, runtimes, events = run_one(env, nav, "/codex why?")
+    native_id, prompt, model = runtimes["codex"].calls[0]
+    assert prompt.startswith("why?\n\n[tandem navigator] codex reviewed the previous claude turn")
+    assert "s.py:12 — w" in prompt
+    started = [e for e in events if isinstance(e, TurnStarted)][0]
+    assert started.prompt == "why?" and started.carried == "bad loop"
+    assert nav.ended[0][0].carried_note is True and nav.ended[0][0].prompt == "why?"
+    assert nav.takes == ["codex"]
+
+
+def test_a_bare_route_consumes_no_note(env_factory):
+    env = env_factory()
+    nav = StubNavigator(note=make_note())
+    runtimes = {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env)}
+    d = Dispatcher(env.store, env.session, runtimes, lambda ev: None, Answers(), navigator=nav)
+    assert d.submit("/codex").startswith("default → codex")
+    assert nav.takes == [] and nav.note is not None
+
+
+def test_the_shadow_lock_is_held_across_prepare_and_sync(env_factory, monkeypatch):
+    env = env_factory()
+    nav = StubNavigator()
+    seen = []
+    real_prepare, real_sync = dispatch.ops.prepare_turn, dispatch.ops.sync_after_turn
+    monkeypatch.setattr(dispatch.ops, "prepare_turn",
+                        lambda *a, **k: (seen.append(("prepare", nav.shadow_lock.locked())), real_prepare(*a, **k))[1])
+    monkeypatch.setattr(dispatch.ops, "sync_after_turn",
+                        lambda *a, **k: (seen.append(("sync", nav.shadow_lock.locked())), real_sync(*a, **k))[1])
+    run_one(env, nav, "go")
+    assert seen == [("prepare", True), ("sync", True)]
+    assert not nav.shadow_lock.locked()
+
+
+def test_without_a_navigator_nothing_changes(env_factory):
+    env = env_factory()
+    d, runtimes, events = run_one(env, None, "go")
+    assert runtimes["claude"].calls[0][1] == "go"
+    assert [e for e in events if isinstance(e, TurnStarted)][0].carried == ""
+
+
+def test_a_navigator_that_raises_does_not_break_the_turn(env_factory):
+    env = env_factory()
+    nav = StubNavigator()
+    nav.turn_ended = lambda facts, session: (_ for _ in ()).throw(RuntimeError("nav bug"))
+    d, runtimes, events = run_one(env, nav, "go")
+    assert not any(isinstance(e, Failure) for e in events)
+    assert isinstance(events[-1], Idle)
+
+
+def test_close_reaches_the_navigator(env_factory):
+    env = env_factory()
+    nav = StubNavigator()
+    runtimes = {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env)}
+    d = Dispatcher(env.store, env.session, runtimes, lambda ev: None, Answers(), navigator=nav)
+    d.close()
+    assert nav.closed == 1
