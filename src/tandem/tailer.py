@@ -9,7 +9,10 @@ poll interval, so a missed event can only delay — never lose — entries.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import json
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +21,48 @@ from typing import Callable
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
+
+# The bootstrap service watchdog's FSEvents emitter talks to. A seatbelt
+# sandbox (codex's, for one) denies the lookup; see fsevents_reachable().
+_FSEVENTS_SERVICE = b"com.apple.FSEvents"
+
+
+def _fsevents_lookup_kr() -> int:
+    """kern_return of a bootstrap lookup of the FSEvents service: 0 when
+    this process may talk to it, BOOTSTRAP_NOT_PRIVILEGED (1100) when a
+    sandbox profile denies the mach-lookup. A plain mach call: safe to make
+    where starting an FSEvents stream is not."""
+    libc = ctypes.CDLL(ctypes.util.find_library("System"))
+    libc.bootstrap_look_up.argtypes = [ctypes.c_uint, ctypes.c_char_p,
+                                       ctypes.POINTER(ctypes.c_uint)]
+    libc.bootstrap_look_up.restype = ctypes.c_int
+    bootstrap_port = ctypes.c_uint.in_dll(libc, "bootstrap_port")
+    port = ctypes.c_uint(0)
+    kr = libc.bootstrap_look_up(bootstrap_port, _FSEVENTS_SERVICE, ctypes.byref(port))
+    if kr == 0 and port.value:
+        libc.mach_port_deallocate(ctypes.c_uint.in_dll(libc, "mach_task_self_"), port)
+    return kr
+
+
+def fsevents_reachable() -> bool:
+    """Whether an FSEvents observer may be started in this process.
+
+    watchdog's FSEvents emitter must not be started where the service is
+    unreachable: its stream start fails, but the failed watch stays
+    registered, and the observer's stop() then stops/invalidates/releases
+    that already-released stream — heap corruption that kills the process
+    later, in whatever code mallocs next (seen from sqlite and pydantic).
+    Codex's seatbelt sandbox denies the lookup, so every pytest run codex
+    made of this suite could die that way. Off macOS the observer is not
+    FSEvents at all. A probe that cannot answer means polling: wrongly
+    polling costs up to one poll interval of latency, wrongly starting
+    FSEvents costs the process."""
+    if sys.platform != "darwin":
+        return True
+    try:
+        return _fsevents_lookup_kr() == 0
+    except Exception:
+        return False
 
 
 @dataclass
@@ -132,7 +177,8 @@ class TranscriptWatcher:
             self._schedule(directory)
 
     def start(self) -> None:
-        for cls in (Observer, PollingObserver):
+        backends = (Observer, PollingObserver) if fsevents_reachable() else (PollingObserver,)
+        for cls in backends:
             try:
                 self._observer = cls(timeout=self.poll_interval)
                 for directory in self._watched:

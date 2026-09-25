@@ -195,3 +195,80 @@ def test_default_reader_matches_jsonl_tailer(tmp_path):
     reader = get_adapter("claude").make_source_reader(None, cur, p)
     lines = reader.poll()
     assert [l.raw for l in lines] == [{"a": 1}, {"b": 2}]
+
+
+class TestTranscriptWatcherBackend:
+    """Under a seatbelt sandbox (codex's, for one) the FSEvents mach service
+    is unreachable. watchdog's FSEvents emitter then fails its stream start
+    but leaves a dangling stream entry behind, and the observer's stop()
+    releases it a second time: heap corruption, and the process dies later in
+    unrelated code. The watcher must probe reachability first and take the
+    polling observer when FSEvents cannot be reached."""
+
+    def test_polling_observer_when_fsevents_unreachable(self, tmp_path, monkeypatch):
+        from watchdog.observers.polling import PollingObserver
+        from tandem import tailer
+
+        monkeypatch.setattr(tailer, "fsevents_reachable", lambda: False)
+        p = tmp_path / "t.jsonl"
+        w = tailer.TranscriptWatcher(poll_interval=0.1)
+        w.watch(p)
+        w.start()
+        try:
+            assert isinstance(w._observer, PollingObserver)
+            # the fallback still wakes the sync loop on a write
+            p.write_text('{"a": 1}\n')
+            assert w.wake.wait(timeout=3)
+        finally:
+            w.stop()
+
+    def test_fsevents_observer_when_reachable(self, tmp_path, monkeypatch):
+        from watchdog.observers import Observer
+        from watchdog.observers.polling import PollingObserver
+        from tandem import tailer
+
+        if not tailer.fsevents_reachable():
+            pytest.skip("FSEvents unreachable here (sandboxed): starting it is the crash under test")
+        monkeypatch.setattr(tailer, "fsevents_reachable", lambda: True)
+        w = tailer.TranscriptWatcher()
+        w.watch(tmp_path / "t.jsonl")
+        w.start()
+        try:
+            assert type(w._observer) is Observer
+            assert not isinstance(w._observer, PollingObserver)
+        finally:
+            w.stop()
+
+    def test_reachable_is_true_off_macos(self, monkeypatch):
+        from tandem import tailer
+
+        monkeypatch.setattr(tailer.sys, "platform", "linux")
+        assert tailer.fsevents_reachable() is True
+
+    def test_reachable_follows_the_bootstrap_lookup(self, monkeypatch):
+        from tandem import tailer
+
+        monkeypatch.setattr(tailer.sys, "platform", "darwin")
+        monkeypatch.setattr(tailer, "_fsevents_lookup_kr", lambda: 0)
+        assert tailer.fsevents_reachable() is True
+        monkeypatch.setattr(tailer, "_fsevents_lookup_kr", lambda: 1100)   # BOOTSTRAP_NOT_PRIVILEGED
+        assert tailer.fsevents_reachable() is False
+
+    def test_a_broken_probe_means_unreachable(self, monkeypatch):
+        """Wrongly polling costs latency; wrongly picking FSEvents costs the
+        process. Doubt resolves to polling."""
+        from tandem import tailer
+
+        monkeypatch.setattr(tailer.sys, "platform", "darwin")
+
+        def boom():
+            raise OSError("no such symbol")
+        monkeypatch.setattr(tailer, "_fsevents_lookup_kr", boom)
+        assert tailer.fsevents_reachable() is False
+
+    def test_real_probe_matches_the_mach_lookup(self):
+        """Outside a sandbox the service is there; inside one it is not. Both
+        are valid outcomes here, but the probe must answer and not raise."""
+        from tandem import tailer
+
+        assert tailer.fsevents_reachable() in (True, False)
