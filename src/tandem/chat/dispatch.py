@@ -256,6 +256,7 @@ class Dispatcher:
         emit = facts.emit if facts is not None else self.emit
         lock = nav.shadow_lock if nav is not None else contextlib.nullcontext()
         outcome = None
+        synced = False
         try:
             if self._first_turn is not None:
                 self._first_turn()
@@ -264,6 +265,7 @@ class Dispatcher:
             if problems:
                 self.emit(Failure(f"{harness} transcript: " + "; ".join(problems)))
                 self.emit(TurnFinished("failed", ""))
+                self._give_back(note)
                 return
             session = self.session
             if session.native_id(harness):
@@ -301,6 +303,7 @@ class Dispatcher:
             with lock:
                 ops.sync_after_turn(self.store, self.session, harness,
                                     close_note=_close_note(harness, outcome))
+            synced = True       # only a turn the shadows received is worth reviewing
             self._report_quarantine(harness, quarantine_pre)
             self.store.touch_used(self.session.tandem_id)
             if self._add_meters is not None:
@@ -311,9 +314,13 @@ class Dispatcher:
         except SyncSetupError as exc:
             self.emit(Failure(f"sync: {exc}"))
             self._finish_unrun(ran)
+            if not ran:
+                self._give_back(note)
         except Exception as exc:                       # a runtime bug must not kill the window
             self.emit(Failure(f"{harness}: {type(exc).__name__}: {exc}"))
             self._finish_unrun(ran)
+            if not ran:
+                self._give_back(note)
         finally:
             # free before the announcement: a window that pumps straight out
             # of this Idle — even synchronously, on this thread — must find
@@ -322,12 +329,22 @@ class Dispatcher:
             with self._lock:
                 self._current = None
                 self._running = False
-            if facts is not None and outcome is not None:
+            if facts is not None and outcome is not None and synced:
                 try:
                     nav.turn_ended(facts.finish(outcome.status), self.session)
                 except Exception:
                     pass                               # the navigator must never take the window down
             self.emit(Idle())
+
+    def _give_back(self, note) -> None:
+        """A note taken for a turn no model ever saw goes back to the
+        navigator, to ride the next prompt instead."""
+        if note is None:
+            return
+        try:
+            self.navigator.give_back(note)
+        except Exception:
+            pass                                       # the navigator must never take the window down
 
     def _finish_unrun(self, ran: bool) -> None:
         """Every TurnStarted owes the renderer one terminal TurnFinished. The

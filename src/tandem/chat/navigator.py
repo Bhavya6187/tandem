@@ -406,6 +406,13 @@ class Navigator:
         self.log.ridden(note.ref, harness)
         return note
 
+    def give_back(self, note: Note) -> None:
+        """Return a note taken for a turn that failed before any model saw
+        it. A note that landed since is newer and wins."""
+        with self._lock:
+            if self._note is None:
+                self._note = note
+
     def pending(self) -> Note | None:
         return self._note
 

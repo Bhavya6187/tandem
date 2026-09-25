@@ -521,3 +521,20 @@ def test_a_close_during_the_gate_starts_no_review(tmp_path, monkeypatch):
     nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(1)
     assert reviewer.calls == [] and posted == []
     assert NavigatorLog.read(log.path)[-1]["gate"] == "skip:disabled"
+
+
+def test_a_note_given_back_is_pending_again_but_never_displaces_a_newer_one(tmp_path):
+    clock = Clock()
+    nav, *_ = make_nav([speak(), speak("newer", file="t.py")], tmp_path, clock=clock)
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(5)
+    old = nav.take("codex")
+    assert old is not None and nav.pending() is None
+    nav.give_back(old)
+    assert nav.pending() is old and nav.mark() == "note"
+    assert nav.take("codex") is old
+    clock.now += 1000
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION); nav.join(5)
+    newer = nav.pending()
+    assert newer is not None and newer.summary == "newer"
+    nav.give_back(old)
+    assert nav.pending() is newer

@@ -831,6 +831,7 @@ class StubNavigator:
         self.note = note
         self.takes, self.ended, self.closed = [], [], 0
         self.lock_held_during_sync = []
+        self.given_back = []
 
     def take(self, harness):
         self.takes.append(harness)
@@ -842,6 +843,9 @@ class StubNavigator:
 
     def close(self):
         self.closed += 1
+
+    def give_back(self, note):
+        self.given_back.append(note)
 
 
 def make_note(text="bad loop"):
@@ -949,3 +953,29 @@ def test_close_reaches_the_navigator(env_factory):
     d = Dispatcher(env.store, env.session, runtimes, lambda ev: None, Answers(), navigator=nav)
     d.close()
     assert nav.closed == 1
+
+
+def test_a_note_taken_for_a_turn_that_never_ran_goes_back(env_factory):
+    env = env_factory()
+    note = make_note()
+    nav = StubNavigator(note=note)
+    env.codex_shadow.write_text("{not json\n")        # the routed target's transcript fails validation
+    d, runtimes, events = run_one(env, nav, "/codex why?")
+    assert runtimes["codex"].calls == []
+    assert [e for e in events if isinstance(e, TurnStarted)][0].carried == "bad loop"
+    assert any(isinstance(e, Failure) for e in events)
+    assert nav.given_back == [note] and nav.ended == []
+
+
+def test_a_turn_whose_sync_failed_is_not_reviewed(env_factory, monkeypatch):
+    env = env_factory()
+    nav = StubNavigator()
+
+    def boom(*a, **k):
+        raise dispatch.SyncSetupError("boom")
+
+    monkeypatch.setattr(dispatch.ops, "sync_after_turn", boom)
+    d, runtimes, events = run_one(env, nav, "go")
+    assert runtimes["claude"].calls
+    assert [e.message for e in events if isinstance(e, Failure)][0].startswith("sync:")
+    assert nav.ended == [] and nav.given_back == []
