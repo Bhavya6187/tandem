@@ -7,12 +7,14 @@ plays the scenario named by $FAKE_CLAUDE_SCENARIO:
   question  AskUserQuestion -> can_use_tool with questions -> echoes the answer
   interrupt streams one delta, then waits for an interrupt control_request
   crash     prints init, writes "boom" to stderr, exits 3
+  review    emits init under a forked id, one JSON delta, and a result carrying structured_output
 """
 import json
 import os
 import sys
 
 SID = "fake-claude-session"
+FORK_SID = "fake-claude-fork"
 
 
 def out(obj):
@@ -44,13 +46,22 @@ def main():
     first = read()
     assert first and first["type"] == "user", first
     prompt = first["message"]["content"][0]["text"]
-    out({"type": "system", "subtype": "init", "session_id": SID, "model": "fake", "tools": ["Bash"],
+    sid = FORK_SID if "--fork-session" in sys.argv else SID
+    out({"type": "system", "subtype": "init", "session_id": sid, "model": "fake", "tools": ["Bash"],
          "cwd": os.getcwd(), "slash_commands": [], "claude_code_version": "0.0.0"})
     if scenario == "crash":
         sys.stderr.write("boom\n")
         sys.exit(3)
     if scenario == "text":
         delta("hello "); delta("world"); result(); return
+    if scenario == "review":
+        verdict = {"verdict": "speak", "severity": "warn", "note": "loop swallows errors",
+                   "evidence": [{"file": "s.py", "line": 9, "why": "bare except"}]}
+        delta(json.dumps(verdict))
+        out({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+             "session_id": FORK_SID, "result": json.dumps(verdict), "structured_output": verdict,
+             "usage": {"input_tokens": 1, "output_tokens": 1}})
+        return
     if scenario == "interrupt":
         delta("partial")
         while True:

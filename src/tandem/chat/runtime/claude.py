@@ -61,10 +61,14 @@ class ClaudeRuntime:
     harness = "claude"
 
     def __init__(self, cfg, *, binary: list[str] | None = None,
-                 extra_args: list[str] | None = None, on_init=None):
+                 extra_args: list[str] | None = None,
+                 on_init: Callable[[str], None] | None = None):
         self.cfg = cfg
         self.binary = list(binary) if binary else ["claude"]
+        # the navigator's review flags (--fork-session, --json-schema, --allowedTools)
         self.extra_args = list(extra_args or [])
+        # told the session id the child announces at init — a forked review
+        # learns the id it has to delete afterwards
         self.on_init = on_init
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
@@ -84,6 +88,7 @@ class ClaudeRuntime:
             argv += ["--permission-mode", "bypassPermissions"]
         if model:
             argv += ["--model", model]
+        argv += self.extra_args
         return argv
 
     # -- protocol ------------------------------------------------------------
@@ -166,6 +171,10 @@ class ClaudeRuntime:
             if windows:
                 emit(LimitsUpdate("claude", format_windows(windows)))
             return None
+        if t == "system" and m.get("subtype") == "init":
+            if self.on_init is not None and m.get("session_id"):
+                self.on_init(str(m["session_id"]))
+            return None
         if t == "result":
             if child or (not self._interrupted and
                          (m.get("origin") or {}).get("kind") == "task-notification"):
@@ -178,7 +187,7 @@ class ClaudeRuntime:
             emit(TurnFinished(status, usage))
             return TurnOutcome(status, error=str(m.get("result", "")) if status == "failed" else "",
                                structured=m.get("structured_output"))
-        return None     # system/init, rate_limit_event, control_response: nothing to paint
+        return None     # other system lines, control_response: nothing to paint
 
     # -- process -------------------------------------------------------------
 

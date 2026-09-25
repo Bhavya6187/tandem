@@ -109,3 +109,76 @@ def test_make_reviewer_picks_by_harness(env_factory):
     assert isinstance(make_reviewer("claude", ChatConfig(), env.store), ClaudeReviewer)
     with pytest.raises(ValueError):
         make_reviewer("opencode", ChatConfig(), env.store)
+
+
+@pytest.fixture
+def claude_env(env_factory, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_ARGV_OUT", str(tmp_path / "argv.json"))
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "review")
+    env = env_factory()                      # active claude, its shadow seeded on disk
+    env.argv = lambda: json.loads((tmp_path / "argv.json").read_text())
+    return env
+
+
+def test_claude_review_forks_at_spawn_deletes_the_fork_and_returns_structured_output(claude_env):
+    env = claude_env
+    fork_file = paths.claude_transcript_path(env.session.cwd, "fake-claude-fork")
+    fork_file.parent.mkdir(parents=True, exist_ok=True)
+    fork_file.write_text("{}\n")
+    shadow = get_adapter("claude").transcript_path(env.session.cwd, env.session.native_id("claude"))
+    before = shadow.read_bytes()
+    r = ClaudeReviewer(ChatConfig(navigator="claude"), binary=[sys.executable, str(FAKE_CLAUDE)])
+    lock = threading.Lock()
+    out = r.review(env.session, "claude-x", "review please", {"type": "object"}, lock)
+    assert out.structured["verdict"] == "speak" and "loop swallows" in out.text
+    argv = env.argv()
+    assert "--fork-session" in argv and argv[argv.index("--json-schema") + 1] == '{"type": "object"}'
+    i = argv.index("--allowedTools")
+    assert argv[i + 1:i + 6] == ["Read", "Grep", "Glob", "Bash(git diff *)", "Bash(git log *)"]
+    assert "--permission-mode" not in argv                          # never bypass on a review
+    assert argv[argv.index("--model") + 1] == "claude-x"
+    assert not fork_file.exists() and shadow.read_bytes() == before
+    assert not lock.locked()
+
+
+def test_claude_review_releases_the_shadow_lock_when_init_arrives(claude_env):
+    """The dispatcher's next drain must not wait for the whole review."""
+    env = claude_env
+    r = ClaudeReviewer(ChatConfig(), binary=[sys.executable, str(FAKE_CLAUDE)])
+    lock = threading.Lock()
+    states = []
+
+    from tandem.chat.runtime import claude as claude_mod
+    orig = claude_mod.ClaudeRuntime.handle_line
+
+    def spy(self, m, emit, answers, send):
+        is_init = m.get("type") == "system" and m.get("subtype") == "init"
+        before = lock.locked()
+        out = orig(self, m, emit, answers, send)
+        if is_init:
+            states.append((before, lock.locked()))   # held going in, released by on_init
+        return out
+
+    claude_mod.ClaudeRuntime.handle_line = spy
+    try:
+        r.review(env.session, "", "p", {}, lock)
+    finally:
+        claude_mod.ClaudeRuntime.handle_line = orig
+    assert states == [(True, False)]
+
+
+def test_claude_review_without_a_shadow_is_a_review_error(env_factory):
+    env = env_factory(seed_active=False)     # claude's file does not exist yet
+    r = ClaudeReviewer(ChatConfig(), binary=[sys.executable, str(FAKE_CLAUDE)])
+    with pytest.raises(ReviewError):
+        r.review(env.session, "", "p", {}, threading.Lock())
+
+
+def test_claude_review_crash_is_a_review_error_and_releases_the_lock(claude_env, monkeypatch):
+    env = claude_env
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "crash")
+    r = ClaudeReviewer(ChatConfig(), binary=[sys.executable, str(FAKE_CLAUDE)])
+    lock = threading.Lock()
+    with pytest.raises(ReviewError):
+        r.review(env.session, "", "p", {}, lock)
+    assert not lock.locked()

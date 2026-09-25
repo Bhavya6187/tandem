@@ -329,3 +329,19 @@ def test_result_carries_structured_output():
                           "result": "{}", "structured_output": {"verdict": "clean"}},
                          rec.emit, rec, lambda o: None)
     assert out.status == "completed" and out.structured == {"verdict": "clean"}
+
+
+def test_extra_args_ride_argv_after_the_standard_flags():
+    rt = ClaudeRuntime(ChatConfig(), extra_args=["--fork-session", "--json-schema", "{}"])
+    argv = rt.argv("sid-1", fresh=False, model="")
+    assert argv[-3:] == ["--fork-session", "--json-schema", "{}"]
+    assert "--resume" in argv
+
+
+def test_on_init_gets_the_session_id_the_child_announces():
+    seen = []
+    rt = ClaudeRuntime(ChatConfig(), on_init=seen.append)
+    rec = Recorder()
+    rt.handle_line({"type": "system", "subtype": "init", "session_id": "fresh-id"}, rec.emit, rec, lambda o: None)
+    rt.handle_line({"type": "system", "subtype": "status"}, rec.emit, rec, lambda o: None)
+    assert seen == ["fresh-id"]
