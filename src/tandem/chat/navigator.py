@@ -227,6 +227,10 @@ def compute_diff(cwd: str, paths: tuple[str, ...], commands: int, *,
     return out if len(out) <= cap else out[:cap] + "\n… (truncated)"
 
 
+def headroom_ok(usage_state: dict, harness: str, floor: int) -> bool:
+    return True
+
+
 def log_path(tandem_id: str) -> Path:
     return paths.tandem_home() / "navigator" / f"{tandem_id}.jsonl"
 

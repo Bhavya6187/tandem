@@ -31,13 +31,15 @@ from .activity import Activity
 from .composer import Answer, Cancel, Composer, CtrlC, Interrupt, Repaint, Submit
 from .dispatch import Dispatcher
 from .events import (ApprovalRequest, Failure, Idle, LimitsUpdate, LiveEvent, QuestionRequest,
-                     TextDelta, ThinkingDelta, ToolFinished, ToolOutput, ToolStarted,
-                     TurnFinished, TurnStarted)
+                     ReviewFinished, ReviewStarted, TextDelta, ThinkingDelta, ToolFinished,
+                     ToolOutput, ToolStarted, TurnFinished, TurnStarted)
 from .files import list_paths
+from .navigator import Navigator, NavigatorLog, headroom_ok, log_path
 from .render import Screen
+from .reviewers import make_reviewer
 from .runtime.factory import make_runtimes
 
-WINDOW_COMMANDS = ("/quit", "/status", "/skip-permissions")
+WINDOW_COMMANDS = ("/quit", "/status", "/skip-permissions", "/note")
 _BUSY_TICK = 0.12            # the spinner's frame is 0.1 s; slower and it visibly skips
 _LONG_TURN_SECONDS = 15.0    # a turn this long ends with the bell
 
@@ -111,13 +113,16 @@ class Window:
     def __init__(self, session, store, cfg, screen: Screen, composer: Composer,
                  dispatcher, answers: WindowAnswers, bar: StatusBar, usage_state: dict,
                  meters: dict, poller: RateLimitPoller | None = None,
-                 stdin_fd: int | None = None, clock: Callable[[], float] = time.monotonic):
+                 stdin_fd: int | None = None, clock: Callable[[], float] = time.monotonic,
+                 navigator=None):
         self.session, self.store, self.cfg = session, store, cfg
         self.screen, self.composer, self.dispatcher = screen, composer, dispatcher
         self.answers, self.bar, self.usage_state, self.meters, self.poller = answers, bar, usage_state, meters, poller
         self.stdin_fd = stdin_fd
         self.activity = Activity(clock)
         self._ctrlc_at = 0.0
+        self.navigator = navigator
+        self._deferred: list[ReviewFinished] = []   # verdicts that landed mid-turn
 
     # -- painting ------------------------------------------------------------
 
@@ -125,7 +130,13 @@ class Window:
         default = self.dispatcher.default
         self.bar.active = default
         self.bar.others = [h for h in self.session.participants if h != default]
-        self.bar.marks = {h: "skip-perms" for h in self._skipping()}
+        marks = {h: "skip-perms" for h in self._skipping()}
+        nav = self.navigator
+        if nav is not None:
+            word = nav.mark()
+            if word:
+                marks[nav.harness] = " · ".join(filter(None, [marks.get(nav.harness, ""), word]))
+        self.bar.marks = marks
         meter = self.meters.get(default)
         usage = meter.state.get("text", "") if meter is not None else ""
         return self.bar.line(False, usage, self.usage_state.get("limits") or {})
@@ -152,6 +163,26 @@ class Window:
         self.dispatcher.set_cfg(self.cfg)
         self.screen.note(f"permissions {'skipped' if skip else 'asked'} from the next turn")
 
+    def note_command(self, arg: str) -> None:
+        """`/note` shows the pending note in full; `dismiss` drops it; `good`
+        and `bad` drop it and record whether it helped."""
+        nav = self.navigator
+        if nav is None:
+            self.screen.note("navigator is off")
+            return
+        if arg == "":
+            note = nav.pending()
+            if note is None:
+                self.screen.note("no pending note")
+            else:
+                self.screen.review(ReviewFinished(note.navigator, note.verdict))
+            return
+        if arg not in ("dismiss", "good", "bad"):
+            self.screen.note("usage: /note [dismiss|good|bad]")
+            return
+        dropped = nav.dismiss(None if arg == "dismiss" else arg)
+        self.screen.note("note dropped" if dropped else "no pending note")
+
     def status_line(self) -> str:
         """What `/status` prints: the session this window is driving, where
         the next bare prompt goes, and the model pins that would ride with it."""
@@ -164,6 +195,8 @@ class Window:
             parts.append("pins: " + ", ".join(pins))
         if self.cfg.skip_permissions:
             parts.append("permissions skipped")
+        if self.navigator is not None:
+            parts.append(f"navigator {self.navigator.harness} · {self.cfg.navigator_deliver}")
         return " · ".join(parts)
 
     def paint(self) -> None:
@@ -179,7 +212,7 @@ class Window:
         spinner and timer move on their own clock — a thinking model posts
         nothing for them to ride on; a line waiting on the user is static,
         like the idle rule."""
-        return _BUSY_TICK if self.activity.active and not self.activity.waiting else 1.0
+        return _BUSY_TICK if self.activity.animating else 1.0
 
     def _ring(self) -> None:
         if self.cfg.bell:
@@ -253,8 +286,18 @@ class Window:
             s.question(ev)
             self.composer.begin_question(ev)
             self._ring()
+        elif isinstance(ev, ReviewStarted):
+            pass                                   # the activity line and the bar mark carry it
+        elif isinstance(ev, ReviewFinished):
+            if self.activity.active:
+                self._deferred.append(ev)          # never split a streaming paragraph
+            else:
+                s.review(ev)
         elif isinstance(ev, TurnFinished):
             s.turn_finished(ev, self.activity.last_elapsed if was_active else None)
+            for deferred in self._deferred:
+                s.review(deferred)
+            self._deferred.clear()
             # whoever sat through a short turn saw it end; a long one is
             # the one they left for another window
             if was_active and self.activity.last_elapsed >= _LONG_TURN_SECONDS:
@@ -313,6 +356,9 @@ class Window:
                     continue
                 if command == "/skip-permissions":
                     self.set_skip_permissions(action.text.strip()[len(command):].strip())
+                    continue
+                if command == "/note":
+                    self.note_command(action.text.strip()[len(command):].strip())
                     continue
                 note = self.dispatcher.submit(action.text)
                 if note.startswith("error: "):
@@ -412,18 +458,31 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
     add_meters(session)
     usage_state: dict = {"limits": {}}
     poller = RateLimitPoller(list(session.participants), usage_state) if load_frame_config().rate_limits else None
+    navigator = None
+    nav_note = ""
+    if cfg.navigator:
+        if cfg.navigator in session.participants:
+            navigator = Navigator(
+                cfg.navigator, cfg, make_reviewer(cfg.navigator, cfg, store), post,
+                NavigatorLog(log_path(session.tandem_id)),
+                headroom=lambda: headroom_ok(usage_state, cfg.navigator, cfg.navigator_headroom))
+        else:
+            nav_note = (f"navigator {cfg.navigator} is not a participant of this session "
+                        f"({', '.join(session.participants)}); off")
     dispatcher = Dispatcher(store, session, runtimes, post, answers, meters=meters,
-                            add_meters=add_meters, first_turn=first_turn)
+                            add_meters=add_meters, first_turn=first_turn, navigator=navigator)
     bar = StatusBar(rows, cols, session.active, session.targets_for(session.active),
                     hint=route_hint(session.participants))
     win = Window(session, store, cfg, screen, composer, dispatcher, answers, bar, usage_state,
-                 meters, poller, stdin_fd=stdin_fd)
+                 meters, poller, stdin_fd=stdin_fd, navigator=navigator)
 
     old_attrs = termios.tcgetattr(stdin_fd)
     old_winch = signal.signal(signal.SIGWINCH, lambda *_: os.write(wake_w, b"W"))
     try:
         tty.setraw(stdin_fd)
         screen.enter(fresh=True)
+        if nav_note:
+            screen.note(nav_note)
         win.paint_history()
         if poller is not None:
             poller.ensure_started()
