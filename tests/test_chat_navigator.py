@@ -335,6 +335,7 @@ class FakeReviewer:
 
     def close(self):
         self.closed += 1
+        self.gate.set()                 # a closed reviewer's review ends: a real one is killed
 
 
 def speak(note="bad loop", file="s.py", line=12):
@@ -514,6 +515,19 @@ def test_close_waits_for_the_review_in_flight(tmp_path):
     nav.close()                                     # returns once the worker is gone
     assert reviewer.closed == 1 and nav._running is False
     assert not nav._thread.is_alive() and len(finished(posted)) == 1
+
+
+def test_a_review_past_the_timeout_closes_the_reviewer(tmp_path, monkeypatch):
+    import tandem.chat.navigator as navmod
+    monkeypatch.setattr(navmod, "REVIEW_TIMEOUT", 0.05)
+    nav, reviewer, posted, log = make_nav([CLEAN, CLEAN], tmp_path)
+    reviewer.gate.clear()                           # hung until something closes it
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION)
+    nav.join(5)
+    assert reviewer.closed == 1 and nav.mark() == ""
+    assert [f.verdict.verdict for f in finished(posted)] == ["clean"]
+    nav.turn_ended(facts_with(paths=("b.py",)), SESSION); nav.join(5)   # not wedged
+    assert len(finished(posted)) == 2 and reviewer.closed == 1       # a quick review is not cut off
 
 
 def test_a_reply_the_log_cannot_encode_still_finishes_the_review(tmp_path):

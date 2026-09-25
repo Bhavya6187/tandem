@@ -366,6 +366,9 @@ class Note:
 
 
 _MAX_FAILURES = 3
+# a review still running after this many seconds has its reviewer closed (the
+# process killed): the error verdict it ends in counts as one failure
+REVIEW_TIMEOUT = 120.0
 
 
 class Navigator:
@@ -491,10 +494,14 @@ class Navigator:
         started = self._clock()
         model = self.cfg.navigator_model
         verdict: Verdict | None = None
+        timer: threading.Timer | None = None
         try:
             self.post(ReviewStarted(self.harness))
             try:
                 diff = self._diff(session.cwd, facts.paths, facts.commands)
+                timer = threading.Timer(REVIEW_TIMEOUT, self.reviewer.close)
+                timer.daemon = True
+                timer.start()
                 result = self.reviewer.review(session, model, build_prompt(facts, diff), SCHEMA,
                                               self.shadow_lock)
                 verdict = parse_verdict(result.structured, result.text, navigator=self.harness,
@@ -513,6 +520,8 @@ class Navigator:
                 verdict = Verdict("error", error=f"{type(exc).__name__}: {exc}"[:200],
                                   navigator=self.harness, model=model, elapsed=self._clock() - started)
         finally:
+            if timer is not None:
+                timer.cancel()
             # whatever happened above, the window hears the review end and
             # the pending slot moves on — otherwise the worker wedges
             try:

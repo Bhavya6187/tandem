@@ -112,7 +112,8 @@ class ClaudeReviewer:
         extra = ["--fork-session", "--json-schema", json.dumps(schema),
                  "--permission-mode", "default",
                  "--allowedTools", *_CLAUDE_REVIEW_TOOLS,
-                 "--disallowedTools", *_CLAUDE_DENIED_TOOLS]
+                 "--disallowedTools", *_CLAUDE_DENIED_TOOLS,
+                 "--max-turns", "4"]
         forked: dict = {}
         released = threading.Event()
 
