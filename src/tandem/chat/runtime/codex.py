@@ -83,9 +83,10 @@ def _choices(available) -> tuple[str, ...]:
 class CodexRuntime:
     harness = "codex"
 
-    def __init__(self, cfg, *, binary: list[str] | None = None):
+    def __init__(self, cfg, *, binary: list[str] | None = None, output_schema: dict | None = None):
         self.cfg = cfg
         self.binary = list(binary) if binary else ["codex"]
+        self.output_schema = output_schema      # constrains the final message (the navigator's verdict)
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._n = 0
@@ -476,7 +477,7 @@ class CodexRuntime:
                 new_id = thread_id
             self._thread_id = thread_id
             turn = cp.TurnStartParams(threadId=thread_id, input=[{"type": "text", "text": prompt}],
-                                      model=model or None)
+                                      model=model or None, outputSchema=self.output_schema)
             r = self._call(proc, q, "turn/start", turn.model_dump(by_alias=True, exclude_none=True), emit, answers)
             if "error" in r:
                 return fail(str(r["error"].get("message", r["error"])))

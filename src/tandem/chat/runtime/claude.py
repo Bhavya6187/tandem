@@ -60,9 +60,12 @@ def _text_of(content) -> str:
 class ClaudeRuntime:
     harness = "claude"
 
-    def __init__(self, cfg, *, binary: list[str] | None = None):
+    def __init__(self, cfg, *, binary: list[str] | None = None,
+                 extra_args: list[str] | None = None, on_init=None):
         self.cfg = cfg
         self.binary = list(binary) if binary else ["claude"]
+        self.extra_args = list(extra_args or [])
+        self.on_init = on_init
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._interrupted = False

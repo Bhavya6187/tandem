@@ -536,3 +536,14 @@ def test_file_change_items_carry_their_paths():
         lambda o: None, rec.emit, rec)
     started = [e for e in rec.events if isinstance(e, ToolStarted)]
     assert started and started[0].tool == "patch" and started[0].paths == ("/p/a.py", "/p/b.py")
+
+
+def test_an_output_schema_rides_turn_start(env):
+    rt = CodexRuntime(ChatConfig(), binary=[sys.executable, str(FAKE)], output_schema={"type": "object"})
+    rec = Recorder()
+    rt.run_turn(env.session, "thread-1", "review", "", rec.emit, rec)
+    assert env.params("turn/start")["outputSchema"] == {"type": "object"}
+    plain = CodexRuntime(ChatConfig(), binary=[sys.executable, str(FAKE)])
+    (env.tmp / "params.jsonl").unlink()
+    plain.run_turn(env.session, "thread-1", "go", "", rec.emit, rec)
+    assert "outputSchema" not in env.params("turn/start")
