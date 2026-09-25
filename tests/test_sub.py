@@ -66,7 +66,7 @@ class TestForkShadow:
         started = time.time()
         _, fork_path = ops.fork_shadow(env.store, env.session)
 
-        assert await_codex_rollout(env.cwd, started, timeout=0) is None
+        assert await_codex_rollout(env.cwd, started, timeout=0, originator="codex_cli") is None
 
         # control: a rollout codex itself wrote, same dir, is still discovered
         real_sid = "019faca1-0000-7000-8000-0000000000ff"
@@ -74,9 +74,9 @@ class TestForkShadow:
         write_line(real, {
             "timestamp": "t", "type": "session_meta",
             "payload": {"id": real_sid, "session_id": real_sid,
-                        "cwd": env.cwd, "originator": "codex_cli"},
+                        "cwd": env.cwd, "originator": "codex_cli", "source": "cli"},
         })
-        assert await_codex_rollout(env.cwd, started, timeout=0) == real
+        assert await_codex_rollout(env.cwd, started, timeout=0, originator="codex_cli") == real
 
 
 class TestSeedSubRollout:
@@ -115,7 +115,7 @@ class TestSeedSubRollout:
         env = env_factory(active="claude")
         started = time.time()
         ops.seed_sub_rollout(env.session)
-        assert await_codex_rollout(env.cwd, started, timeout=0) is None
+        assert await_codex_rollout(env.cwd, started, timeout=0, originator="codex_cli") is None
 
 
 class _R:
@@ -138,7 +138,7 @@ class TestRunSub:
             seed = paths.find_codex_rollout(argv[argv.index("resume") + 1])
             calls["meta"] = read_jsonl(seed)[0]
             # while the worker runs, the seed must not look like a fresh codex
-            calls["adopted"] = await_codex_rollout(env.cwd, started, timeout=0)
+            calls["adopted"] = await_codex_rollout(env.cwd, started, timeout=0, originator="codex_cli")
             return _R(0)
 
         monkeypatch.setattr(ops, "_run", fake_run)
