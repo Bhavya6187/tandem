@@ -232,14 +232,15 @@ def compute_diff(cwd: str, paths: tuple[str, ...], commands: int, *,
 
 
 def headroom_ok(usage_state: dict, harness: str, floor: int) -> bool:
-    """The navigator's shortest rate-limit window (listed first by both
-    endpoints) has at least `floor` percent left. No parsed data — polling
-    off, API-key login, nothing fetched yet — means the floor is not
-    enforced: the bar text alone is not data."""
+    """The navigator's five-hour rate-limit window (the one labelled "5h",
+    wherever the source lists it; the first window when none is) has at
+    least `floor` percent left. No parsed data — polling off, API-key login,
+    nothing fetched yet — means the floor is not enforced: the bar text
+    alone is not data."""
     wins = (usage_state.get("windows") or {}).get(harness) or []
     if not wins:
         return True
-    _, used = wins[0]
+    _, used = next((w for w in wins if w[0] == "5h"), wins[0])
     return 100 - int(used) >= floor
 
 

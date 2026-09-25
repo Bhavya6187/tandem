@@ -596,6 +596,11 @@ def test_headroom_reads_the_shortest_window():
     assert headroom_ok({"windows": {"codex": [("5h", 79)]}}, "codex", 20) is True
 
 
+def test_headroom_picks_the_five_hour_window_wherever_it_is_listed():
+    assert headroom_ok({"windows": {"codex": [("7d", 10), ("5h", 85)]}}, "codex", 20) is False
+    assert headroom_ok({"windows": {"codex": [("7d", 90)]}}, "codex", 20) is False   # no 5h: the first
+
+
 def test_headroom_without_data_is_not_enforced():
     assert headroom_ok({}, "codex", 20) is True
     assert headroom_ok({"windows": {}}, "codex", 20) is True
