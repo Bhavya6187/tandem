@@ -39,6 +39,11 @@ harness for the first prompt. Enter sends; **Option-Enter**, **Ctrl-J**, or a
 `\` before Enter starts a new line, and the composer grows to fit the draft. Type
 `@` to pick a file: Up/Down choose, Tab or Enter completes the path.
 
+Native subagents finish within the current chat turn. Claude subagents run
+in the foreground; Codex can run workers concurrently, and chat waits for
+them even if the parent answers first. Worker activity is shown separately
+from the parent's reply. Cancelling a turn stops its remaining workers.
+
 Sessions have their own IDs, so you can keep multiple conversations in the
 same project. Resume from any directory; the session uses its saved working
 directory, conversation, last-used harness, and model pins:

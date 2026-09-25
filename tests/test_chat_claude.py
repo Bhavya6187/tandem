@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tandem.chat.events import (ApprovalRequest, QuestionRequest, TextDelta, ThinkingDelta,
+from tandem.chat.events import (ApprovalRequest, LimitsUpdate, QuestionRequest, TextDelta, ThinkingDelta,
                                 ToolFinished, ToolOutput, ToolStarted, TurnFinished)
 from tandem.chat.runtime.claude import ClaudeRuntime
 from tandem.config import ChatConfig
@@ -233,6 +233,9 @@ def test_golden_lines_drive_the_parser():
         got = rt.handle_line(json.loads(line), rec.emit, rec, sent.append)
         outcome = got or outcome
     assert outcome is not None and outcome.status == "completed"
+    limits = [e for e in rec.events if isinstance(e, LimitsUpdate)]
+    assert limits == [LimitsUpdate("claude", "5h 9% 7d 4%")]
+    rec.events = [e for e in rec.events if not isinstance(e, LimitsUpdate)]
     assert rec.kinds() == ["ThinkingDelta", "ToolStarted", "ToolOutput", "ToolFinished", "TextDelta", "TurnFinished"]
     assert rec.events[0] == ThinkingDelta("I should run it.")
     assert rec.events[1] == ToolStarted("toolu_01EdBuo5aF5Cjkj7NbwFrLeC", "Bash", "touch fixture-claude.txt")
@@ -249,3 +252,56 @@ def test_child_is_told_which_session_it_belongs_to(env, monkeypatch):
     rec = Recorder("allow")
     env.runtime.run_turn(env.session, "sid-1", "make x", "", rec.emit, rec)
     assert seen[0]["TANDEM_SESSION_ID"] == "tdm-claude"
+
+
+def test_resume_task_notification_does_not_swallow_user_turn():
+    rt = ClaudeRuntime(ChatConfig()); rec = Recorder()
+    assert rt.handle_line({"type": "result", "is_error": False, "num_turns": 0,
+                           "origin": {"kind": "task-notification"}}, rec.emit, rec, lambda _: None) is None
+    assert rec.events == []
+    rt.handle_line({"type": "assistant", "message": {"content": [{"type": "text", "text": "ANSWER"}]}},
+                   rec.emit, rec, lambda _: None)
+    out = rt.handle_line({"type": "result", "is_error": False, "num_turns": 1}, rec.emit, rec, lambda _: None)
+    assert out.status == "completed"
+    assert rec.events == [TextDelta("ANSWER"), TurnFinished("completed", "1 turns")]
+
+
+def test_child_text_does_not_corrupt_parent_stream_fallback():
+    rt = ClaudeRuntime(ChatConfig()); rec = Recorder()
+    for m in [
+        {"type": "stream_event", "parent_tool_use_id": "agent-1", "event": {
+            "type": "content_block_delta", "delta": {"type": "text_delta", "text": "CHILD"}}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "PARENT"}]}},
+    ]:
+        rt.handle_line(m, rec.emit, rec, lambda _: None)
+    assert [e.text for e in rec.events if isinstance(e, TextDelta)] == ["PARENT"]
+
+
+def test_claude_child_environment_disables_background_tasks(env, monkeypatch):
+    from tandem.chat.runtime import claude as mod
+    seen = []; real = mod.subprocess.Popen
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "0")
+    monkeypatch.setattr(mod.subprocess, "Popen",
+                        lambda *a, **kw: (seen.append(kw["env"]), real(*a, **kw))[1])
+    rec = Recorder()
+    env.runtime.run_turn(env.session, "sid-1", "make x", "", rec.emit, rec)
+    assert seen[0]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
+
+
+def test_rate_limit_event_feeds_the_bar():
+    """The usage endpoint throttles for minutes once anything else on the
+    account has asked; the figures claude streams every turn cannot be."""
+    rt = ClaudeRuntime(ChatConfig()); rec = Recorder()
+    out = rt.handle_line({"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed", "rateLimitType": "five_hour", "unifiedWindows": {
+            "five_hour": {"utilization": 0.09}, "seven_day": {"utilization": 0.04}}}},
+        rec.emit, rec, lambda _: None)
+    assert out is None
+    assert rec.events == [LimitsUpdate("claude", "5h 9% 7d 4%")]
+
+
+def test_rate_limit_event_without_windows_says_nothing():
+    rt = ClaudeRuntime(ChatConfig()); rec = Recorder()
+    rt.handle_line({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}},
+                   rec.emit, rec, lambda _: None)
+    assert rec.events == []

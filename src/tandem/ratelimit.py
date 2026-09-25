@@ -67,6 +67,23 @@ def parse_claude(payload) -> list[Window]:
     return out
 
 
+def parse_claude_event(info) -> list[Window]:
+    """The `rate_limit_info` of a `rate_limit_event` on claude's own
+    stream-json output: `unifiedWindows` holds the same two windows, with
+    `utilization` as a 0..1 fraction where the endpoint's is a percentage."""
+    wins = info.get("unifiedWindows") if isinstance(info, dict) else None
+    if not isinstance(wins, dict):
+        return []
+    out: list[Window] = []
+    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        win = wins.get(key)
+        frac = win.get("utilization") if isinstance(win, dict) else None
+        if isinstance(frac, bool) or not isinstance(frac, (int, float)):
+            continue
+        out.append(Window(label, _percent(frac * 100)))
+    return out
+
+
 def parse_codex(payload) -> list[Window]:
     """`wham/usage`: `rate_limit.primary_window` / `secondary_window` each
     carry `used_percent` and `limit_window_seconds`."""
@@ -116,6 +133,13 @@ class _SharedState:
 
 
 _shared = _SharedState()
+
+
+def remember(harness: str, text: str) -> None:
+    """A figure that did not come from a fetch — the chat runtimes read one
+    off every turn's own stream — recorded as the last known, so a poller
+    that is backing off republishes it instead of what it last fetched."""
+    _shared.text[harness] = text
 
 
 def _keychain_secret_uncached() -> str | None:

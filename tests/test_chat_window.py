@@ -322,6 +322,14 @@ def test_events_paint_and_idle_pumps(env_factory):
     assert "5h 3%" in w.bar_line()
 
 
+def test_a_streamed_limit_is_remembered_for_the_poller(env_factory, monkeypatch):
+    from tandem import ratelimit
+    monkeypatch.setattr(ratelimit, "_shared", ratelimit._SharedState())
+    env = env_factory(); w, *_ = make_window(env)
+    w.handle_event(LimitsUpdate("claude", "5h 9%"))
+    assert ratelimit._shared.text["claude"] == "5h 9%"
+
+
 def test_history_paints_the_default_harness_transcript(env_factory):
     env = env_factory(active="claude")
     write_line(env.claude_shadow, claude_user("fix the tests", uuid="u9"))
@@ -640,6 +648,40 @@ def test_first_turn_picks_up_meters_for_sessions_it_created(env_factory, monkeyp
     code, _ = drive_chat(env, first_turn=lambda: exists.append(1))
     assert code == 0
     assert built == ["claude", "codex"]
+
+
+def test_the_active_harness_gets_its_meter_once_its_first_turn_wrote_the_file(env_factory, monkeypatch):
+    """A fresh session's active claude has no transcript until its first turn
+    ends — after the window opened and after the seed — so the turn itself has
+    to be what brings its meter in, or the slot never shows a ctx figure."""
+    from tandem.chat import window
+
+    env = env_factory(active="claude")
+    hermetic_frame()
+    wrote = []
+    real = window.get_adapter
+
+    class LatePath:
+        def __init__(self, adapter): self._a = adapter
+        def __getattr__(self, name): return getattr(self._a, name)
+        def transcript_path(self, cwd, sid):
+            return self._a.transcript_path(cwd, sid) if wrote else None
+
+    class WritingRuntime(EchoRuntime):
+        def run_turn(self, *a, **kw):
+            wrote.append(1)
+            return super().run_turn(*a, **kw)
+
+    monkeypatch.setattr(window, "get_adapter",
+                        lambda h: LatePath(real(h)) if h == "claude" else real(h))
+    built = []
+    real_feed = window.UsageFeed
+    monkeypatch.setattr(window, "UsageFeed",
+                        lambda adapter, *a, **kw: (built.append(adapter.id), real_feed(adapter, *a, **kw))[1])
+    code, _ = drive_chat(env, runtimes={"claude": WritingRuntime(), "codex": EchoRuntime()},
+                         first_turn=lambda: None)
+    assert code == 0
+    assert "claude" in built
 
 
 def test_status_says_when_permissions_are_skipped(env_factory):

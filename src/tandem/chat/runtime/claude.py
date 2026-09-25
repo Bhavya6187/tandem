@@ -15,8 +15,9 @@ reference for anything not captured):
     control_request (subtype can_use_tool: tool_name, input, permission_suggestions)
     result (subtype, is_error, num_turns)
 
-The process exits after `result`; that exit is the turn boundary, so no
-Stop-hook sentinel is wired. `handle_line` is the whole protocol as a pure
+Subagents run in the foreground: a background dispatch can emit `result`
+before its worker finishes. Only the user's result ends the turn; resume
+can first emit a stale task-notification result. `handle_line` is the protocol as a pure
 function of one parsed line so the golden fixture can drive it."""
 
 from __future__ import annotations
@@ -29,7 +30,8 @@ from collections import deque
 from typing import Callable
 
 from ...harness import get_adapter
-from ..events import (Answers, ApprovalRequest, LiveEvent, QuestionRequest, TextDelta,
+from ...ratelimit import format_windows, parse_claude_event
+from ..events import (Answers, ApprovalRequest, LimitsUpdate, LiveEvent, QuestionRequest, TextDelta,
                       ThinkingDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished,
                       TurnOutcome)
 from . import child_env, first_line, summarize_args, terminate
@@ -103,6 +105,11 @@ class ClaudeRuntime:
                     send: Callable[[dict], None]) -> TurnOutcome | None:
         """One parsed stdout line. Returns the outcome on `result`, else None."""
         t = m.get("type")
+        # Child prose is reported by the Agent tool's hand-back. Do not paint
+        # it as parent prose or let it alter the parent's streaming fallback.
+        child = bool(m.get("parent_tool_use_id"))
+        if child and t == "stream_event":
+            return None
         if t == "stream_event":
             ev = m.get("event") or {}
             if ev.get("type") == "message_start":
@@ -120,9 +127,10 @@ class ClaudeRuntime:
                 if not isinstance(b, dict):
                     continue
                 if b.get("type") == "tool_use":
-                    emit(ToolStarted(b.get("id", ""), b.get("name", ""),
+                    name = b.get("name", "")
+                    emit(ToolStarted(b.get("id", ""), f"agent/{name}" if child else name,
                                      summarize_args(b.get("name", ""), b.get("input"))))
-                elif b.get("type") == "text" and not self._streamed_text and b.get("text"):
+                elif b.get("type") == "text" and not child and not self._streamed_text and b.get("text"):
                     emit(TextDelta(b["text"]))       # partial messages off: paint the block
             return None
         if t == "user":
@@ -140,7 +148,15 @@ class ClaudeRuntime:
             send({"type": "control_response",
                   "response": {"subtype": "success", "request_id": rid, "response": response}})
             return None
+        if t == "rate_limit_event":
+            windows = parse_claude_event(m.get("rate_limit_info"))
+            if windows:
+                emit(LimitsUpdate("claude", format_windows(windows)))
+            return None
         if t == "result":
+            if child or (not self._interrupted and
+                         (m.get("origin") or {}).get("kind") == "task-notification"):
+                return None
             if self._interrupted:
                 status = "interrupted"
             else:
@@ -161,7 +177,8 @@ class ClaudeRuntime:
         self._streamed_text = False
         proc = subprocess.Popen(
             self.argv(native_id, fresh, model), cwd=session.cwd,
-            env=child_env(tandem_id=session.tandem_id),
+            env={**child_env(tandem_id=session.tandem_id),
+                 "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"},
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1, start_new_session=True,
         )

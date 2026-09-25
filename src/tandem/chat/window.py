@@ -24,7 +24,7 @@ from ..events import SessionContext, UserMessage
 from ..frame import StatusBar
 from ..harness import get_adapter
 from ..ptyrun import _winsize
-from ..ratelimit import RateLimitPoller
+from ..ratelimit import RateLimitPoller, remember
 from ..runner import UsageFeed
 from ..state import SyncCursor
 from .activity import Activity
@@ -265,6 +265,7 @@ class Window:
             limits = dict(self.usage_state.get("limits") or {})
             limits[ev.harness] = ev.text
             self.usage_state["limits"] = limits
+            remember(ev.harness, ev.text)     # else a throttled poller's next refresh blanks it
         elif isinstance(ev, Idle):
             self.session = getattr(self.dispatcher, "session", self.session)
             self.dispatcher.pump()
@@ -395,22 +396,24 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
     runtimes = runtimes if runtimes is not None else make_runtimes(session, cfg)
     meters: dict = {}
 
-    def add_meters() -> None:
-        for h in session.participants:
-            sid = session.native_id(h)
-            path = get_adapter(h).transcript_path(session.cwd, sid) if sid and h not in meters else None
+    def add_meters(sess) -> None:
+        """A meter for every participant that has a transcript by now and no
+        meter yet. Runs at open and after every turn: the active harness's
+        file is written by its own first turn, and a seeded opencode has no
+        transcript path until its session exists."""
+        for h in sess.participants:
+            sid = sess.native_id(h)
+            path = get_adapter(h).transcript_path(sess.cwd, sid) if sid and h not in meters else None
             if path is not None:
-                meters[h] = UsageFeed(get_adapter(h), session, path, {"text": ""})
+                meter = UsageFeed(get_adapter(h), sess, path, {"text": ""})
+                meter.poll()
+                meters[h] = meter
 
-    def seed_then_meter() -> None:
-        first_turn()
-        add_meters()        # opencode has no transcript path until its session exists
-
-    add_meters()
+    add_meters(session)
     usage_state: dict = {"limits": {}}
     poller = RateLimitPoller(list(session.participants), usage_state) if load_frame_config().rate_limits else None
     dispatcher = Dispatcher(store, session, runtimes, post, answers, meters=meters,
-                            first_turn=seed_then_meter if first_turn is not None else None)
+                            add_meters=add_meters, first_turn=first_turn)
     bar = StatusBar(rows, cols, session.active, session.targets_for(session.active),
                     hint=route_hint(session.participants))
     win = Window(session, store, cfg, screen, composer, dispatcher, answers, bar, usage_state,
@@ -422,8 +425,6 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
         tty.setraw(stdin_fd)
         screen.enter(fresh=True)
         win.paint_history()
-        for m in meters.values():
-            m.poll()
         if poller is not None:
             poller.ensure_started()
         win.paint()
