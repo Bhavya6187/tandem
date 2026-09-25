@@ -25,7 +25,7 @@ from pathlib import Path
 from . import paths
 from .harness import get_adapter
 from .harness.codex import output_text
-from .runner import TailLoop, await_codex_rollout
+from .runner import CODEX_ORIGINATOR_ENV, TailLoop, await_codex_rollout, codex_launch_env
 from .state import PairedSession, StateStore
 from .sync import SyncEngine, SyncSetupError
 from .util import append_jsonl_fsync, read_jsonl, uuid7
@@ -337,16 +337,21 @@ def run_oneoff(
     # below needs the session that knows about it
     session = prepare_turn(store, session, target)
 
+    launch_env = codex_launch_env() if target == "codex" and not sid else None
     started = time.time()
     if target == "codex" and not sid:
         # codex never ran: no session to resume; a fresh exec creates one.
         argv = [adapter.binary, "exec", "--skip-git-repo-check", prompt]
     else:
         argv = adapter.oneoff_argv(sid, prompt)
-    code = _run(argv, cwd=session.cwd).returncode
+    code = _run(argv, cwd=session.cwd,
+                **({"env": launch_env} if launch_env is not None else {})).returncode
 
     if target == "codex" and not sid:
-        rollout = await_codex_rollout(session.cwd, started, timeout=10)
+        rollout = await_codex_rollout(
+            session.cwd, started, timeout=10,
+            originator=launch_env[CODEX_ORIGINATOR_ENV],
+        )
         if rollout:
             new_sid = paths.codex_rollout_session_id(rollout)
             if new_sid:

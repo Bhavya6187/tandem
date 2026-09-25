@@ -362,7 +362,7 @@ def test_runner_publishes_the_discovered_codex_rollout_to_the_monitor(
     rollout = env.codex_shadow
     monkeypatch.setattr(
         runner, "await_codex_rollout",
-        lambda cwd, after, timeout=None: rollout,
+        lambda cwd, after, timeout=None, **kwargs: rollout,
     )
     made = {}
     real = runner.FlipMonitor
@@ -373,7 +373,7 @@ def test_runner_publishes_the_discovered_codex_rollout_to_the_monitor(
 
     monkeypatch.setattr(runner, "FlipMonitor", capture)
 
-    def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None):
+    def fake_run_in_pty(argv, cwd=None, frame=None, control=None, child=None, env=None):
         deadline = time.time() + 3
         while made["monitor"].transcript is None and time.time() < deadline:
             time.sleep(0.02)

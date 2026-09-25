@@ -167,6 +167,7 @@ session storage. Format knowledge is isolated per tool in
   (`OPENCODE_DB` honored); tandem's session rows live alongside opencode's
 
 Claude session ids are minted by tandem (`claude --session-id`); codex
-mints its own on first run and tandem captures it from the new rollout
-file; opencode sessions are born through `opencode import`, so they exist
+mints its own on first run and tandem captures it from the rollout carrying
+a unique per-launch originator marker (never by directory and recency alone).
+Opencode sessions are born through `opencode import`, so they exist
 before `opencode -s <id>` is ever asked to open them.

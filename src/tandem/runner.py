@@ -26,7 +26,7 @@ from .ptyrun import FrameIO, PtyControl, _winsize, run_in_pty
 from .ratelimit import RateLimitPoller
 from .state import PairedSession, StateStore, SyncCursor
 from .tailer import TailedLine, TranscriptMissing, TranscriptTruncated, TranscriptWatcher
-from .util import json_line
+from .util import json_line, uuid7
 from .warm import WarmChild, _shadow_size, build_launch, spawn_hidden
 
 
@@ -488,10 +488,28 @@ class UsageFeed:
 _TANDEM_ORIGINATORS = ("tandem", "tandem-sub")
 
 
-def await_codex_rollout(cwd: str, after: float, timeout: float | None = None) -> Path | None:
+CODEX_ORIGINATOR_ENV = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"
+
+
+def codex_launch_env() -> dict[str, str]:
+    """Bind a fresh CLI launch to its rollout without changing the parent env.
+
+    Codex records this override as session_meta.payload.originator. A unique
+    value distinguishes simultaneous launches even when they share a cwd.
+    """
+    return {**os.environ, CODEX_ORIGINATOR_ENV: f"tandem-launch-{uuid7()}"}
+
+
+def await_codex_rollout(
+    cwd: str, after: float, timeout: float | None = None, *,
+    originator: str,
+) -> Path | None:
     """Find the rollout file codex just created for this cwd (codex mints its
     own session id; tandem discovers it from the filesystem). Rollouts tandem
-    authored are never candidates."""
+    authored are never candidates. Launch callers supply their unique originator;
+    a foreign rollout is never a fallback, even if it is newer. Child-agent
+    rollouts inherit the originator, so only top-level CLI/exec sources match.
+    """
     deadline = None if timeout is None else time.time() + timeout
     while True:
         for p in paths.iter_codex_rollouts_newest_first():
@@ -501,6 +519,14 @@ def await_codex_rollout(cwd: str, after: float, timeout: float | None = None) ->
                 with open(p, "rb") as f:
                     first = f.readline()
                 meta = json.loads(first) if first.strip() else {}
+                payload = meta.get("payload") or {}
+                if not isinstance(payload, dict):
+                    continue
+                if (
+                    payload.get("originator") != originator
+                    or payload.get("source") not in ("cli", "exec")
+                ):
+                    continue
                 if (
                     meta.get("type") == "session_meta"
                     and meta.get("payload", {}).get("cwd") == cwd
@@ -727,6 +753,7 @@ class InteractiveRunner:
         self.reports = []
 
         stop = threading.Event()
+        launch_env = codex_launch_env() if active == "codex" and not active_sid else None
         spawn_time = time.time()
         errors: list[str] = []
         # Two lists, one reporting spot: `errors` are sync failures (the
@@ -743,9 +770,17 @@ class InteractiveRunner:
                 current = store.get_session(session.tandem_id) or session
                 path = transcript
                 if path is None:
+                    if launch_env is None:
+                        # A known id must never be replaced by discovery when
+                        # its transcript disappears; resume owns that failure.
+                        errors.append(f"{active} transcript missing ({active_sid})")
+                        return
                     # codex minting its own session: wait for the rollout.
                     while not stop.is_set():
-                        found = await_codex_rollout(session.cwd, spawn_time, timeout=0.5)
+                        found = await_codex_rollout(
+                            session.cwd, spawn_time, timeout=0.5,
+                            originator=launch_env[CODEX_ORIGINATOR_ENV],
+                        )
                         if found:
                             sid = paths.codex_rollout_session_id(found)
                             if sid:
@@ -830,7 +865,8 @@ class InteractiveRunner:
                 if pre_spawned is None:
                     self.adopt_child.kill()
             code = run_in_pty(argv, cwd=session.cwd, frame=frame,
-                              control=control, child=pre_spawned)
+                              control=control, child=pre_spawned,
+                              **({"env": launch_env} if launch_env is not None else {}))
         finally:
             stop.set()
             if poller is not None:
