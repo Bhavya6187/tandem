@@ -194,8 +194,12 @@ The fork rollout is unlinked in a `finally`.
 
 **Claude.** A fresh `ClaudeRuntime` with a new constructor option
 `review_args` appended to argv: `--fork-session`, `--json-schema <schema>`,
-`--allowedTools Read Grep Glob "Bash(git diff *)" "Bash(git log *)"`, and no
-bypass. The stdio prompt tool stays, answered by the deny-all `Answers`.
+`--permission-mode default`, `--allowedTools Read Grep Glob`,
+`--disallowedTools Edit Write MultiEdit NotebookEdit Agent Task`, and
+`--max-turns 4`. The review is read-only three ways over (permission mode,
+allowlist, denylist) with no `Bash` at all, since the diff is already in the
+prompt, and `--max-turns 4` bounds how long it can wander. The stdio prompt
+tool stays, answered by the deny-all `Answers`.
 `handle_line` records `session_id` from `system/init`; the reviewer holds
 `shadow_lock` until that line arrives, then releases. The verdict comes from
 the result message's structured output when present, else from the final
@@ -359,6 +363,11 @@ No new database state. The only persistent artefact is the log file.
 - A review still running at `/quit`: `Dispatcher.close` calls
   `navigator.close()`, which climbs the same kill ladder as the runtimes and
   deletes the fork.
+- A review running longer than 120 s (`REVIEW_TIMEOUT`) has its reviewer
+  closed, which kills it into an error verdict, and a reviewer's `close()`
+  sets a flag checked before it spawns, so a quit that lands during the fork
+  deletes the fork and starts nothing (`Navigator.close` then joins its
+  worker for up to 5 s).
 - An unparsable verdict: error. A parsable one with `verdict: "speak"` and an
   empty note: treated as clean and logged `verdict: "empty"`.
 - Rate-limit 429s on the review turn: the runtime reports failure as it
