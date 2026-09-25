@@ -100,3 +100,101 @@ def test_gate_skip_reasons_in_order():
 def test_a_claim_does_not_count_when_a_note_rode_the_prompt():
     assert g(facts_with(final_text="fixed", carried_note=True)) == "skip:quiet"
     assert g(facts_with(paths=("a",), carried_note=True)) == ""     # a real change still does
+
+
+import subprocess
+from tandem.chat.navigator import NOTE_CHARS, SCHEMA, build_prompt, compute_diff, parse_verdict
+
+
+def test_prompt_names_the_turn_and_carries_the_diff():
+    p = build_prompt(facts_with(harness="claude", paths=("a.py", "b.py")), "--- a.py\n+++ a.py\n")
+    assert p.startswith("[tandem navigator]")
+    assert "ran on claude" in p and "a.py, b.py" in p and "+++ a.py" in p
+    assert "block a pull request" in p and "\"clean\"" in p
+
+
+def test_prompt_without_files_or_diff_says_so():
+    p = build_prompt(facts_with(paths=()), "")
+    assert "no files" in p and "(no diff)" in p
+
+
+def test_schema_is_what_the_spec_says():
+    assert SCHEMA["required"] == ["verdict"]
+    assert SCHEMA["properties"]["verdict"]["enum"] == ["clean", "speak"]
+    assert SCHEMA["properties"]["note"]["maxLength"] == NOTE_CHARS == 400
+
+
+def pv(structured=None, text="", **kw):
+    opts = dict(navigator="codex", model="", elapsed=1.5)
+    opts.update(kw)
+    return parse_verdict(structured, text, **opts)
+
+
+def test_structured_output_wins_over_text():
+    v = pv({"verdict": "speak", "severity": "block", "note": "bad loop",
+            "evidence": [{"file": "s.py", "line": 12, "why": "swallows"}]}, text="garbage")
+    assert v.spoken and v.severity == "block" and v.note == "bad loop"
+    assert v.evidence == (Evidence("s.py", 12, "swallows"),)
+    assert v.navigator == "codex" and v.elapsed == 1.5
+
+
+def test_text_json_is_parsed_even_inside_fences_or_prose():
+    v = pv(text="Sure.\n```json\n{\"verdict\": \"speak\", \"note\": \"n\", \"severity\": \"warn\"}\n```\n")
+    assert v.spoken and v.severity == "warn"
+    assert pv(text='{"verdict": "clean"}').verdict == "clean"
+
+
+def test_speak_without_a_note_is_empty_and_long_notes_are_clipped():
+    assert pv({"verdict": "speak", "note": "  "}).verdict == "empty"
+    v = pv({"verdict": "speak", "note": "x" * 900})
+    assert len(v.note) == NOTE_CHARS
+
+
+def test_bad_verdicts_are_errors_not_exceptions():
+    for structured, text in [(None, ""), (None, "not json"), ({"verdict": "maybe"}, ""),
+                             ({"verdict": "speak", "note": "n", "evidence": "nope"}, ""),
+                             ({"verdict": "speak", "note": "n", "evidence": [{"file": "a"}]}, "")]:
+        v = pv(structured, text)
+        assert v.verdict == "error" and v.error, (structured, text)
+
+
+def test_evidence_with_a_string_line_is_coerced_or_dropped():
+    v = pv({"verdict": "speak", "note": "n", "evidence": [{"file": "a.py", "line": "7"}]})
+    assert v.evidence == (Evidence("a.py", 7),)
+
+
+@pytest.fixture
+def repo(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "--allow-empty", "-m", "root"], check=True)
+    (tmp_path / "a.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "a.py"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "-m", "a"], check=True)
+    return tmp_path
+
+
+def test_diff_of_touched_files_plus_untracked_contents(repo):
+    (repo / "a.py").write_text("x = 2\n")
+    (repo / "new.py").write_text("print('hi')\n")
+    d = compute_diff(str(repo), ("a.py", "new.py"), 0)
+    assert "-x = 1" in d and "+x = 2" in d
+    assert "new.py (untracked)" in d and "print('hi')" in d
+
+
+def test_diff_falls_back_to_the_whole_tree_after_a_command(repo):
+    (repo / "a.py").write_text("x = 3\n")
+    assert "+x = 3" in compute_diff(str(repo), (), 1)
+    assert compute_diff(str(repo), (), 0) == ""          # nothing touched, nothing ran
+
+
+def test_diff_is_capped_with_a_marker(repo):
+    (repo / "a.py").write_text("y\n" * 5000)
+    d = compute_diff(str(repo), ("a.py",), 0, cap=500)
+    assert len(d) <= 500 + 40 and d.endswith("… (truncated)")
+
+
+def test_diff_outside_a_repo_is_empty_not_an_error(tmp_path):
+    (tmp_path / "a.py").write_text("x\n")
+    assert compute_diff(str(tmp_path), ("a.py",), 1) == ""
