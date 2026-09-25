@@ -68,7 +68,7 @@ def test_approve_flow(env):
     assert rec.events[1] == ToolOutput("call-1", "hello\n")
     assert rec.events[2] == ToolFinished("call-1", True, "exit 0")
     assert rec.events[3] == TextDelta("DONE")
-    assert rec.events[4] == LimitsUpdate("codex", "5h 3% 7d 12%")
+    assert rec.events[4] == LimitsUpdate("codex", "5h 3% 7d 12%", (("5h", 3), ("7d", 12)))
     assert rec.events[5].status == "completed" and rec.events[5].usage == "1% ctx · 2200↑ 200↓"
 
 
@@ -337,7 +337,7 @@ def test_golden_lines_drive_the_handler():
     assert rec.kinds() == ["ToolStarted", "ToolOutput", "ToolFinished", "LimitsUpdate", "TextDelta", "TurnFinished"]
     assert rec.events[0] == ToolStarted("call_vDe2mWf2XYJ1BjLDXSDWgLSo", "exec", "echo fixture —")
     assert rec.events[1] == ToolOutput("call_vDe2mWf2XYJ1BjLDXSDWgLSo", "fixture —\n")   # from aggregatedOutput, no delta streamed
-    assert rec.events[3] == LimitsUpdate("codex", "5h 0% 7d 0%")
+    assert rec.events[3] == LimitsUpdate("codex", "5h 0% 7d 0%", (("5h", 0), ("7d", 0)))
 
 
 def test_child_is_told_which_session_it_belongs_to(env, monkeypatch):
@@ -523,3 +523,37 @@ def test_worker_reactivated_after_idle_is_waited_for_again():
     handle(subagent_status("child", "active"))
     assert handle(subagent_done("parent")) is None
     assert handle(subagent_done("child", "t1")).status == "completed"
+
+
+def test_file_change_items_carry_their_paths():
+    rt = CodexRuntime(ChatConfig())
+    rec = Recorder()
+    rt.handle({"jsonrpc": "2.0", "method": "item/started", "params": {
+        "threadId": "t", "turnId": "u", "startedAtMs": 1,
+        "item": {"type": "fileChange", "id": "fc-1", "status": "inProgress", "changes": [
+            {"path": "/p/a.py", "kind": {"type": "update"}, "diff": "-x\n+y\n"},
+            {"path": "/p/b.py", "kind": {"type": "add"}, "diff": "+z\n"}]}}},
+        lambda o: None, rec.emit, rec)
+    started = [e for e in rec.events if isinstance(e, ToolStarted)]
+    assert started and started[0].tool == "patch" and started[0].paths == ("/p/a.py", "/p/b.py")
+
+
+def test_an_output_schema_rides_turn_start(env):
+    rt = CodexRuntime(ChatConfig(), binary=[sys.executable, str(FAKE)], output_schema={"type": "object"})
+    rec = Recorder()
+    rt.run_turn(env.session, "thread-1", "review", "", rec.emit, rec)
+    assert env.params("turn/start")["outputSchema"] == {"type": "object"}
+    plain = CodexRuntime(ChatConfig(), binary=[sys.executable, str(FAKE)])
+    (env.tmp / "params.jsonl").unlink()
+    plain.run_turn(env.session, "thread-1", "go", "", rec.emit, rec)
+    assert "outputSchema" not in env.params("turn/start")
+
+
+def test_rate_limits_updated_carries_windows():
+    rt = CodexRuntime(ChatConfig())
+    rec = Recorder()
+    rt.handle({"jsonrpc": "2.0", "method": "account/rateLimits/updated", "params": {"rateLimits": {
+        "primary": {"usedPercent": 30, "windowDurationMins": 300},
+        "secondary": {"usedPercent": 5, "windowDurationMins": 10080}}}}, lambda o: None, rec.emit, rec)
+    ev = [e for e in rec.events if isinstance(e, LimitsUpdate)][0]
+    assert ev.windows == (("5h", 30), ("7d", 5))

@@ -5,13 +5,14 @@ runner in the middle:
   parse route → (bare route: set default, done) → queue if busy →
   validate target transcript → ops.prepare_turn → runtime.run_turn →
   adopt a freshly minted id → target becomes the default → ops.sync_after_turn
-  → feed the usage meter → Idle
+  → feed the usage meter → hand the turn to the navigator, if any → Idle
 
 The worker thread emits every event through `emit`; the window drains
 them on the main thread and calls pump() on Idle."""
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections import deque
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from ..promptroute import RouteError, parse_route
 from ..sync import SyncSetupError
 from .events import (Answers, Failure, Idle, LiveEvent, TurnFinished, TurnOutcome,
                      TurnStarted)
+from .navigator import FactsCollector
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,8 @@ class Dispatcher:
     def __init__(self, store, session, runtimes: dict, emit: Callable[[LiveEvent], None],
                  answers: Answers, *, meters: dict | None = None,
                  add_meters: Callable[[object], None] | None = None,
-                 first_turn: Callable[[], None] | None = None):
+                 first_turn: Callable[[], None] | None = None,
+                 navigator=None):
         self.store = store
         self.session = session
         self.runtimes = runtimes
@@ -62,6 +65,9 @@ class Dispatcher:
         # harnesses' session files): a window opened and closed leaves nothing
         # behind. Kept until it succeeds, so a failed attempt is retried.
         self._first_turn = first_turn
+        # the second harness that reviews each turn (chat/navigator.py), or
+        # None: then nothing here changes — no facts, no trailer, no lock
+        self.navigator = navigator
         self.queue: deque[Pending] = deque()
         # guards the start-or-queue decision and the flags it sets, nothing
         # more: submit() runs on the main thread while pump() can run on the
@@ -161,6 +167,11 @@ class Dispatcher:
             self.queue.clear()
             thread = self._thread
         self.interrupt()
+        if self.navigator is not None:
+            try:
+                self.navigator.close()
+            except Exception:
+                pass
         # A runtime parked on an unanswered approval is asleep in the answers
         # queue, where interrupt cannot reach it; the window's Ctrl-C ladder
         # denies first for the same reason. Closing the answers denies that
@@ -231,22 +242,44 @@ class Dispatcher:
     def _run(self, item: Pending, spoken: int) -> None:
         harness = item.harness
         ran = False
-        self.emit(TurnStarted(harness, item.model, item.prompt))
+        nav = self.navigator
+        # a note the navigator left rides this prompt as a trailer — taken
+        # now, not at submit, so a note that lands while a prompt is queued
+        # still reaches it
+        note = nav.take(harness) if nav is not None else None
+        prompt = item.prompt + note.trailer() if note is not None else item.prompt
+        self.emit(TurnStarted(harness, item.model, item.prompt,
+                              carried=note.summary if note is not None else ""))
+        facts = None
+        emit = self.emit
+        lock = nav.shadow_lock if nav is not None else contextlib.nullcontext()
+        outcome = None
+        synced = False
         try:
             if self._first_turn is not None:
                 self._first_turn()
                 self._first_turn = None
+            # read after the seeding: a turn that gets this far has its
+            # shadows, so its review is not skipped as a first turn
+            first = self._first_turn is not None
+            if nav is not None:
+                facts = FactsCollector(harness, item.prompt, note is not None, first, self.emit)
+                emit = facts.emit
             problems = self._validate(harness)
             if problems:
                 self.emit(Failure(f"{harness} transcript: " + "; ".join(problems)))
                 self.emit(TurnFinished("failed", ""))
+                self._give_back(note)
                 return
             session = self.session
             if session.native_id(harness):
                 # prepare_turn also seeds any participant whose harness has
                 # never run (a fresh session's active claude has no file yet),
-                # and hands back the session that knows the ids it minted
-                session = self.session = ops.prepare_turn(self.store, session, harness)
+                # and hands back the session that knows the ids it minted.
+                # Under the navigator's lock: a claude review fork reads the
+                # shadow this drains into.
+                with lock:
+                    session = self.session = ops.prepare_turn(self.store, session, harness)
             # else: nothing to fast-forward and no file to drain into yet — the
             # first turn on a never-run codex starts context-less, as `tandem run
             # --on codex` does, and sync_after_turn translates it outward once
@@ -254,7 +287,7 @@ class Dispatcher:
             # either: an active codex with no id is the only harness a fresh
             # pairing leaves fileless, and every other side already has one.
             outcome = self.runtimes[harness].run_turn(
-                session, session.native_id(harness), item.prompt, item.model, self.emit, self.answers)
+                session, session.native_id(harness), prompt, item.model, emit, self.answers)
             ran = True      # from here on the runtime has emitted its own TurnFinished
             if outcome.native_id:
                 self.session = ops.adopt_native_id(self.store, session, harness, outcome.native_id)
@@ -271,8 +304,10 @@ class Dispatcher:
             # message, which opencode's dry-resume check rejects — wedging
             # every later turn there. Close it in the shadows as we sync.
             quarantine_pre = self._failed_turns(harness)
-            ops.sync_after_turn(self.store, self.session, harness,
-                                close_note=_close_note(harness, outcome))
+            with lock:
+                ops.sync_after_turn(self.store, self.session, harness,
+                                    close_note=_close_note(harness, outcome))
+            synced = True       # only a turn the shadows received is worth reviewing
             self._report_quarantine(harness, quarantine_pre)
             self.store.touch_used(self.session.tandem_id)
             if self._add_meters is not None:
@@ -283,9 +318,13 @@ class Dispatcher:
         except SyncSetupError as exc:
             self.emit(Failure(f"sync: {exc}"))
             self._finish_unrun(ran)
+            if not ran:
+                self._give_back(note)
         except Exception as exc:                       # a runtime bug must not kill the window
             self.emit(Failure(f"{harness}: {type(exc).__name__}: {exc}"))
             self._finish_unrun(ran)
+            if not ran:
+                self._give_back(note)
         finally:
             # free before the announcement: a window that pumps straight out
             # of this Idle — even synchronously, on this thread — must find
@@ -294,7 +333,22 @@ class Dispatcher:
             with self._lock:
                 self._current = None
                 self._running = False
+            if facts is not None and outcome is not None and synced:
+                try:
+                    nav.turn_ended(facts.finish(outcome.status), self.session)
+                except Exception:
+                    pass                               # the navigator must never take the window down
             self.emit(Idle())
+
+    def _give_back(self, note) -> None:
+        """A note taken for a turn no model ever saw goes back to the
+        navigator, to ride the next prompt instead."""
+        if note is None:
+            return
+        try:
+            self.navigator.give_back(note)
+        except Exception:
+            pass                                       # the navigator must never take the window down
 
     def _finish_unrun(self, ran: bool) -> None:
         """Every TurnStarted owes the renderer one terminal TurnFinished. The

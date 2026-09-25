@@ -294,3 +294,17 @@ def test_the_turn_posts_the_prompt_verbatim_with_its_file_parts(fake, proj):
     assert parts[0] == {"type": "text", "text": "explain @src/app.py"}
     assert [p["filename"] for p in parts[1:]] == ["src/app.py"]
     rt.close()
+
+
+def test_edit_and_write_parts_carry_their_paths():
+    rt = OpencodeRuntime(ChatConfig())
+    rec = Recorder()
+    st = TurnState(session_id="s-1")
+    for tool, inp in [("edit", {"filePath": "/p/a.py"}), ("write", {"filePath": "/p/b.py"}),
+                      ("bash", {"command": "ls"})]:
+        rt.handle_event({"type": "message.part.updated", "properties": {"part": {
+            "sessionID": "s-1", "messageID": "m-1", "id": f"p-{tool}", "type": "tool",
+            "callID": f"c-{tool}", "tool": tool, "state": {"status": "running", "input": inp}}}},
+            st, rec.emit, rec)
+    paths = [e.paths for e in rec.events if isinstance(e, ToolStarted)]
+    assert paths == [("/p/a.py",), ("/p/b.py",), ()]

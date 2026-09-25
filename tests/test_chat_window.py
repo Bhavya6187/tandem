@@ -8,11 +8,14 @@ import threading
 import time
 import tty
 
+import pytest
 from conftest import claude_assistant, claude_user, write_line
 
 from tandem.chat.composer import Composer
-from tandem.chat.events import (ApprovalRequest, Idle, LimitsUpdate, QuestionRequest, TextDelta,
+from tandem.chat.events import (ApprovalRequest, Evidence, Idle, LimitsUpdate, QuestionRequest,
+                                ReviewFinished, ReviewStarted, TextDelta, Verdict,
                                 ToolStarted, TurnFinished, TurnOutcome, TurnStarted)
+from tandem.chat.navigator import Note
 from tandem.chat.render import Screen
 from tandem.chat.window import Window, WindowAnswers, route_hint, run_chat
 from tandem.config import ChatConfig
@@ -858,3 +861,198 @@ def test_bell_off_never_rings(env_factory):
     clock.now += 40
     w.handle_event(TurnFinished("completed", "")); w.handle_event(Idle())
     assert "\x07" not in out.text()
+
+
+class StubNavigator:
+    harness = "codex"
+
+    def __init__(self):
+        self.note, self.running, self.dismissed, self.closed = None, False, [], 0
+        self.last_ref = None        # a note that already rode a prompt
+
+    def mark(self):
+        return "reviewing" if self.running else ("note" if self.note else "")
+
+    def pending(self):
+        return self.note
+
+    def dismiss(self, feedback=None):
+        had = self.note is not None
+        self.dismissed.append(feedback); self.note = None
+        return had or (feedback in ("good", "bad") and self.last_ref is not None)
+
+    def close(self):
+        self.closed += 1
+
+
+def spoken_note():
+    return Note("r1", "codex", "claude", Verdict("speak", severity="block", note="bad loop",
+                                                  evidence=(Evidence("s.py", 12, "w"),)))
+
+
+def make_nav_window(env, **kw):
+    w, d, out, answers = make_window(env, **kw)
+    w.navigator = StubNavigator()
+    return w, d, out, answers
+
+
+def test_the_bar_marks_the_navigator_slot(env_factory):
+    env = env_factory(); w, d, out, _ = make_nav_window(env)
+    w.bar.cols = 100
+    assert "codex ○ " in w.bar_line() and "reviewing" not in w.bar_line()
+    w.navigator.running = True
+    assert "codex ○ reviewing" in w.bar_line()
+    w.navigator.running = False; w.navigator.note = spoken_note()
+    assert "codex ○ note" in w.bar_line()
+
+
+def test_the_navigator_mark_sits_beside_skip_perms(env_factory):
+    env = env_factory()
+    w, d, out, _ = make_nav_window(env, cfg=ChatConfig(skip_permissions=True))
+    w.bar.cols = 120; w.navigator.running = True
+    line = w.bar_line()
+    assert "codex ○ skip-perms · reviewing" in line and "claude ● skip-perms" in line
+
+
+def test_a_review_landing_while_idle_paints_at_once(env_factory):
+    env = env_factory(); w, d, out, _ = make_nav_window(env)
+    w.handle_event(ReviewStarted("codex"))
+    assert last_separator(out).startswith("── ⠋ codex reviewing · 0s ")
+    assert w.tick_seconds < 0.2
+    w.handle_event(ReviewFinished("codex", Verdict("clean", elapsed=3)))
+    assert "codex reviewed · no concerns · 3s" in out.text()
+    assert last_separator(out) == "─" * 60 and w.tick_seconds == 1.0
+
+
+def test_a_review_landing_mid_turn_waits_for_the_closing_row(env_factory):
+    env = env_factory(); w, d, out, _ = make_nav_window(env)
+    w.handle_event(TurnStarted("claude", "", "go"))
+    w.handle_event(TextDelta("half a para"))
+    w.handle_event(ReviewFinished("codex", Verdict("clean", elapsed=3)))
+    assert "no concerns" not in out.text()
+    w.handle_event(TurnFinished("completed", ""))
+    text = out.text()
+    assert "no concerns" in text and text.index("✓ done") < text.index("no concerns")
+
+
+def test_a_review_landing_during_an_approval_waits_too(env_factory):
+    env = env_factory(); w, d, out, _ = make_nav_window(env)
+    w.handle_event(TurnStarted("claude", "", "go"))
+    w.handle_event(ApprovalRequest("command", "rm x"))
+    w.handle_event(ReviewFinished("codex", Verdict("clean", elapsed=3)))
+    assert "no concerns" not in out.text()
+    w.handle_input(b"n")
+    w.handle_event(TurnFinished("interrupted", ""))
+    assert "no concerns" in out.text()
+
+
+class TestNoteCommand:
+    def test_note_prints_the_pending_note_in_full(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_nav_window(env)
+        w.navigator.note = spoken_note()
+        assert w.handle_input(b"/note\r") is True and d.submitted == []
+        assert "codex ⚑ block" in out.text() and "s.py:12 — w" in out.text()
+
+    def test_note_without_one_says_so(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_nav_window(env)
+        w.handle_input(b"/note\r")
+        assert "no pending note" in out.text()
+
+    @pytest.mark.parametrize("arg, feedback", [("dismiss", None), ("good", "good"), ("bad", "bad")])
+    def test_dismiss_and_feedback(self, env_factory, arg, feedback):
+        env = env_factory(); w, d, out, _ = make_nav_window(env)
+        w.navigator.note = spoken_note()
+        w.handle_input(f"/note {arg}\r".encode())
+        assert w.navigator.dismissed == [feedback] and "note dropped" in out.text()
+
+    def test_feedback_for_a_note_that_already_rode_is_recorded(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_nav_window(env)
+        w.navigator.last_ref = "r1"
+        w.handle_input(b"/note good\r")
+        assert w.navigator.dismissed == ["good"] and "feedback recorded" in out.text()
+        assert "note dropped" not in out.text()
+
+    def test_bad_argument_is_usage(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_nav_window(env)
+        w.handle_input(b"/note maybe\r")
+        assert "usage: /note [dismiss|good|bad]" in out.text() and d.submitted == []
+
+    def test_note_with_the_navigator_off(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        w.handle_input(b"/note\r")
+        assert "navigator is off" in out.text() and d.submitted == []
+
+    def test_a_word_starting_with_note_is_the_harnesss(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_nav_window(env)
+        assert w.handle_input(b"/notes\r") is True and d.submitted == ["/notes"]
+
+
+def test_status_names_the_navigator(env_factory):
+    env = env_factory()
+    w, d, out, _ = make_nav_window(env, cfg=ChatConfig(navigator="codex", navigator_deliver="prompt"))
+    w.handle_input(b"/status\r")
+    assert "navigator codex · prompt" in out.text()
+    w, d, out, _ = make_window(env)
+    w.handle_input(b"/status\r")
+    assert "navigator" not in out.text()
+
+
+def test_run_chat_builds_a_navigator_only_for_a_participant(env_factory, monkeypatch):
+    """The real loop over a pty (drive_chat): a config naming a participant
+    builds one Navigator for it; one naming a harness outside the session
+    builds none and says so in a dim note."""
+    from tandem.chat import window as window_mod
+    built = []
+    real = window_mod.Navigator
+
+    class Spy(real):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k); built.append(self)
+
+    class StubReviewer:
+        def __init__(self, harness): self.harness = harness
+        def review(self, *a, **k): return None
+        def close(self): pass
+
+    monkeypatch.setattr(window_mod, "Navigator", Spy)
+    monkeypatch.setattr(window_mod, "make_reviewer", lambda h, cfg, store, **k: StubReviewer(h))
+    env = env_factory()
+    hermetic_frame()
+
+    def launch(**kwargs):
+        return run_chat(env.session, env.store, ChatConfig(navigator="codex"), **kwargs)
+
+    code, text = drive_chat(env, launch=launch, ping=False)
+    assert code == 0 and len(built) == 1 and built[0].harness == "codex"
+    assert "not a participant" not in text
+
+    built.clear()
+    env.session.participants.remove("codex")
+    code, text = drive_chat(env, launch=launch, ping=False, runtimes={"claude": EchoRuntime()})
+    assert code == 0 and built == []
+    assert "navigator codex is not a participant of this session (claude); off" in text
+
+
+def test_run_chat_says_an_unsupported_navigator_is_off(env_factory, monkeypatch):
+    """A `navigator` the config rejected (opencode, a typo) paints a note on
+    open instead of silently doing nothing, and builds no Navigator."""
+    from tandem.chat import window as window_mod
+    built = []
+    monkeypatch.setattr(window_mod, "Navigator", lambda *a, **k: built.append(a))
+    monkeypatch.setattr(window_mod, "make_reviewer", lambda *a, **k: built.append(a))
+    env = env_factory()
+    hermetic_frame()
+
+    def launch(**kwargs):
+        return run_chat(env.session, env.store,
+                        ChatConfig(navigator="", navigator_invalid="gemini"), **kwargs)
+
+    code, text = drive_chat(env, launch=launch, ping=False)
+    assert code == 0 and built == []
+    assert "navigator 'gemini' is not supported (claude|codex); off" in text
+
+
+def test_a_streamed_limit_publishes_its_windows(env_factory):
+    env = env_factory(); w, d, out, _ = make_window(env)
+    w.handle_event(LimitsUpdate("codex", "5h 30%", (("5h", 30),)))
+    assert w.usage_state["windows"] == {"codex": [("5h", 30)]}

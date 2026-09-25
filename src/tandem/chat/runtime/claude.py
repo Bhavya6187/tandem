@@ -37,6 +37,15 @@ from ..events import (Answers, ApprovalRequest, LimitsUpdate, LiveEvent, Questio
 from . import child_env, first_line, summarize_args, terminate
 
 _COMMAND_TOOLS = ("Bash",)
+_FILE_TOOLS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path",
+               "NotebookEdit": "notebook_path"}
+
+
+def _tool_paths(name: str, inp) -> tuple[str, ...]:
+    key = _FILE_TOOLS.get(name)
+    if key and isinstance(inp, dict) and isinstance(inp.get(key), str) and inp[key]:
+        return (inp[key],)
+    return ()
 
 
 def _text_of(content) -> str:
@@ -51,9 +60,16 @@ def _text_of(content) -> str:
 class ClaudeRuntime:
     harness = "claude"
 
-    def __init__(self, cfg, *, binary: list[str] | None = None):
+    def __init__(self, cfg, *, binary: list[str] | None = None,
+                 extra_args: list[str] | None = None,
+                 on_init: Callable[[str], None] | None = None):
         self.cfg = cfg
         self.binary = list(binary) if binary else ["claude"]
+        # the navigator's review flags (--fork-session, --json-schema, --allowedTools)
+        self.extra_args = list(extra_args or [])
+        # told the session id the child announces at init — a forked review
+        # learns the id it has to delete afterwards
+        self.on_init = on_init
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._interrupted = False
@@ -72,6 +88,7 @@ class ClaudeRuntime:
             argv += ["--permission-mode", "bypassPermissions"]
         if model:
             argv += ["--model", model]
+        argv += self.extra_args
         return argv
 
     # -- protocol ------------------------------------------------------------
@@ -129,7 +146,8 @@ class ClaudeRuntime:
                 if b.get("type") == "tool_use":
                     name = b.get("name", "")
                     emit(ToolStarted(b.get("id", ""), f"agent/{name}" if child else name,
-                                     summarize_args(b.get("name", ""), b.get("input"))))
+                                     summarize_args(b.get("name", ""), b.get("input")),
+                                     paths=() if child else _tool_paths(name, b.get("input"))))
                 elif b.get("type") == "text" and not child and not self._streamed_text and b.get("text"):
                     emit(TextDelta(b["text"]))       # partial messages off: paint the block
             return None
@@ -151,7 +169,12 @@ class ClaudeRuntime:
         if t == "rate_limit_event":
             windows = parse_claude_event(m.get("rate_limit_info"))
             if windows:
-                emit(LimitsUpdate("claude", format_windows(windows)))
+                emit(LimitsUpdate("claude", format_windows(windows),
+                                  tuple((w.label, w.used_percent) for w in windows)))
+            return None
+        if t == "system" and m.get("subtype") == "init" and not child:
+            if self.on_init is not None and m.get("session_id"):
+                self.on_init(str(m["session_id"]))
             return None
         if t == "result":
             if child or (not self._interrupted and
@@ -163,8 +186,9 @@ class ClaudeRuntime:
                 status = "failed" if m.get("is_error") else "completed"
             usage = f"{m.get('num_turns', 0)} turns"
             emit(TurnFinished(status, usage))
-            return TurnOutcome(status, error=str(m.get("result", "")) if status == "failed" else "")
-        return None     # system/init, rate_limit_event, control_response: nothing to paint
+            return TurnOutcome(status, error=str(m.get("result", "")) if status == "failed" else "",
+                               structured=m.get("structured_output"))
+        return None     # other system lines, control_response: nothing to paint
 
     # -- process -------------------------------------------------------------
 

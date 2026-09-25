@@ -1,5 +1,7 @@
 """config.toml: defaults on missing/broken file, validated values."""
 
+import pytest
+
 from tandem.config import (
     ChatConfig,
     FrameConfig,
@@ -319,3 +321,46 @@ def test_skip_permissions_override_cleared_falls_back_to_the_config(tmp_path, mo
     set_skip_permissions(False)
     set_skip_permissions(None)
     assert load_skip_permissions() is True
+
+
+def test_navigator_is_off_by_default(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, '[chat]\nbell = true\n')
+    cfg = load_chat_config()
+    assert cfg.navigator == "" and cfg.navigator_model == ""
+    assert cfg.navigator_deliver == "bar"
+    assert cfg.navigator_headroom == 20 and cfg.navigator_interval == 180
+
+
+def test_navigator_keys_read_and_validate(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch,
+                  '[chat]\nnavigator = "codex"\nnavigator_model = "gpt-5.5"\n'
+                  'navigator_deliver = "prompt"\nnavigator_headroom = 35\nnavigator_interval = 60\n')
+    cfg = load_chat_config()
+    assert cfg.navigator == "codex" and cfg.navigator_model == "gpt-5.5"
+    assert cfg.navigator_deliver == "prompt"
+    assert cfg.navigator_headroom == 35 and cfg.navigator_interval == 60
+
+
+@pytest.mark.parametrize("value", ['"opencode"', '"gemini"', "true", "3"])
+def test_navigator_rejects_unknown_harnesses(tmp_path, monkeypatch, value):
+    _write_config(tmp_path, monkeypatch, f'[chat]\nnavigator = {value}\n')
+    assert load_chat_config().navigator == ""
+
+
+@pytest.mark.parametrize("value, invalid", [('"opencode"', "opencode"), ('"gemini"', "gemini"),
+                                            ("true", ""), ("3", ""), ('""', ""), ('"codex"', "")])
+def test_a_rejected_navigator_keeps_its_raw_value_for_the_window(tmp_path, monkeypatch, value, invalid):
+    _write_config(tmp_path, monkeypatch, f'[chat]\nnavigator = {value}\n')
+    cfg = load_chat_config()
+    assert cfg.navigator_invalid == invalid
+    assert cfg.navigator == ("codex" if value == '"codex"' else "")
+
+
+def test_navigator_bad_values_fall_back(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch,
+                  '[chat]\nnavigator_deliver = "push"\nnavigator_headroom = -5\n'
+                  'navigator_interval = "soon"\n')
+    cfg = load_chat_config()
+    assert cfg.navigator_deliver == "bar"
+    assert cfg.navigator_headroom == 0            # clamped, like history_turns
+    assert cfg.navigator_interval == 180

@@ -524,3 +524,78 @@ def test_a_wide_glyph_in_the_activity_counts_two_cells(screen):
     s.paint_bottom("bar", ["> "], 0, 2, focus_composer=True, activity="漢" * 30)
     row = _separator(out.text())
     assert row == "── " + "漢" * 18 + " "
+
+
+from tandem.chat.events import Evidence, ReviewFinished, Verdict
+
+
+@pytest.fixture
+def screen_factory():
+    def make(rows=24, cols=60, cfg=None):
+        out = Out()
+        return Screen(out, rows, cols, cfg or ChatConfig(), color=False), out
+    return make
+
+
+def test_a_clean_review_is_a_one_line_receipt(screen_factory):
+    s, out = screen_factory()
+    s.review(ReviewFinished("codex", Verdict("clean", elapsed=18.2)))
+    assert out.text().rstrip("\r\n").endswith("  codex reviewed · no concerns · 18s")
+
+
+@pytest.mark.parametrize("kind", ["dup", "empty"])
+def test_dup_and_empty_read_as_clean(screen_factory, kind):
+    s, out = screen_factory()
+    s.review(ReviewFinished("codex", Verdict(kind, elapsed=2)))
+    assert "no concerns" in out.text()
+
+
+def test_a_spoken_review_prints_the_note_and_evidence(screen_factory):
+    s, out = screen_factory(cols=50)
+    v = Verdict("speak", severity="block", elapsed=21.0,
+                note="The retry loop swallows ShadowBusy, so a busy shadow drops lines.",
+                evidence=(Evidence("sync.py", 142, "except ShadowBusy: continue"), Evidence("a.py", 1),
+                          Evidence("b.py", 9, "x" * 80)))
+    s.review(ReviewFinished("codex", v))
+    text = out.text()
+    assert "codex ⚑ block · 21s" in text
+    assert "  The retry loop swallows ShadowBusy, so" in text          # wrapped, indented
+    assert "  sync.py:142 — except ShadowBusy: continue" in text and "  a.py:1\r\n" in text
+    assert "  b.py:9 — xxx" in text                                    # clipped, not wrapped
+    rows = text.replace("\r", "").split("\n")
+    assert all(len(line) < 50 for line in rows)
+    assert rows.count("") == 2                  # the blank before the heading, the final newline
+
+
+def test_a_note_row_never_reaches_the_edge(screen_factory):
+    """A wrapped row as wide as the screen would trip the edge newline and
+    leave a blank row in the middle of the note."""
+    s, out = screen_factory(cols=20)
+    s.review(ReviewFinished("codex", Verdict("speak", note="a" * 8 + " " + "b" * 9, elapsed=1)))
+    assert out.text().endswith("  " + "a" * 8 + "\r\n  " + "b" * 9 + "\r\n")
+
+
+def test_an_error_review_paints_nothing_and_off_paints_one_line(screen_factory):
+    s, out = screen_factory()
+    s.review(ReviewFinished("codex", Verdict("error", error="boom")))
+    assert out.text() == ""
+    s.review(ReviewFinished("codex", Verdict("off", error="claude exited 3")))
+    assert "codex navigator off: claude exited 3" in out.text()
+
+
+def test_a_carried_note_shows_under_the_prompt_row(screen_factory):
+    s, out = screen_factory()
+    s.turn_started(TurnStarted("codex", "", "why?", carried="bad loop"))
+    assert "you → codex  why?" in out.text() and "  + navigator note: bad loop" in out.text()
+
+
+def test_a_lone_surrogate_in_a_note_cannot_take_the_window_down(screen_factory):
+    """A model's note can carry an unpaired surrogate; encoding it strictly
+    raises UnicodeEncodeError out of the paint path."""
+    s, out = screen_factory()
+    s.review(ReviewFinished("codex", Verdict("speak", note="bad \ud800 loop", elapsed=1,
+                                             evidence=(Evidence("x\ud800.py", 2, "w\ud800"),))))
+    s.turn_started(TurnStarted("codex", "", "why?", carried="bad \ud800 loop"))
+    text = out.text()
+    assert "  bad ? loop" in text and "  x?.py:2 — w?" in text
+    assert "  + navigator note: bad ? loop" in text

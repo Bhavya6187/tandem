@@ -11,8 +11,9 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from .events import (ApprovalRequest, Idle, LiveEvent, QuestionRequest, TextDelta,
-                     ThinkingDelta, ToolFinished, ToolStarted, TurnFinished, TurnStarted)
+from .events import (ApprovalRequest, Idle, LiveEvent, QuestionRequest, ReviewFinished,
+                     ReviewStarted, TextDelta, ThinkingDelta, ToolFinished, ToolStarted,
+                     TurnFinished, TurnStarted)
 
 # one cell wide each, like every glyph that shares a row with the bar
 _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -38,8 +39,22 @@ class Activity:
         self.phase = ""
         self.last_elapsed = 0.0         # the turn that just ended
         self._started = 0.0
+        self.reviewing = ""             # the navigator, while its review runs
+        self._review_started = 0.0
+
+    @property
+    def animating(self) -> bool:
+        """Something on the line moves on its own clock: a running turn's
+        spinner, or the review spinner while no turn is running."""
+        return (self.active and not self.waiting) or (bool(self.reviewing) and not self.active)
 
     def on_event(self, ev: LiveEvent) -> None:
+        if isinstance(ev, ReviewStarted):
+            self.reviewing, self._review_started = ev.harness, self._clock()
+            return
+        if isinstance(ev, ReviewFinished):
+            self.reviewing = ""
+            return
         if isinstance(ev, TurnStarted):
             self.active, self.waiting = True, False
             self.harness, self.phase = ev.harness, "starting"
@@ -66,7 +81,11 @@ class Activity:
 
     def text(self, queued: int = 0, width: int | None = None) -> str:
         if not self.active:
-            return ""
+            if not self.reviewing:
+                return ""
+            elapsed = self._clock() - self._review_started
+            frame = _FRAMES[int(elapsed / _FRAME_SECONDS) % len(_FRAMES)]
+            return f"{frame} {self.reviewing} reviewing · {elapsed_text(elapsed)}"
         if self.waiting:
             return f"● {self.harness} is waiting for your answer"
         elapsed = self._clock() - self._started

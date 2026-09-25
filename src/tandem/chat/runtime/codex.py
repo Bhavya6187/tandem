@@ -83,9 +83,10 @@ def _choices(available) -> tuple[str, ...]:
 class CodexRuntime:
     harness = "codex"
 
-    def __init__(self, cfg, *, binary: list[str] | None = None):
+    def __init__(self, cfg, *, binary: list[str] | None = None, output_schema: dict | None = None):
         self.cfg = cfg
         self.binary = list(binary) if binary else ["codex"]
+        self.output_schema = output_schema      # constrains the final message (the navigator's verdict)
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self._n = 0
@@ -309,8 +310,8 @@ class CodexRuntime:
             if kind == "commandExecution":
                 emit(ToolStarted(it.id, "exec", first_line(strip_shell(it.command or ""))))
             elif kind == "fileChange":
-                paths = ", ".join(c.path for c in (getattr(it, "changes", None) or []))
-                emit(ToolStarted(it.id, "patch", first_line(paths)))
+                names = tuple(c.path for c in (getattr(it, "changes", None) or []) if getattr(c, "path", ""))
+                emit(ToolStarted(it.id, "patch", first_line(", ".join(names)), paths=names))
             elif kind == "mcpToolCall":
                 emit(ToolStarted(it.id, f"mcp:{getattr(it, 'server', '?')}.{getattr(it, 'tool', '?')}", ""))
             elif kind == "webSearch":
@@ -369,7 +370,8 @@ class CodexRuntime:
                         and isinstance(w.get("windowDurationMins"), (int, float)) and w["windowDurationMins"] > 0:
                     windows.append(Window(window_label(int(w["windowDurationMins"]) * 60), int(w["usedPercent"])))
             if windows:
-                emit(LimitsUpdate("codex", format_windows(windows)))
+                emit(LimitsUpdate("codex", format_windows(windows),
+                                  tuple((w.label, w.used_percent) for w in windows)))
         elif method == "error":
             err = params.get("error") or {}
             emit(Failure(str(err.get("message") or err)))
@@ -476,7 +478,7 @@ class CodexRuntime:
                 new_id = thread_id
             self._thread_id = thread_id
             turn = cp.TurnStartParams(threadId=thread_id, input=[{"type": "text", "text": prompt}],
-                                      model=model or None)
+                                      model=model or None, outputSchema=self.output_schema)
             r = self._call(proc, q, "turn/start", turn.model_dump(by_alias=True, exclude_none=True), emit, answers)
             if "error" in r:
                 return fail(str(r["error"].get("message", r["error"])))

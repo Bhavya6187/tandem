@@ -198,6 +198,8 @@ _SETTING_SOURCES = ("user", "project", "local")
 # rather than becoming the reason a launch breaks.
 _CODEX_APPROVAL_POLICIES = ("untrusted", "on-request", "never")
 _CODEX_SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
+_NAVIGATORS = ("", "claude", "codex")
+_NAVIGATOR_DELIVERY = ("bar", "prompt")
 
 
 @dataclass(frozen=True)
@@ -211,6 +213,12 @@ class ChatConfig:
     codex_approval_policy: str = ""     # "" = inherit ~/.codex/config.toml
     codex_sandbox: str = ""             # "" = inherit
     skip_permissions: bool = False      # the top-level key, carried to the runtimes
+    navigator: str = ""                 # "claude" | "codex"; "" = off (the default, kept off)
+    navigator_model: str = ""           # model pin for the review turn; "" = the harness default
+    navigator_deliver: str = "bar"      # "bar": you see it; "prompt": it also rides your next prompt
+    navigator_headroom: int = 20        # skip reviews under this % left in the navigator's 5h window
+    navigator_interval: int = 180       # seconds between spoken notes
+    navigator_invalid: str = ""         # the raw `navigator` string when it was rejected (the window says so)
 
 
 def load_chat_config() -> ChatConfig:
@@ -236,6 +244,8 @@ def load_chat_config() -> ChatConfig:
         sources = kept or d.claude_setting_sources
     else:
         sources = d.claude_setting_sources
+    nav_raw = raw.get("navigator")
+    nav_invalid = nav_raw if isinstance(nav_raw, str) and nav_raw and nav_raw not in _NAVIGATORS else ""
     return ChatConfig(
         tool_output_lines=max(0, pick("tool_output_lines", int, d.tool_output_lines)),
         history_turns=max(0, pick("history_turns", int, d.history_turns)),
@@ -246,4 +256,10 @@ def load_chat_config() -> ChatConfig:
                                    d.codex_approval_policy, _CODEX_APPROVAL_POLICIES),
         codex_sandbox=pick("codex_sandbox", str, d.codex_sandbox, _CODEX_SANDBOXES),
         skip_permissions=skip,
+        navigator=pick("navigator", str, d.navigator, _NAVIGATORS),
+        navigator_model=pick("navigator_model", str, d.navigator_model),
+        navigator_deliver=pick("navigator_deliver", str, d.navigator_deliver, _NAVIGATOR_DELIVERY),
+        navigator_headroom=max(0, pick("navigator_headroom", int, d.navigator_headroom)),
+        navigator_interval=max(0, pick("navigator_interval", int, d.navigator_interval)),
+        navigator_invalid=nav_invalid,
     )

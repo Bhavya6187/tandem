@@ -28,6 +28,7 @@ class ToolStarted:
     call_id: str
     tool: str
     summary: str        # one line, the renderer prints it after the tool name
+    paths: tuple[str, ...] = ()   # files a file-change tool names; empty for commands and reads
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,7 @@ class TurnStarted:
     harness: str
     model: str
     prompt: str
+    carried: str = ""   # a navigator note's summary when one rode this prompt; "" otherwise
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,44 @@ class Failure:
 class LimitsUpdate:
     harness: str
     text: str           # bar-ready, e.g. "5h 4% 7d 41%"
+    windows: tuple[tuple[str, int], ...] = ()   # (label, used_percent), shortest first
+
+
+@dataclass(frozen=True)
+class Evidence:
+    file: str
+    line: int
+    why: str = ""
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A finished review. `verdict` is one of: clean, speak, empty (spoke
+    with no note), dup (repeats evidence already spoken), error, off (the
+    navigator disabled itself)."""
+    verdict: str
+    severity: str = ""              # "block" | "warn" | ""
+    note: str = ""
+    evidence: tuple[Evidence, ...] = ()
+    elapsed: float = 0.0
+    error: str = ""
+    navigator: str = ""
+    model: str = ""
+
+    @property
+    def spoken(self) -> bool:
+        return self.verdict == "speak"
+
+
+@dataclass(frozen=True)
+class ReviewStarted:
+    harness: str        # the navigator
+
+
+@dataclass(frozen=True)
+class ReviewFinished:
+    harness: str
+    verdict: Verdict
 
 
 @dataclass(frozen=True)
@@ -99,7 +139,7 @@ class Idle:
 
 LiveEvent = Union[TextDelta, ThinkingDelta, ToolStarted, ToolOutput, ToolFinished,
                   ApprovalRequest, QuestionRequest, TurnStarted, TurnFinished,
-                  Failure, LimitsUpdate, Idle]
+                  Failure, LimitsUpdate, ReviewStarted, ReviewFinished, Idle]
 
 STATUSES = ("completed", "interrupted", "failed")
 
@@ -115,3 +155,4 @@ class TurnOutcome:
     status: str
     error: str = ""
     native_id: str | None = None   # a thread id minted during this turn (fresh codex)
+    structured: object | None = None   # claude's structured_output when a schema was requested

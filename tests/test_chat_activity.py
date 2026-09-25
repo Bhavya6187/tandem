@@ -124,3 +124,31 @@ def test_a_narrow_row_drops_the_hint_then_the_queue(act):
 ])
 def test_elapsed_text(seconds, want):
     assert elapsed_text(seconds) == want
+
+
+from tandem.chat.events import ReviewFinished, ReviewStarted, Verdict
+
+
+def test_a_review_shows_on_the_line_only_while_no_turn_runs(act):
+    a, clock = act
+    a.on_event(ReviewStarted("codex"))
+    assert a.active is False and a.reviewing == "codex" and a.animating is True
+    assert a.text() == "⠋ codex reviewing · 0s"
+    clock.now += 12
+    assert a.text() == "⠋ codex reviewing · 12s"
+    a.on_event(TurnStarted("claude", "", "go"))
+    assert a.text().startswith("⠋ claude · starting")          # the turn owns the row
+    a.on_event(TurnFinished("completed", "")); a.on_event(Idle())
+    assert a.text() == "⠋ codex reviewing · 12s"                # back to the review, still counting
+    a.on_event(ReviewFinished("codex", Verdict("clean")))
+    assert a.reviewing == "" and a.text() == "" and a.animating is False
+
+
+def test_the_review_clock_starts_at_review_start(act):
+    a, clock = act
+    a.on_event(TurnStarted("claude", "", "go"))
+    clock.now += 30
+    a.on_event(TurnFinished("completed", "")); a.on_event(Idle())
+    a.on_event(ReviewStarted("codex"))
+    clock.now += 3
+    assert a.text() == "⠋ codex reviewing · 3s"

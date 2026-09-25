@@ -234,7 +234,7 @@ def test_golden_lines_drive_the_parser():
         outcome = got or outcome
     assert outcome is not None and outcome.status == "completed"
     limits = [e for e in rec.events if isinstance(e, LimitsUpdate)]
-    assert limits == [LimitsUpdate("claude", "5h 9% 7d 4%")]
+    assert limits == [LimitsUpdate("claude", "5h 9% 7d 4%", (("5h", 9), ("7d", 4)))]
     rec.events = [e for e in rec.events if not isinstance(e, LimitsUpdate)]
     assert rec.kinds() == ["ThinkingDelta", "ToolStarted", "ToolOutput", "ToolFinished", "TextDelta", "TurnFinished"]
     assert rec.events[0] == ThinkingDelta("I should run it.")
@@ -297,7 +297,7 @@ def test_rate_limit_event_feeds_the_bar():
             "five_hour": {"utilization": 0.09}, "seven_day": {"utilization": 0.04}}}},
         rec.emit, rec, lambda _: None)
     assert out is None
-    assert rec.events == [LimitsUpdate("claude", "5h 9% 7d 4%")]
+    assert rec.events == [LimitsUpdate("claude", "5h 9% 7d 4%", (("5h", 9), ("7d", 4)))]
 
 
 def test_rate_limit_event_without_windows_says_nothing():
@@ -305,3 +305,63 @@ def test_rate_limit_event_without_windows_says_nothing():
     rt.handle_line({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}},
                    rec.emit, rec, lambda _: None)
     assert rec.events == []
+
+
+def test_file_change_tools_carry_their_paths():
+    rt = ClaudeRuntime(ChatConfig())
+    rec = Recorder()
+    for name, inp in [("Edit", {"file_path": "/p/a.py", "old_string": "x"}),
+                      ("Write", {"file_path": "/p/b.py", "content": ""}),
+                      ("NotebookEdit", {"notebook_path": "/p/c.ipynb"}),
+                      ("Bash", {"command": "ls"}),
+                      ("Read", {"file_path": "/p/d.py"}),
+                      ("Edit", {})]:
+        rt.handle_line({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": f"t-{name}", "name": name, "input": inp}]}}, rec.emit, rec, lambda o: None)
+    paths = [e.paths for e in rec.events if isinstance(e, ToolStarted)]
+    assert paths == [("/p/a.py",), ("/p/b.py",), ("/p/c.ipynb",), (), (), ()]
+
+
+def test_result_carries_structured_output():
+    rt = ClaudeRuntime(ChatConfig())
+    rec = Recorder()
+    out = rt.handle_line({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+                          "result": "{}", "structured_output": {"verdict": "clean"}},
+                         rec.emit, rec, lambda o: None)
+    assert out.status == "completed" and out.structured == {"verdict": "clean"}
+
+
+def test_extra_args_ride_argv_after_the_standard_flags():
+    rt = ClaudeRuntime(ChatConfig(), extra_args=["--fork-session", "--json-schema", "{}"])
+    argv = rt.argv("sid-1", fresh=False, model="")
+    assert argv[-3:] == ["--fork-session", "--json-schema", "{}"]
+    assert "--resume" in argv
+
+
+def test_on_init_gets_the_session_id_the_child_announces():
+    seen = []
+    rt = ClaudeRuntime(ChatConfig(), on_init=seen.append)
+    rec = Recorder()
+    rt.handle_line({"type": "system", "subtype": "init", "session_id": "fresh-id"}, rec.emit, rec, lambda o: None)
+    rt.handle_line({"type": "system", "subtype": "status"}, rec.emit, rec, lambda o: None)
+    assert seen == ["fresh-id"]
+
+
+def test_a_subagent_init_does_not_re_fire_on_init():
+    seen = []
+    rt = ClaudeRuntime(ChatConfig(), on_init=seen.append)
+    rec = Recorder()
+    rt.handle_line({"type": "system", "subtype": "init", "session_id": "sub-id",
+                    "parent_tool_use_id": "toolu_x"}, rec.emit, rec, lambda o: None)
+    assert seen == []
+
+
+def test_rate_limit_event_carries_windows():
+    rt = ClaudeRuntime(ChatConfig())
+    rec = Recorder()
+    rt.handle_line({"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed", "rateLimitType": "five_hour", "unifiedWindows": {
+            "five_hour": {"utilization": 0.25}, "seven_day": {"utilization": 0.5}}}},
+        rec.emit, rec, lambda o: None)
+    ev = [e for e in rec.events if isinstance(e, LimitsUpdate)][0]
+    assert ev.windows == (("5h", 25), ("7d", 50))
