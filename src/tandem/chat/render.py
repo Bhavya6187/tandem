@@ -20,12 +20,13 @@ the tty raw, so the terminal returns no carriage of its own."""
 from __future__ import annotations
 
 import re
+import textwrap
 from typing import Callable
 from unicodedata import east_asian_width
 
 from ..events import AssistantMessage, ToolCall, ToolResult, UserMessage
-from .events import (ApprovalRequest, Failure, QuestionRequest, TextDelta, ThinkingDelta,
-                     ToolFinished, ToolOutput, ToolStarted, TurnFinished, TurnStarted,
+from .events import (ApprovalRequest, Failure, QuestionRequest, ReviewFinished, TextDelta,
+                     ThinkingDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished, TurnStarted,
                      offered_labels)
 from .activity import elapsed_text
 from .runtime import first_line, summarize_args
@@ -104,7 +105,9 @@ class Screen:
     # -- plumbing ------------------------------------------------------------
 
     def _w(self, s: str) -> None:
-        self.write(s.encode())
+        # a model's text can carry an unpaired surrogate; a strict encode
+        # would raise out of the paint path and take the window down
+        self.write(s.encode(errors="replace"))
 
     def _region_cmd(self) -> str:
         return f"{_CSI}1;{self.region_rows}r"
@@ -198,6 +201,8 @@ class Screen:
             self.print(prompt + "\n")
         else:
             self.line(self._bold(label) + "  " + prompt)
+        if ev.carried:
+            self.line(self._dim(f"  + navigator note: {_safe(ev.carried)}"))
 
     def text_delta(self, ev: TextDelta) -> None:
         self._ensure_speaker()
@@ -288,6 +293,32 @@ class Screen:
         # a failure message is usually the harness's own: a stderr tail, a
         # provider error, a protocol line tandem could not read
         self.line(self._bold("error: ") + _safe(ev.message))
+
+    def review(self, ev: ReviewFinished) -> None:
+        """Every finished review gets a row: a receipt when clean (dup and
+        empty read as clean — nothing to act on), the note in full when
+        spoken, one line when the navigator switched itself off, nothing
+        for a failed review (it is in the log)."""
+        v = ev.verdict
+        if v.verdict == "error":
+            return
+        if v.verdict == "off":
+            self.line(self._dim(f"  {ev.harness} navigator off: {_safe(v.error)}"))
+            return
+        if not v.spoken:
+            self.line(self._dim(f"  {ev.harness} reviewed · no concerns · {elapsed_text(v.elapsed)}"))
+            return
+        self.line()
+        self.line(self._bold(f"{ev.harness} ⚑ {v.severity or 'note'} · {elapsed_text(v.elapsed)}"))
+        # the two-space indent plus a row one short of the edge: a row that
+        # fills the width trips print's edge newline and leaves a blank row
+        width = max(8, self.cols - 3)
+        for para in _safe(v.note).split("\n"):
+            for row in textwrap.wrap(para, width) or [""]:
+                self.line("  " + row)
+        for e in v.evidence:
+            where = f"{_safe(e.file)}:{e.line}" + (f" — {_safe(e.why)}" if e.why else "")
+            self.line(self._dim("  " + _clip(where, width)))
 
     def note(self, text: str) -> None:
         self.line(self._dim(text))
