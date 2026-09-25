@@ -347,6 +347,15 @@ def test_navigator_rejects_unknown_harnesses(tmp_path, monkeypatch, value):
     assert load_chat_config().navigator == ""
 
 
+@pytest.mark.parametrize("value, invalid", [('"opencode"', "opencode"), ('"gemini"', "gemini"),
+                                            ("true", ""), ("3", ""), ('""', ""), ('"codex"', "")])
+def test_a_rejected_navigator_keeps_its_raw_value_for_the_window(tmp_path, monkeypatch, value, invalid):
+    _write_config(tmp_path, monkeypatch, f'[chat]\nnavigator = {value}\n')
+    cfg = load_chat_config()
+    assert cfg.navigator_invalid == invalid
+    assert cfg.navigator == ("codex" if value == '"codex"' else "")
+
+
 def test_navigator_bad_values_fall_back(tmp_path, monkeypatch):
     _write_config(tmp_path, monkeypatch,
                   '[chat]\nnavigator_deliver = "push"\nnavigator_headroom = -5\n'

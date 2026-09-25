@@ -1033,6 +1033,25 @@ def test_run_chat_builds_a_navigator_only_for_a_participant(env_factory, monkeyp
     assert "navigator codex is not a participant of this session (claude); off" in text
 
 
+def test_run_chat_says_an_unsupported_navigator_is_off(env_factory, monkeypatch):
+    """A `navigator` the config rejected (opencode, a typo) paints a note on
+    open instead of silently doing nothing, and builds no Navigator."""
+    from tandem.chat import window as window_mod
+    built = []
+    monkeypatch.setattr(window_mod, "Navigator", lambda *a, **k: built.append(a))
+    monkeypatch.setattr(window_mod, "make_reviewer", lambda *a, **k: built.append(a))
+    env = env_factory()
+    hermetic_frame()
+
+    def launch(**kwargs):
+        return run_chat(env.session, env.store,
+                        ChatConfig(navigator="", navigator_invalid="gemini"), **kwargs)
+
+    code, text = drive_chat(env, launch=launch, ping=False)
+    assert code == 0 and built == []
+    assert "navigator 'gemini' is not supported (claude|codex); off" in text
+
+
 def test_a_streamed_limit_publishes_its_windows(env_factory):
     env = env_factory(); w, d, out, _ = make_window(env)
     w.handle_event(LimitsUpdate("codex", "5h 30%", (("5h", 30),)))

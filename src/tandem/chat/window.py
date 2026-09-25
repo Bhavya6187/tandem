@@ -467,7 +467,9 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
     poller = RateLimitPoller(list(session.participants), usage_state) if load_frame_config().rate_limits else None
     navigator = None
     nav_note = ""
-    if cfg.navigator:
+    if cfg.navigator_invalid:
+        nav_note = f"navigator {cfg.navigator_invalid!r} is not supported (claude|codex); off"
+    elif cfg.navigator:
         if cfg.navigator in session.participants:
             navigator = Navigator(
                 cfg.navigator, cfg, make_reviewer(cfg.navigator, cfg, store), post,
