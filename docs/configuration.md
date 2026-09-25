@@ -214,7 +214,23 @@ bell = true                  # ring when a turn needs an answer, or ends after 1
 claude_setting_sources = ["user", "project", "local"]   # what headless claude loads
 # codex_approval_policy = "on-request"   # default: inherit ~/.codex/config.toml
 # codex_sandbox = "workspace-write"      # default: inherit
+# navigator = "codex"          # default "": off. A second harness reviews each substantive turn
+# navigator_model = ""         # model pin for the review turn; "" = that harness's default
+# navigator_deliver = "bar"    # "bar": the note is shown to you and rides only prompts you route to
+#                              # the navigator; "prompt": it also rides your next prompt to any harness
+# navigator_headroom = 20      # no reviews when the navigator's 5h window has under this % left
+# navigator_interval = 180     # seconds between spoken notes
 ```
+
+`navigator` names a participant (`claude` or `codex`) that reviews each turn
+the other harness runs, on a private fork of its own shadow transcript: one
+headless review after every turn that edited files, failed a command, or
+claimed completion. A clean review prints a one-line receipt; a concern
+prints as a note with file and line evidence. **Enabling it sends every
+reviewed turn's conversation and diff to the navigator's vendor after every
+turn, on that account's quota.** It is off unless you set it. `/note` shows
+the pending note, `/note dismiss` drops it, `/note good` and `/note bad`
+record whether it helped (see `tandem navigator log`).
 
 Keys: Enter sends; Esc interrupts the running turn; Ctrl-C once interrupts,
 twice within two seconds quits; Ctrl-L repaints. An approval prompt takes
