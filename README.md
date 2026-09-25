@@ -52,7 +52,7 @@ directory, conversation, last-used harness, and model pins:
 tandem resume        # choose from sessions across all directories
 tandem resume <id>   # reopen a specific session
 tandem --continue    # reopen the most recently used session across directories
-tandem sessions      # list recent session IDs
+tandem sessions      # list recent sessions, each with the prompt that started it
 ```
 
 Prefer the CLIs' own interfaces? Use the native frame:

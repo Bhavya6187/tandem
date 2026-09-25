@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -13,10 +14,10 @@ from pathlib import Path
 import click
 
 from . import __version__, compat, paths
-from .constants import SEED_NOTE, SESSION_ENV
-from .events import SessionContext
+from .constants import ATTRIBUTION, SEED_NOTE, SESSION_ENV
+from .events import SessionContext, UserMessage
 from .harness import get_adapter
-from .state import PairedSession, StateStore
+from .state import PairedSession, StateStore, SyncCursor
 
 
 def _cwd() -> str:
@@ -415,6 +416,94 @@ def _short_dir(cwd: str) -> str:
     return shown
 
 
+_TAGS = tuple(t for t in ATTRIBUTION.values() if t and t != ATTRIBUTION["tandem"])
+_NO_TITLE = "(no turns yet)"
+
+
+def _iter_entries(adapter, session: PairedSession, harness: str, path: Path):
+    """Raw transcript entries, lazily. A JSONL file streams line by line so a
+    consumer that stops early never reads the multi-megabyte tail; anything
+    else (opencode's DB) goes through the adapter's own reader."""
+    if path.suffix == ".jsonl":
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for text in f:
+                try:
+                    yield json.loads(text)
+                except ValueError:
+                    continue
+        return
+    cursor = SyncCursor(tandem_id=session.tandem_id, source=harness, target="__title__")
+    for line in adapter.make_source_reader(session, cursor, path).poll():
+        if line.raw is not None:
+            yield line.raw
+
+
+def _first_prompt(session: PairedSession) -> str | None:
+    """The first thing a human typed into this session, or None if nobody
+    has yet. The active harness's transcript is asked first: a turn that
+    was mirrored into a shadow carries a `[via …]` tag, which is stripped
+    when it is all there is. Tandem's own seed and close notes are not
+    prompts. A harness whose transcript is missing (a zero-turn shadow)
+    defers to the next participant."""
+    order = [session.active] + [h for h in session.participants if h != session.active]
+    for harness in order:
+        sid = session.native_id(harness)
+        if not sid:
+            continue
+        adapter = get_adapter(harness)
+        path = adapter.transcript_path(session.cwd, sid)
+        if path is None:
+            continue
+        # parse_entry only reads the context; the direction is a formality
+        # (it must name two different adapters), so any other one will do
+        other = next((h for h in session.participants if h != harness),
+                     next(h for h in ("claude", "codex") if h != harness))
+        ctx = SessionContext(tandem_id=session.tandem_id, cwd=session.cwd,
+                             direction=f"{harness}->{other}")
+        for raw in _iter_entries(adapter, session, harness, path):
+            for ev in adapter.parse_entry(raw, ctx):
+                if not isinstance(ev, UserMessage):
+                    continue
+                text = ev.text.strip()
+                if text.startswith(ATTRIBUTION["tandem"]):
+                    continue
+                for tag in _TAGS:
+                    if text.startswith(tag):
+                        text = text[len(tag):].strip()
+                        break
+                if text:
+                    return text
+    return None
+
+
+def _title_width(fixed: int) -> int:
+    """Whatever the terminal has left after `fixed` columns of table and
+    room for a directory, clamped so a title is never useless or endless."""
+    cols = shutil.get_terminal_size((100, 24)).columns
+    return max(16, min(60, cols - fixed - 2 - 16))
+
+
+def _title_cell(session: PairedSession, width: int) -> str:
+    """One padded cell: the first line of the first prompt that says
+    anything (a pasted report often opens with a dashed rule), whitespace
+    collapsed, cut with an ellipsis to `width`. A listing must never
+    traceback on one unreadable transcript, so any failure is a `?` (same
+    contract as `_ago`)."""
+    try:
+        text = _first_prompt(session)
+    except Exception:
+        return "?".ljust(width)
+    if text is None:
+        return _NO_TITLE.ljust(width)
+    lines = text.splitlines()
+    line = next((ln for ln in lines if any(c.isalnum() for c in ln)),
+                next((ln for ln in lines if ln.strip()), ""))
+    line = " ".join(line.split())
+    if len(line) > width:
+        line = line[:width - 1] + "…"
+    return line.ljust(width)
+
+
 @main.command()
 @click.option("-n", "--limit", default=10, show_default=True, type=click.IntRange(min=1),
               help="How many sessions to show.")
@@ -431,13 +520,15 @@ def sessions(limit: int) -> None:
     if not rows:
         click.echo("No tandem sessions yet. Run `tandem` to start one.")
         return
+    width = _title_width(fixed=2 + 12 + 2 + 9 + 2 + 8 + 2 + 22 + 2)
     click.echo(f"  {'ID':<12}  {'LAST USED':<9}  {'ACTIVE':<8}  "
-               f"{'PARTICIPANTS':<22}  DIRECTORY")
+               f"{'PARTICIPANTS':<22}  {'TITLE':<{width}}  DIRECTORY")
     for s in rows:
         mark = "*" if s.cwd == cwd else " "
         click.echo(
             f"{mark} {s.tandem_id:<12}  {_ago(s.last_used_at or s.created_at):<9}  "
-            f"{s.active:<8}  {'+'.join(s.participants):<22}  {_short_dir(s.cwd)}"
+            f"{s.active:<8}  {'+'.join(s.participants):<22}  {_title_cell(s, width)}  "
+            f"{_short_dir(s.cwd)}"
         )
     click.echo()
     click.echo("Rows marked * are in this directory. Continue one with "
@@ -563,11 +654,13 @@ def _select_chat_session(store: StateStore, resume_id: str | None,
             session = rows[0]
         else:
             click.echo("Resume a session (all directories):")
-            click.echo(f"     {'ID':<12}  {'LAST USED':<9}  {'ACTIVE':<8}  DIRECTORY")
+            width = _title_width(fixed=5 + 12 + 2 + 9 + 2 + 8 + 2)
+            click.echo(f"     {'ID':<12}  {'LAST USED':<9}  {'ACTIVE':<8}  "
+                       f"{'TITLE':<{width}}  DIRECTORY")
             for i, row in enumerate(rows, 1):
                 click.echo(
                     f"{i:>3}. {row.tandem_id:<12}  {_ago(row.last_used_at or row.created_at):<9}  "
-                    f"{row.active:<8}  {_short_dir(row.cwd)}")
+                    f"{row.active:<8}  {_title_cell(row, width)}  {_short_dir(row.cwd)}")
             choice = click.prompt("Session number (0 to cancel)", type=click.IntRange(0, len(rows)))
             if choice == 0:
                 raise click.exceptions.Exit(0)
