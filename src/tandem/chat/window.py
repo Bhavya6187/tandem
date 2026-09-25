@@ -308,7 +308,10 @@ class Window:
             limits = dict(self.usage_state.get("limits") or {})
             limits[ev.harness] = ev.text
             self.usage_state["limits"] = limits
-            remember(ev.harness, ev.text)     # else a throttled poller's next refresh blanks it
+            wins = dict(self.usage_state.get("windows") or {})
+            wins[ev.harness] = list(ev.windows)
+            self.usage_state["windows"] = wins
+            remember(ev.harness, ev.text, ev.windows)     # else a throttled poller's next refresh blanks it
         elif isinstance(ev, Idle):
             self.session = getattr(self.dispatcher, "session", self.session)
             self.dispatcher.pump()

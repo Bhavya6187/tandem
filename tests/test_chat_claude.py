@@ -234,7 +234,7 @@ def test_golden_lines_drive_the_parser():
         outcome = got or outcome
     assert outcome is not None and outcome.status == "completed"
     limits = [e for e in rec.events if isinstance(e, LimitsUpdate)]
-    assert limits == [LimitsUpdate("claude", "5h 9% 7d 4%")]
+    assert limits == [LimitsUpdate("claude", "5h 9% 7d 4%", (("5h", 9), ("7d", 4)))]
     rec.events = [e for e in rec.events if not isinstance(e, LimitsUpdate)]
     assert rec.kinds() == ["ThinkingDelta", "ToolStarted", "ToolOutput", "ToolFinished", "TextDelta", "TurnFinished"]
     assert rec.events[0] == ThinkingDelta("I should run it.")
@@ -297,7 +297,7 @@ def test_rate_limit_event_feeds_the_bar():
             "five_hour": {"utilization": 0.09}, "seven_day": {"utilization": 0.04}}}},
         rec.emit, rec, lambda _: None)
     assert out is None
-    assert rec.events == [LimitsUpdate("claude", "5h 9% 7d 4%")]
+    assert rec.events == [LimitsUpdate("claude", "5h 9% 7d 4%", (("5h", 9), ("7d", 4)))]
 
 
 def test_rate_limit_event_without_windows_says_nothing():
@@ -345,3 +345,14 @@ def test_on_init_gets_the_session_id_the_child_announces():
     rt.handle_line({"type": "system", "subtype": "init", "session_id": "fresh-id"}, rec.emit, rec, lambda o: None)
     rt.handle_line({"type": "system", "subtype": "status"}, rec.emit, rec, lambda o: None)
     assert seen == ["fresh-id"]
+
+
+def test_rate_limit_event_carries_windows():
+    rt = ClaudeRuntime(ChatConfig())
+    rec = Recorder()
+    rt.handle_line({"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed", "rateLimitType": "five_hour", "unifiedWindows": {
+            "five_hour": {"utilization": 0.25}, "seven_day": {"utilization": 0.5}}}},
+        rec.emit, rec, lambda o: None)
+    ev = [e for e in rec.events if isinstance(e, LimitsUpdate)][0]
+    assert ev.windows == (("5h", 25), ("7d", 50))

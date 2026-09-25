@@ -68,7 +68,7 @@ def test_approve_flow(env):
     assert rec.events[1] == ToolOutput("call-1", "hello\n")
     assert rec.events[2] == ToolFinished("call-1", True, "exit 0")
     assert rec.events[3] == TextDelta("DONE")
-    assert rec.events[4] == LimitsUpdate("codex", "5h 3% 7d 12%")
+    assert rec.events[4] == LimitsUpdate("codex", "5h 3% 7d 12%", (("5h", 3), ("7d", 12)))
     assert rec.events[5].status == "completed" and rec.events[5].usage == "1% ctx · 2200↑ 200↓"
 
 
@@ -337,7 +337,7 @@ def test_golden_lines_drive_the_handler():
     assert rec.kinds() == ["ToolStarted", "ToolOutput", "ToolFinished", "LimitsUpdate", "TextDelta", "TurnFinished"]
     assert rec.events[0] == ToolStarted("call_vDe2mWf2XYJ1BjLDXSDWgLSo", "exec", "echo fixture —")
     assert rec.events[1] == ToolOutput("call_vDe2mWf2XYJ1BjLDXSDWgLSo", "fixture —\n")   # from aggregatedOutput, no delta streamed
-    assert rec.events[3] == LimitsUpdate("codex", "5h 0% 7d 0%")
+    assert rec.events[3] == LimitsUpdate("codex", "5h 0% 7d 0%", (("5h", 0), ("7d", 0)))
 
 
 def test_child_is_told_which_session_it_belongs_to(env, monkeypatch):
@@ -547,3 +547,13 @@ def test_an_output_schema_rides_turn_start(env):
     (env.tmp / "params.jsonl").unlink()
     plain.run_turn(env.session, "thread-1", "go", "", rec.emit, rec)
     assert "outputSchema" not in env.params("turn/start")
+
+
+def test_rate_limits_updated_carries_windows():
+    rt = CodexRuntime(ChatConfig())
+    rec = Recorder()
+    rt.handle({"jsonrpc": "2.0", "method": "account/rateLimits/updated", "params": {"rateLimits": {
+        "primary": {"usedPercent": 30, "windowDurationMins": 300},
+        "secondary": {"usedPercent": 5, "windowDurationMins": 10080}}}}, lambda o: None, rec.emit, rec)
+    ev = [e for e in rec.events if isinstance(e, LimitsUpdate)][0]
+    assert ev.windows == (("5h", 30), ("7d", 5))

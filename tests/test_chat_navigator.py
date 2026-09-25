@@ -538,3 +538,21 @@ def test_a_note_given_back_is_pending_again_but_never_displaces_a_newer_one(tmp_
     assert newer is not None and newer.summary == "newer"
     nav.give_back(old)
     assert nav.pending() is newer
+
+
+from tandem.chat.navigator import headroom_ok
+
+
+def test_headroom_reads_the_shortest_window():
+    state = {"windows": {"codex": [("5h", 85), ("7d", 10)]}}
+    assert headroom_ok(state, "codex", 20) is False           # 15 % left < 20
+    assert headroom_ok(state, "codex", 15) is True
+    assert headroom_ok(state, "codex", 0) is True
+    assert headroom_ok({"windows": {"codex": [("5h", 79)]}}, "codex", 20) is True
+
+
+def test_headroom_without_data_is_not_enforced():
+    assert headroom_ok({}, "codex", 20) is True
+    assert headroom_ok({"windows": {}}, "codex", 20) is True
+    assert headroom_ok({"windows": {"codex": []}}, "codex", 20) is True
+    assert headroom_ok({"limits": {"codex": "5h 99%"}}, "codex", 20) is True    # text alone is not data

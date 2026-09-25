@@ -370,7 +370,8 @@ class CodexRuntime:
                         and isinstance(w.get("windowDurationMins"), (int, float)) and w["windowDurationMins"] > 0:
                     windows.append(Window(window_label(int(w["windowDurationMins"]) * 60), int(w["usedPercent"])))
             if windows:
-                emit(LimitsUpdate("codex", format_windows(windows)))
+                emit(LimitsUpdate("codex", format_windows(windows),
+                                  tuple((w.label, w.used_percent) for w in windows)))
         elif method == "error":
             err = params.get("error") or {}
             emit(Failure(str(err.get("message") or err)))

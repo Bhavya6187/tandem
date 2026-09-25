@@ -1023,3 +1023,9 @@ def test_run_chat_builds_a_navigator_only_for_a_participant(env_factory, monkeyp
     code, text = drive_chat(env, launch=launch, ping=False, runtimes={"claude": EchoRuntime()})
     assert code == 0 and built == []
     assert "navigator codex is not a participant of this session (claude); off" in text
+
+
+def test_a_streamed_limit_publishes_its_windows(env_factory):
+    env = env_factory(); w, d, out, _ = make_window(env)
+    w.handle_event(LimitsUpdate("codex", "5h 30%", (("5h", 30),)))
+    assert w.usage_state["windows"] == {"codex": [("5h", 30)]}

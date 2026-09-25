@@ -129,17 +129,23 @@ class _SharedState:
         self.not_before: dict[str, float] = {}   # per-harness 429 backoff
         self.last_refresh: float = float("-inf")
         self.text: dict[str, str] = {}           # last published, per harness
+        self.windows: dict[str, list[tuple[str, int]]] = {}   # parsed, beside the text
         self.keychain_dead: bool = False         # one failure and we stop asking
 
 
 _shared = _SharedState()
 
 
-def remember(harness: str, text: str) -> None:
+def _pairs(windows: list[Window] | None) -> list[tuple[str, int]]:
+    return [(w.label, w.used_percent) for w in windows or []]
+
+
+def remember(harness: str, text: str, windows: tuple[tuple[str, int], ...] = ()) -> None:
     """A figure that did not come from a fetch — the chat runtimes read one
     off every turn's own stream — recorded as the last known, so a poller
     that is backing off republishes it instead of what it last fetched."""
     _shared.text[harness] = text
+    _shared.windows[harness] = list(windows)
 
 
 def _keychain_secret_uncached() -> str | None:
@@ -340,31 +346,37 @@ class RateLimitPoller(threading.Thread):
         self._start_lock = threading.Lock()
         self._launched = False
         self.state["limits"] = {h: _shared.text.get(h, "") for h in self.fetchers}
+        self.state["windows"] = {h: list(_shared.windows.get(h, [])) for h in self.fetchers}
 
     def refresh(self) -> None:
         now = time.monotonic()
         _shared.last_refresh = now
         out: dict[str, str] = {}
+        wins: dict[str, list[tuple[str, int]]] = {}
         for h, fetch in self.fetchers.items():
             if self._halt.is_set():
                 # halted mid-refresh (bar dropped, leg ending): no further
                 # credentialed calls; what was already fetched still lands
-                out[h] = _shared.text.get(h, "")
+                out[h] = _shared.text.get(h, ""); wins[h] = list(_shared.windows.get(h, []))
                 continue
             if now < _shared.not_before.get(h, 0.0):
-                out[h] = _shared.text.get(h, "")   # still told not to ask: keep what we had
+                # still told not to ask: keep what we had
+                out[h] = _shared.text.get(h, ""); wins[h] = list(_shared.windows.get(h, []))
                 continue
             try:
                 windows = fetch()
             except Throttled as exc:
                 _shared.not_before[h] = now + exc.retry_after
-                out[h] = _shared.text.get(h, "")
+                out[h] = _shared.text.get(h, ""); wins[h] = list(_shared.windows.get(h, []))
                 continue
             except Exception:
                 windows = None
             out[h] = format_windows(windows) if windows else ""
+            wins[h] = _pairs(windows)
         _shared.text.update(out)
+        _shared.windows.update(wins)
         self.state["limits"] = out
+        self.state["windows"] = wins
 
     def poke(self) -> None:
         if time.monotonic() - _shared.last_refresh >= self.min_gap:

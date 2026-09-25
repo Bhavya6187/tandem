@@ -556,3 +556,20 @@ def test_retry_after_accepts_an_http_date():
     # a date in the past means "now": fall back to the default rather than 0
     past = datetime.now(timezone.utc) - timedelta(seconds=30)
     assert ratelimit._retry_after(format_datetime(past, usegmt=True)) == ratelimit.DEFAULT_RETRY_AFTER
+
+
+def test_poller_publishes_parsed_windows_beside_the_text():
+    from tandem.ratelimit import RateLimitPoller, Window
+    state = {}
+    p = RateLimitPoller(["codex"], state, fetchers={"codex": lambda: [Window("5h", 42), Window("7d", 7)]})
+    p.refresh()
+    assert state["limits"] == {"codex": "5h 42% 7d 7%"}
+    assert state["windows"] == {"codex": [("5h", 42), ("7d", 7)]}
+
+
+def test_a_remembered_figure_carries_its_windows():
+    from tandem import ratelimit
+    ratelimit.remember("claude", "5h 9%", (("5h", 9),))
+    state = {}
+    p = ratelimit.RateLimitPoller(["claude"], state, fetchers={"claude": lambda: None})
+    assert state["windows"]["claude"] == [("5h", 9)]

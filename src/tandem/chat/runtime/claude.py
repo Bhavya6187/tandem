@@ -169,7 +169,8 @@ class ClaudeRuntime:
         if t == "rate_limit_event":
             windows = parse_claude_event(m.get("rate_limit_info"))
             if windows:
-                emit(LimitsUpdate("claude", format_windows(windows)))
+                emit(LimitsUpdate("claude", format_windows(windows),
+                                  tuple((w.label, w.used_percent) for w in windows)))
             return None
         if t == "system" and m.get("subtype") == "init":
             if self.on_init is not None and m.get("session_id"):
