@@ -229,17 +229,22 @@ Reply in the required schema. If nothing rises to that bar, verdict is
 ```
 
 ```json
-{"type": "object", "required": ["verdict"],
+{"type": "object", "additionalProperties": false,
+ "required": ["verdict", "severity", "note", "evidence"],
  "properties": {
-   "verdict":  {"enum": ["clean", "speak"]},
-   "severity": {"enum": ["block", "warn"]},
+   "verdict":  {"type": "string", "enum": ["clean", "speak"]},
+   "severity": {"type": "string", "enum": ["block", "warn", ""]},
    "note":     {"type": "string", "maxLength": 400},
    "evidence": {"type": "array", "items": {"type": "object",
-                "required": ["file", "line"],
+                "additionalProperties": false,
+                "required": ["file", "line", "why"],
                 "properties": {"file": {"type": "string"},
                                "line": {"type": "integer"},
                                "why":  {"type": "string"}}}}}}
 ```
+
+Codex's strict output mode requires every property present and no extras,
+so a clean verdict carries `severity: ""` and an empty evidence list.
 
 `Verdict` is the parsed form plus `elapsed`, `error`, and the reviewer's
 harness and model. `note` longer than 400 characters is clipped by tandem,

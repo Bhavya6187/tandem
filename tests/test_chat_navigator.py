@@ -119,9 +119,16 @@ def test_prompt_without_files_or_diff_says_so():
 
 
 def test_schema_is_what_the_spec_says():
-    assert SCHEMA["required"] == ["verdict"]
-    assert SCHEMA["properties"]["verdict"]["enum"] == ["clean", "speak"]
-    assert SCHEMA["properties"]["note"]["maxLength"] == NOTE_CHARS == 400
+    # codex's strict output mode: every property required, no extras, at every object level
+    assert SCHEMA["required"] == ["verdict", "severity", "note", "evidence"]
+    assert SCHEMA["additionalProperties"] is False
+    props = SCHEMA["properties"]
+    assert props["verdict"]["enum"] == ["clean", "speak"]
+    assert props["severity"]["enum"] == ["block", "warn", ""]
+    assert props["note"]["maxLength"] == NOTE_CHARS == 400
+    item = props["evidence"]["items"]
+    assert item["required"] == ["file", "line", "why"]
+    assert item["additionalProperties"] is False
 
 
 def pv(structured=None, text="", **kw):
@@ -136,6 +143,15 @@ def test_structured_output_wins_over_text():
     assert v.spoken and v.severity == "block" and v.note == "bad loop"
     assert v.evidence == (Evidence("s.py", 12, "swallows"),)
     assert v.navigator == "codex" and v.elapsed == 1.5
+
+
+def test_strict_shape_replies_parse():
+    clean = pv({"verdict": "clean", "severity": "", "note": "", "evidence": []})
+    assert clean.verdict == "clean"
+    v = pv({"verdict": "speak", "severity": "", "note": "n",
+            "evidence": [{"file": "s.py", "line": 3, "why": ""}]})
+    assert v.spoken and v.severity == ""
+    assert v.evidence == (Evidence("s.py", 3, ""),)
 
 
 def test_text_json_is_parsed_even_inside_fences_or_prose():

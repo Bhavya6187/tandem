@@ -104,15 +104,19 @@ def gate(facts: TurnFacts, *, navigator: str, headroom_ok: bool, interval_ok: bo
 NOTE_CHARS = 400
 _DIFF_CAP = 20_000
 
+# codex's strict output mode needs every property required and additionalProperties: false,
+# so `severity` carries "" for a clean verdict and `why` is "" when there is nothing to say
 SCHEMA: dict = {
     "type": "object",
-    "required": ["verdict"],
+    "additionalProperties": False,
+    "required": ["verdict", "severity", "note", "evidence"],
     "properties": {
-        "verdict": {"enum": ["clean", "speak"]},
-        "severity": {"enum": ["block", "warn"]},
+        "verdict": {"type": "string", "enum": ["clean", "speak"]},
+        "severity": {"type": "string", "enum": ["block", "warn", ""]},
         "note": {"type": "string", "maxLength": NOTE_CHARS},
         "evidence": {"type": "array", "items": {
-            "type": "object", "required": ["file", "line"],
+            "type": "object", "additionalProperties": False,
+            "required": ["file", "line", "why"],
             "properties": {"file": {"type": "string"}, "line": {"type": "integer"},
                            "why": {"type": "string"}}}},
     },
