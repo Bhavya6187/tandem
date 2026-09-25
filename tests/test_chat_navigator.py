@@ -231,3 +231,53 @@ def test_a_touched_path_outside_the_repo_is_omitted(tmp_path):
     d = compute_diff(str(root), (str(root / "a.py"), str(outside)), 0)
     assert "-x = 1" in d and "+x = 2" in d
     assert "(untracked)" not in d
+
+
+from tandem.chat.navigator import NavigatorLog, log_path
+
+
+def test_log_path_is_per_session_under_tandem_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+    assert log_path("tdm-1") == tmp_path / ".tandem" / "navigator" / "tdm-1.jsonl"
+
+
+def test_log_records_reviews_rides_and_feedback(tmp_path):
+    log = NavigatorLog(tmp_path / "n" / "x.jsonl")
+    spoken = Verdict("speak", severity="block", note="bad", evidence=(Evidence("a.py", 3, "w"),),
+                     elapsed=2.0, navigator="codex", model="m")
+    r1 = log.review(facts_with(prompt="p" * 200, paths=("a.py",)), "", spoken)
+    r2 = log.review(facts_with(), "skip:quiet", None)
+    r3 = log.review(facts_with(paths=("a",)), "", Verdict("clean", navigator="codex"))
+    log.ridden(r1, "claude")
+    log.feedback(r1, "good")
+    recs = NavigatorLog.read(tmp_path / "n" / "x.jsonl")
+    assert [r["kind"] for r in recs] == ["review", "review", "review", "ridden", "feedback"]
+    assert recs[0]["ts"] == r1 and recs[0]["gate"] == "review" and recs[0]["verdict"] == "speak"
+    assert recs[0]["evidence"] == [{"file": "a.py", "line": 3, "why": "w"}]
+    assert len(recs[0]["prompt"]) == 120
+    assert recs[1]["gate"] == "skip:quiet" and recs[1]["verdict"] == ""
+    assert recs[3] == {"ts": recs[3]["ts"], "kind": "ridden", "ref": r1, "to": "claude"}
+    assert recs[4]["ref"] == r1 and recs[4]["value"] == "good"
+    assert r1 != r2 != r3
+
+
+def test_log_stats():
+    recs = [
+        {"kind": "review", "ts": "1", "gate": "review", "verdict": "speak"},
+        {"kind": "review", "ts": "2", "gate": "review", "verdict": "clean"},
+        {"kind": "review", "ts": "3", "gate": "skip:quiet", "verdict": ""},
+        {"kind": "review", "ts": "4", "gate": "review", "verdict": "speak"},
+        {"kind": "review", "ts": "5", "gate": "review", "verdict": "speak"},
+        {"kind": "feedback", "ref": "1", "value": "good"},
+        {"kind": "feedback", "ref": "4", "value": "bad"},
+    ]
+    assert NavigatorLog.stats(recs) == {"reviewed": 4, "spoken": 3, "skipped": 1,
+                                         "good": 1, "bad": 1, "helpful": 0.5}
+    assert NavigatorLog.stats([])["helpful"] is None
+
+
+def test_log_read_skips_a_torn_line(tmp_path):
+    p = tmp_path / "x.jsonl"
+    p.write_text('{"kind": "review", "ts": "1"}\n{"kind": "rev')
+    assert NavigatorLog.read(p) == [{"kind": "review", "ts": "1"}]
+    assert NavigatorLog.read(tmp_path / "missing.jsonl") == []

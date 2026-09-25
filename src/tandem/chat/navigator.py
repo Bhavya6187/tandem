@@ -11,11 +11,14 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from .. import paths
 from .events import Evidence, LiveEvent, TextDelta, ToolFinished, ToolStarted, Verdict
 
 # the command tool as each client names it (tandem's own labels for codex)
@@ -221,3 +224,83 @@ def compute_diff(cwd: str, paths: tuple[str, ...], commands: int, *,
             parts.append(d)
     out = "\n".join(parts)
     return out if len(out) <= cap else out[:cap] + "\n… (truncated)"
+
+
+def log_path(tandem_id: str) -> Path:
+    return paths.tandem_home() / "navigator" / f"{tandem_id}.jsonl"
+
+
+class NavigatorLog:
+    """One JSON line per gated turn, plus `ridden` and `feedback` lines that
+    point back at a review by its `ts`. Append-only; a torn last line is
+    skipped on read."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._lock = threading.Lock()
+        self._last_ts = ""
+
+    def _ts(self) -> str:
+        ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        if ts <= self._last_ts:                     # same microsecond: keep refs unique
+            ts = self._last_ts + "0"
+        self._last_ts = ts
+        return ts
+
+    def _append(self, record: dict) -> str:
+        with self._lock:
+            record = {"ts": self._ts(), **record}
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except OSError:
+                pass                                # the log is a courtesy, never a blocker
+            return record["ts"]
+
+    def review(self, facts: TurnFacts, gate_reason: str, verdict: Verdict | None) -> str:
+        v = verdict or Verdict("")
+        return self._append({
+            "kind": "review", "turn_harness": facts.harness,
+            "prompt": " ".join(facts.prompt.split())[:120],
+            "gate": gate_reason or "review", "verdict": v.verdict, "severity": v.severity,
+            "note": v.note,
+            "evidence": [{"file": e.file, "line": e.line, "why": e.why} for e in v.evidence],
+            "elapsed": round(v.elapsed, 2), "navigator": v.navigator, "model": v.model,
+            "error": v.error,
+        })
+
+    def ridden(self, ref: str, to: str) -> None:
+        self._append({"kind": "ridden", "ref": ref, "to": to})
+
+    def feedback(self, ref: str, value: str) -> None:
+        self._append({"kind": "feedback", "ref": ref, "value": value})
+
+    @staticmethod
+    def read(path: Path) -> list[dict]:
+        out: list[dict] = []
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return out
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict):
+                out.append(rec)
+        return out
+
+    @staticmethod
+    def stats(records: list[dict]) -> dict:
+        reviews = [r for r in records if r.get("kind") == "review"]
+        reviewed = [r for r in reviews if r.get("gate") == "review"]
+        spoken = [r for r in reviewed if r.get("verdict") == "speak"]
+        spoken_ts = {r.get("ts") for r in spoken}
+        marks = [r.get("value") for r in records
+                 if r.get("kind") == "feedback" and r.get("ref") in spoken_ts]
+        good, bad = marks.count("good"), marks.count("bad")
+        return {"reviewed": len(reviewed), "spoken": len(spoken),
+                "skipped": len(reviews) - len(reviewed), "good": good, "bad": bad,
+                "helpful": good / (good + bad) if good + bad else None}
