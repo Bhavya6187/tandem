@@ -280,7 +280,7 @@ class NavigatorLog:
     def read(path: Path) -> list[dict]:
         out: list[dict] = []
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             return out
         for line in lines:

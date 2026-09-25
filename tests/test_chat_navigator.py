@@ -281,3 +281,9 @@ def test_log_read_skips_a_torn_line(tmp_path):
     p.write_text('{"kind": "review", "ts": "1"}\n{"kind": "rev')
     assert NavigatorLog.read(p) == [{"kind": "review", "ts": "1"}]
     assert NavigatorLog.read(tmp_path / "missing.jsonl") == []
+
+
+def test_log_read_skips_a_line_torn_mid_utf8_character(tmp_path):
+    p = tmp_path / "x.jsonl"
+    p.write_bytes('{"kind":"review","ts":"1"}\n{"kind":"review","prompt":"é'.encode("utf-8")[:-1])
+    assert NavigatorLog.read(p) == [{"kind": "review", "ts": "1"}]
