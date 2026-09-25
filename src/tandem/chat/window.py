@@ -180,8 +180,12 @@ class Window:
         if arg not in ("dismiss", "good", "bad"):
             self.screen.note("usage: /note [dismiss|good|bad]")
             return
-        dropped = nav.dismiss(None if arg == "dismiss" else arg)
-        self.screen.note("note dropped" if dropped else "no pending note")
+        had = nav.pending() is not None
+        done = nav.dismiss(None if arg == "dismiss" else arg)
+        if not done:
+            self.screen.note("no pending note")
+        else:
+            self.screen.note("note dropped" if had else "feedback recorded")
 
     def status_line(self) -> str:
         """What `/status` prints: the session this window is driving, where

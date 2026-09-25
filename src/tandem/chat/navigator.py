@@ -384,6 +384,9 @@ class Navigator:
         self._thread: threading.Thread | None = None
         self._pending: tuple[TurnFacts, object] | None = None
         self._note: Note | None = None
+        # the ref of the last note spoken, kept after the note rides a prompt
+        # so `/note good|bad` can still mark it
+        self._last_spoken_ref: str | None = None
         self._spoken_evidence: set[tuple[str, int]] = set()
         self._last_spoken = float("-inf")
         self._failures = 0
@@ -433,13 +436,16 @@ class Navigator:
         return self._note
 
     def dismiss(self, feedback: str | None = None) -> bool:
+        """Drop the pending note; with `good`/`bad`, also mark the note —
+        the pending one, else the last one spoken, which may already have
+        ridden a prompt. False only when there was nothing to drop or mark."""
         with self._lock:
             note, self._note = self._note, None
-        if note is None:
-            return False
-        if feedback in ("good", "bad"):
-            self.log.feedback(note.ref, feedback)
-        return True
+            ref = note.ref if note is not None else self._last_spoken_ref
+        if feedback in ("good", "bad") and ref is not None:
+            self.log.feedback(ref, feedback)
+            return True
+        return note is not None
 
     def mark(self) -> str:
         if self._running:
@@ -495,6 +501,7 @@ class Navigator:
             if verdict.spoken:
                 with self._lock:
                     self._note = Note(ref, self.harness, facts.harness, verdict)
+                    self._last_spoken_ref = ref
         except Exception as exc:                   # a traceback here would paint over the screen
             if verdict is None:
                 verdict = Verdict("error", error=f"{type(exc).__name__}: {exc}"[:200],

@@ -413,6 +413,24 @@ def test_dismiss_with_feedback_logs_it(tmp_path):
     assert rec == {"ts": rec["ts"], "kind": "feedback", "ref": ref, "value": "bad"}
 
 
+def test_feedback_after_the_note_rode_a_prompt_is_logged_against_it(tmp_path):
+    nav, reviewer, posted, log = make_nav([speak()], tmp_path)
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION)
+    nav.join(5)
+    ridden = nav.take("codex")
+    assert ridden is not None and nav.pending() is None
+    assert nav.dismiss("good") is True
+    rec = NavigatorLog.read(log.path)[-1]
+    assert rec == {"ts": rec["ts"], "kind": "feedback", "ref": ridden.ref, "value": "good"}
+    assert nav.dismiss() is False                     # a bare dismiss still needs a pending note
+
+
+def test_feedback_with_nothing_ever_spoken_is_refused(tmp_path):
+    nav, reviewer, posted, log = make_nav([], tmp_path)
+    assert nav.dismiss("bad") is False
+    assert NavigatorLog.read(log.path) == []
+
+
 def test_a_newer_turn_replaces_the_pending_one_while_a_review_runs(tmp_path):
     nav, reviewer, posted, log = make_nav([CLEAN, CLEAN], tmp_path)
     reviewer.gate.clear()

@@ -868,6 +868,7 @@ class StubNavigator:
 
     def __init__(self):
         self.note, self.running, self.dismissed, self.closed = None, False, [], 0
+        self.last_ref = None        # a note that already rode a prompt
 
     def mark(self):
         return "reviewing" if self.running else ("note" if self.note else "")
@@ -878,7 +879,7 @@ class StubNavigator:
     def dismiss(self, feedback=None):
         had = self.note is not None
         self.dismissed.append(feedback); self.note = None
-        return had
+        return had or (feedback in ("good", "bad") and self.last_ref is not None)
 
     def close(self):
         self.closed += 1
@@ -963,6 +964,13 @@ class TestNoteCommand:
         w.navigator.note = spoken_note()
         w.handle_input(f"/note {arg}\r".encode())
         assert w.navigator.dismissed == [feedback] and "note dropped" in out.text()
+
+    def test_feedback_for_a_note_that_already_rode_is_recorded(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_nav_window(env)
+        w.navigator.last_ref = "r1"
+        w.handle_input(b"/note good\r")
+        assert w.navigator.dismissed == ["good"] and "feedback recorded" in out.text()
+        assert "note dropped" not in out.text()
 
     def test_bad_argument_is_usage(self, env_factory):
         env = env_factory(); w, d, out, _ = make_nav_window(env)
