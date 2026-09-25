@@ -185,16 +185,18 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
     def _validate_entries(self, entries, session_id) -> list[str]:
         problems = []
-        seen_uuids: set[str] = set()
+        # Every uuid in the file, not only those above the current line:
+        # claude resolves parents by lookup over the whole file, and it does
+        # write a fast in-process tool's result before the assistant entry
+        # that called it (seen with Skill on 2.1.277). An unknown type with a
+        # uuid still counts, so one novelty does not cascade into a
+        # dangling-parent problem per later entry.
+        seen_uuids = {e["uuid"] for _, e in entries if e.get("uuid")}
         convo = 0
         for i, e in entries:
             etype = e.get("type")
             if etype not in _CLAUDE_ENTRY_TYPES:
                 problems.append(f"line {i}: unknown entry type {etype!r}")
-                if e.get("uuid"):
-                    # still a chain participant: one unknown type must not
-                    # cascade into a dangling-parent problem per later entry
-                    seen_uuids.add(e["uuid"])
                 continue
             if etype in ("user", "assistant"):
                 convo += 1
@@ -206,13 +208,11 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     problems.append(f"line {i}: conversation entry missing uuid")
                 parent = e.get("parentUuid")
                 if parent and parent not in seen_uuids:
-                    # claude tolerates forward/dangling parents poorly; flag it
-                    problems.append(f"line {i}: parentUuid {parent!r} not seen earlier")
+                    problems.append(
+                        f"line {i}: parentUuid {parent!r} not found in transcript")
                 msg = e.get("message")
                 if not isinstance(msg, dict) or "content" not in msg:
                     problems.append(f"line {i}: malformed message")
-            if e.get("uuid"):
-                seen_uuids.add(e["uuid"])
         if convo == 0:
             problems.append("no conversation entries (user/assistant)")
         return problems
