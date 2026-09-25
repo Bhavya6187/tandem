@@ -45,6 +45,7 @@ def _close_note(harness: str, outcome: TurnOutcome) -> str | None:
 class Dispatcher:
     def __init__(self, store, session, runtimes: dict, emit: Callable[[LiveEvent], None],
                  answers: Answers, *, meters: dict | None = None,
+                 add_meters: Callable[[object], None] | None = None,
                  first_turn: Callable[[], None] | None = None):
         self.store = store
         self.session = session
@@ -52,6 +53,11 @@ class Dispatcher:
         self.emit = emit
         self.answers = answers
         self.meters = meters if meters is not None else {}
+        # a harness has no transcript to meter until its first turn has
+        # written one (and a codex or opencode no id before that), so every
+        # turn end is a chance to bring in the meters the window could not
+        # build when it opened
+        self._add_meters = add_meters
         # what a fresh session puts off until it is used (seeding the other
         # harnesses' session files): a window opened and closed leaves nothing
         # behind. Kept until it succeeds, so a failed attempt is retried.
@@ -269,6 +275,8 @@ class Dispatcher:
                                 close_note=_close_note(harness, outcome))
             self._report_quarantine(harness, quarantine_pre)
             self.store.touch_used(self.session.tandem_id)
+            if self._add_meters is not None:
+                self._add_meters(self.session)
             meter = self.meters.get(harness)
             if meter is not None:
                 meter.poll()

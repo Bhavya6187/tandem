@@ -19,6 +19,7 @@ from tandem.ratelimit import (
     Window,
     format_windows,
     parse_claude,
+    parse_claude_event,
     parse_codex,
 )
 
@@ -63,6 +64,21 @@ def test_parse_claude_rejects_junk():
     assert parse_claude({"five_hour": {"utilization": "lots"}}) == []
     assert parse_claude("nope") == []
     assert parse_claude({}) == []
+
+
+def test_parse_claude_event_reads_the_streams_fractions_as_percent():
+    """claude's own `rate_limit_event` carries utilization as 0..1, where the
+    usage endpoint's is already a percentage."""
+    info = {"status": "allowed", "rateLimitType": "five_hour", "unifiedWindows": {
+        "five_hour": {"utilization": 0.09, "resetsAt": 1789322400},
+        "seven_day": {"utilization": 0.416, "resetsAt": 1789840800}}}
+    assert parse_claude_event(info) == [Window("5h", 9), Window("7d", 42)]
+
+
+def test_parse_claude_event_rejects_junk():
+    assert parse_claude_event({"unifiedWindows": {"five_hour": {"utilization": "lots"}}}) == []
+    assert parse_claude_event({"status": "allowed"}) == []
+    assert parse_claude_event(None) == []
 
 
 def test_parse_codex_labels_windows_by_their_length():
@@ -373,6 +389,22 @@ def test_poller_throttled_with_nothing_known_stays_blank():
     p = RateLimitPoller(["claude"], state, fetchers={"claude": fetch})
     p.refresh()
     assert state["limits"] == {"claude": ""}
+
+
+def test_a_throttled_poller_keeps_the_figure_the_harness_streamed():
+    """The chat runtimes report limits off each turn's own stream. A refresh
+    that is told not to ask must republish that, not the blank it started
+    with — or the slot the turn just filled empties within the minute."""
+    def fetch():
+        raise ratelimit.Throttled(3600)
+
+    state = {}
+    p = RateLimitPoller(["claude"], state, fetchers={"claude": fetch})
+    ratelimit.remember("claude", "5h 9% 7d 4%")
+    p.refresh()
+    assert state["limits"] == {"claude": "5h 9% 7d 4%"}
+    p.refresh()                                     # and through the backoff
+    assert state["limits"] == {"claude": "5h 9% 7d 4%"}
 
 
 def test_parse_rejects_bool_typed_numbers():

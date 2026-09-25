@@ -350,3 +350,176 @@ def test_child_is_told_which_session_it_belongs_to(env, monkeypatch):
     rec = Recorder()
     env.runtime.run_turn(env.session, None, "hi", "", rec.emit, rec)
     assert seen[0]["TANDEM_SESSION_ID"] == "tdm-codex"
+
+
+def subagent_notice(method, thread="parent", **params):
+    return {"method": method, "params": {"threadId": thread, **params}}
+
+
+def subagent_done(thread, turn="turn-1", status="completed"):
+    return subagent_notice("turn/completed", thread, turn={
+        "id": turn, "items": [], "itemsView": "summary", "status": status,
+        "error": None, "startedAt": 1, "completedAt": 2, "durationMs": 1})
+
+
+def subagent_runtime():
+    rt = CodexRuntime(ChatConfig())
+    rt._thread_id, rt._turn_id = "parent", "turn-1"
+    rec = Recorder()
+    return rt, rec, lambda m: rt.handle(m, lambda _: None, rec.emit, rec)
+
+
+def test_child_completion_does_not_end_parent_or_leak_child_text():
+    rt, rec, handle = subagent_runtime()
+    handle(subagent_notice("turn/started", "child", turn={"id": "child-turn"}))
+    handle(subagent_notice("item/agentMessage/delta", "child", turnId="child-turn",
+                          itemId="child-msg", delta="CHILD_DONE"))
+    assert handle(subagent_done("child", "child-turn")) is None
+    assert not any(isinstance(e, (TextDelta, TurnFinished)) for e in rec.events)
+    assert any(isinstance(e, ToolOutput) and e.text == "CHILD_DONE" for e in rec.events)
+    handle(subagent_notice("item/agentMessage/delta", turnId="turn-1", itemId="parent-msg", delta="PARENT_DONE"))
+    assert handle(subagent_done("parent")).status == "completed"
+    assert [e.text for e in rec.events if isinstance(e, TextDelta)] == ["PARENT_DONE"]
+    assert len([e for e in rec.events if isinstance(e, TurnFinished)]) == 1
+
+
+def test_parent_completion_waits_for_running_children():
+    rt, rec, handle = subagent_runtime()
+    for child in ("child-a", "child-b"):
+        handle(subagent_notice("turn/started", child, turn={"id": "child-turn"}))
+    assert handle(subagent_done("parent")) is None
+    assert handle(subagent_done("child-a", "child-turn")) is None
+    assert not any(isinstance(e, TurnFinished) for e in rec.events)
+    assert handle(subagent_done("child-b", "child-turn")).status == "completed"
+    assert len([e for e in rec.events if isinstance(e, TurnFinished)]) == 1
+
+
+def test_stale_parent_completion_cannot_end_current_turn():
+    rt, rec, handle = subagent_runtime()
+    assert handle(subagent_done("parent", "old-turn")) is None
+    assert rec.events == []
+
+
+def test_subagent_spawn_is_visible_and_keeps_server_alive_before_child_starts():
+    rt, rec, handle = subagent_runtime()
+    item = {"type": "subAgentActivity", "id": "spawn-1", "kind": "started",
+            "agentThreadId": "child", "agentPath": "/root/worker"}
+    handle(subagent_notice("item/started", turnId="turn-1", startedAtMs=1, item=item))
+    handle(subagent_notice("item/completed", turnId="turn-1", completedAtMs=2, item=item))
+    assert any(isinstance(e, ToolStarted) and "worker" in e.summary for e in rec.events)
+    assert handle(subagent_done("parent")) is None
+    handle(subagent_notice("turn/started", "child", turn={"id": "child-turn"}))
+    assert handle(subagent_done("child", "child-turn")).status == "completed"
+
+
+def test_child_approval_is_answered_while_parent_waits():
+    rt, rec, handle = subagent_runtime()
+    sent = []
+    rt.handle({"id": 99, "method": "item/tool/requestUserInput", "params": {
+        "threadId": "child", "turnId": "child-turn", "itemId": "question", "isBlocking": True,
+        "questions": [{"id": "q", "header": "Color", "question": "Color?", "isOther": False,
+                       "isSecret": False, "options": None}]}}, sent.append, rec.emit, rec)
+    assert sent[0]["result"]["answers"]["q"]["answers"] == ["red"]
+    assert len(rec.questions) == 1
+
+
+def test_parent_interruption_does_not_wait_for_children():
+    rt, rec, handle = subagent_runtime()
+    handle(subagent_notice("turn/started", "child", turn={"id": "child-turn"}))
+    assert handle(subagent_done("parent", status="interrupted")).status == "interrupted"
+
+
+@pytest.mark.parametrize("scenario", ["childfirst", "parentfirst"])
+def test_process_waits_for_parent_and_children(env, monkeypatch, scenario):
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", scenario)
+    rec = Recorder()
+    out = env.runtime.run_turn(env.session, "parent", "go", "", rec.emit, rec)
+    assert out.status == "completed"
+    assert [e.text for e in rec.events if isinstance(e, TextDelta)] == ["PARENT_DONE"]
+    assert ToolOutput("agent:child", "CHILD_DONE") in rec.events
+    assert len([e for e in rec.events if isinstance(e, TurnFinished)]) == 1
+    assert isinstance(rec.events[-1], TurnFinished)
+
+
+def test_interrupt_while_draining_workers(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "draininterrupt")
+    rec = Recorder(); rt = env.runtime; holder = {}
+    t = threading.Thread(target=lambda: holder.setdefault("out", rt.run_turn(
+        env.session, "parent", "go", "", rec.emit, rec)))
+    t.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and rt._parent_outcome is None and t.is_alive():
+        time.sleep(0.01)
+    try:
+        assert rt._parent_outcome is not None
+        rt.interrupt()
+        t.join(5)
+        assert not t.is_alive()
+        assert holder["out"].status == "interrupted"
+        assert rec.events[-1].status == "interrupted"
+    finally:
+        rt.close(); t.join(5)
+
+
+def test_cancel_wins_over_last_child_finishing():
+    rt, rec, handle = subagent_runtime()
+    handle(subagent_notice("turn/started", "child", turn={"id": "child-turn"}))
+    assert handle(subagent_done("parent")) is None
+    rt._interrupted = True
+    assert handle(subagent_done("child", "child-turn")).status == "interrupted"
+
+
+def test_child_failure_is_reported_without_failing_successful_parent():
+    rt, rec, handle = subagent_runtime()
+    handle(subagent_notice("turn/started", "child", turn={"id": "child-turn"}))
+    assert handle(subagent_done("child", "child-turn", "failed")) is None
+    assert ToolFinished("agent:child", False, "failed") in rec.events
+    assert handle(subagent_done("parent")).status == "completed"
+
+
+def test_stale_child_completion_does_not_finish_new_child_turn():
+    rt, rec, handle = subagent_runtime()
+    handle(subagent_notice("turn/started", "child", turn={"id": "new-turn"}))
+    assert handle(subagent_done("parent")) is None
+    assert handle(subagent_done("child", "old-turn")) is None
+    assert handle(subagent_done("child", "new-turn")).status == "completed"
+
+
+def subagent_status(thread, kind):
+    return subagent_notice("thread/status/changed", thread, status={"type": kind})
+
+
+def test_worker_that_went_idle_without_a_turn_completed_does_not_hang_the_turn():
+    """A closed or crashed worker may never report turn/completed; its thread
+    leaving `active` is the other sign that nothing is running there."""
+    rt, rec, handle = subagent_runtime()
+    handle(subagent_notice("turn/started", "child", turn={"id": "child-turn"}))
+    handle(subagent_status("child", "active"))
+    assert handle(subagent_status("child", "systemError")) is None
+    assert handle(subagent_done("parent")).status == "completed"
+    assert ToolFinished("agent:child", False, "systemError") in rec.events
+    assert isinstance(rec.events[-1], TurnFinished)
+
+
+def test_idle_at_spawn_does_not_release_a_worker_that_has_not_run_yet():
+    """Captured order on codex 0.155.1: the child thread reports idle, then the
+    parent's subAgentActivity item, then the child goes active."""
+    rt, rec, handle = subagent_runtime()
+    handle(subagent_status("child", "idle"))
+    item = {"type": "subAgentActivity", "id": "spawn-1", "kind": "started",
+            "agentThreadId": "child", "agentPath": "/root/worker"}
+    handle(subagent_notice("item/started", turnId="turn-1", startedAtMs=1, item=item))
+    handle(subagent_status("child", "active"))
+    handle(subagent_notice("turn/started", "child", turn={"id": "child-turn"}))
+    assert handle(subagent_done("parent")) is None
+    assert handle(subagent_status("child", "idle")).status == "completed"
+    assert ToolFinished("agent:child", True, "") in rec.events
+
+
+def test_worker_reactivated_after_idle_is_waited_for_again():
+    rt, rec, handle = subagent_runtime()
+    handle(subagent_notice("turn/started", "child", turn={"id": "t1"}))
+    handle(subagent_status("child", "idle"))
+    handle(subagent_status("child", "active"))
+    assert handle(subagent_done("parent")) is None
+    assert handle(subagent_done("child", "t1")).status == "completed"

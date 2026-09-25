@@ -6,7 +6,7 @@ line, over stdio (the same transport the codex Python SDK's client.py uses).
   turn/start {threadId, input:[{type:"text", text}][, model]}
   … notifications (item/*, turn/*, thread/tokenUsage/updated,
     account/rateLimits/updated) and server requests (*/requestApproval,
-    item/tool/requestUserInput) … until turn/completed, then stdin closes.
+    item/tool/requestUserInput) … until the parent turn and its workers finish.
 
 The process holds the thread's writer lock until it exits, which is why a
 new process is spawned per turn and why a lock error is reported, never
@@ -95,6 +95,33 @@ class CodexRuntime:
         self._usage = ""
         self._streamed_output: set[str] = set()
         self._streamed_text: set[str] = set()
+        self._agents: dict[str, str | None] = {}  # running thread -> turn (None while spawning)
+        self._agent_names: dict[str, str] = {}
+        # a worker whose thread left `active` after its turn began: a closed or
+        # crashed one may never send turn/completed, and must not hold the turn
+        self._quiet: dict[str, str] = {}          # thread -> the status it went to
+        self._parent_outcome: TurnOutcome | None = None
+
+    def _agent_started(self, thread: str, emit, name: str = "") -> None:
+        if thread not in self._agents:
+            self._agents[thread] = None
+            self._agent_names[thread] = name or self._agent_names.get(thread, thread)
+            emit(ToolStarted(f"agent:{thread}", "agent", self._agent_names[thread]))
+
+    def _finish_if_ready(self, emit) -> TurnOutcome | None:
+        outcome = self._parent_outcome
+        if outcome is not None and self._interrupted:
+            outcome = TurnOutcome("interrupted")
+        if outcome is not None and (outcome.status != "completed"
+                                    or all(t in self._quiet for t in self._agents)):
+            self._parent_outcome = None
+            for thread in [t for t in self._agents if t in self._quiet]:
+                kind = self._quiet.pop(thread)
+                self._agents.pop(thread)
+                emit(ToolFinished(f"agent:{thread}", kind == "idle", "" if kind == "idle" else kind))
+            emit(TurnFinished(outcome.status, self._usage))
+            return outcome
+        return None
 
     # -- wire ----------------------------------------------------------------
 
@@ -214,6 +241,52 @@ class CodexRuntime:
             self._server_request(m, send, emit, answers)
             return None
         params = m.get("params") or {}
+        thread = params.get("threadId")
+        child = bool(self._thread_id and thread and thread != self._thread_id)
+        turn = params.get("turn") or {}
+        turn_id = params.get("turnId") or turn.get("id")
+        # Notifications from the app-server multiplex parent and child threads.
+        # Server requests above must still be answered, including child approvals.
+        if not child and self._turn_id and turn_id and turn_id != self._turn_id:
+            return None
+        if child:
+            if method == "turn/started":
+                self._agent_started(thread, emit)
+                self._agents[thread] = turn_id
+                self._quiet.pop(thread, None)
+                return None
+            if method == "thread/status/changed":
+                kind = str((params.get("status") or {}).get("type") or "")
+                if kind == "active":
+                    self._quiet.pop(thread, None)
+                elif self._agents.get(thread):      # idle at spawn precedes its first turn
+                    self._quiet[thread] = kind
+                return self._finish_if_ready(emit)
+            if method == "turn/completed":
+                if thread in self._agents and self._agents[thread] in (None, turn_id):
+                    self._agents.pop(thread)
+                    self._quiet.pop(thread, None)
+                    status = turn.get("status", "failed")
+                    emit(ToolFinished(f"agent:{thread}", status == "completed", status))
+                return self._finish_if_ready(emit)
+            if method in ("thread/tokenUsage/updated", "item/reasoning/summaryTextDelta"):
+                return None
+            parent_emit = emit
+
+            def emit(ev):
+                if isinstance(ev, TextDelta):
+                    parent_emit(ToolOutput(f"agent:{thread}", ev.text))
+                elif isinstance(ev, ToolStarted):
+                    name = self._agent_names.get(thread, thread)
+                    parent_emit(ToolStarted(ev.call_id, f"agent[{name}]/{ev.tool}", ev.summary))
+                else:
+                    parent_emit(ev)
+
+        it = params.get("item") or {}
+        if method == "item/started" and it.get("type") == "subAgentActivity":
+            if it.get("kind") == "started" and it.get("agentThreadId"):
+                self._agent_started(it["agentThreadId"], emit, it.get("agentPath", ""))
+            return None
         if method == "item/agentMessage/delta":
             n = self._parse(cp.AgentMessageDeltaNotification, params, method, emit)
             if n is None:
@@ -244,6 +317,8 @@ class CodexRuntime:
                 emit(ToolStarted(it.id, "web_search", first_line(getattr(it, "query", "") or "")))
             elif kind == "contextCompaction":
                 emit(ToolStarted(it.id, "compaction", "context compaction"))
+            elif kind == "collabAgentToolCall":
+                emit(ToolStarted(it.id, f"agent/{it.tool}", first_line(it.prompt or "")))
         elif method == "item/completed":
             n = self._parse(cp.ItemCompletedNotification, params, method, emit)
             if n is None:
@@ -267,6 +342,13 @@ class CodexRuntime:
             elif kind == "agentMessage":
                 if it.id not in self._streamed_text and it.text:
                     emit(TextDelta(it.text))
+            elif kind == "collabAgentToolCall":
+                if it.tool in ("spawnAgent", "resumeAgent") and it.status == "completed":
+                    for agent in it.receiverThreadIds:
+                        # A child may already have completed before the spawn reply.
+                        if agent not in self._agent_names:
+                            self._agent_started(agent, emit)
+                emit(ToolFinished(it.id, it.status == "completed", it.status))
         elif method == "thread/tokenUsage/updated":
             n = self._parse(cp.ThreadTokenUsageUpdatedNotification, params, method, emit)
             if n is None:
@@ -306,8 +388,8 @@ class CodexRuntime:
                 detail = str(err.get("message") or err) if isinstance(err, dict) else ""
             status = "interrupted" if self._interrupted or raw == "interrupted" else (
                 "failed" if raw == "failed" else "completed")
-            emit(TurnFinished(status, self._usage))
-            return TurnOutcome(status, detail if status == "failed" else "")
+            self._parent_outcome = TurnOutcome(status, detail if status == "failed" else "")
+            return self._finish_if_ready(emit)
         return None
 
     # -- process -------------------------------------------------------------
@@ -318,6 +400,8 @@ class CodexRuntime:
         self._usage = ""
         self._thread_id = self._turn_id = None
         self._streamed_output.clear(); self._streamed_text.clear()
+        self._agents.clear(); self._agent_names.clear(); self._quiet.clear()
+        self._parent_outcome = None
         proc = subprocess.Popen(
             [*self.binary, "app-server"], cwd=session.cwd,
             env=child_env(tandem_id=session.tandem_id),
@@ -436,6 +520,10 @@ class CodexRuntime:
         self._request(proc, "turn/interrupt",
                       cp.TurnInterruptParams(threadId=thread_id, turnId=turn_id)
                       .model_dump(by_alias=True, exclude_none=True))
+        # Once the parent is done it cannot acknowledge an interrupt. Closing
+        # the server interrupts its remaining workers and unblocks the reader.
+        if self._parent_outcome is not None:
+            self.close()
 
     def close(self) -> None:
         with self._lock:

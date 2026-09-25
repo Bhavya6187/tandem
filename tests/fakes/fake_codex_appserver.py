@@ -42,8 +42,8 @@ def record(m):
             f.write(json.dumps({"method": m.get("method"), "params": m.get("params")}) + "\n")
 
 
-def item(kind, **fields):
-    return {"type": kind, "id": fields.pop("id", "call-1"), **fields}
+def item(item_type, **fields):
+    return {"type": item_type, "id": fields.pop("id", "call-1"), **fields}
 
 
 def reply_out(m):
@@ -99,6 +99,18 @@ def main():
             if scenario == "crash":
                 sys.stderr.write("kaboom\n"); sys.exit(2)
             notify("turn/started", {"threadId": thread_id, "turn": {"id": TURN, "items": [], "itemsView": "notLoaded", "status": "inProgress", "error": None, "startedAt": 1, "completedAt": None, "durationMs": None}})
+            if scenario in ("childfirst", "parentfirst", "draininterrupt"):
+                notify("item/started", {"threadId": thread_id, "turnId": TURN, "startedAtMs": 1,
+                    "item": item("subAgentActivity", kind="started", agentThreadId="child", agentPath="/root/worker")})
+                notify("turn/started", {"threadId": "child", "turn": {"id": TURN}})
+                if scenario == "childfirst":
+                    finish("child", "CHILD_DONE")
+                    finish(thread_id, "PARENT_DONE")
+                else:
+                    finish(thread_id, "PARENT_DONE")
+                    if scenario == "parentfirst":
+                        finish("child", "CHILD_DONE")
+                continue
             if scenario == "interrupt":
                 notify("item/started", {"threadId": thread_id, "turnId": TURN, "startedAtMs": 1, "item": item("agentMessage", id="msg-1", text="", phase="final_answer")})
                 notify("item/agentMessage/delta", {"threadId": thread_id, "turnId": TURN, "itemId": "msg-1", "delta": "partial"})
