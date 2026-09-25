@@ -63,6 +63,35 @@ def test_unknown_uuid_carrying_entry_does_not_cascade_into_parent_problems(env_f
     assert problems == ["line 1: unknown entry type 'novel-chain-entry'"]
 
 
+def test_parent_written_later_in_the_file_is_not_dangling(env_factory):
+    """Claude 2.1.277 flushed a Skill tool_result (an in-process tool that
+    returns in milliseconds) to disk BEFORE the assistant tool_use entry it
+    answers: the chain is intact by uuid, only the file order is inverted, and
+    claude itself resumes such a file fine. Seen live 2026-09-25; the
+    single-pass check refused every chat turn on that session."""
+    env = env_factory()
+    sid = env.session.native_id("claude")
+    seed_leaf = read_jsonl(env.claude_shadow)[-1]["uuid"]
+    write_line(env.claude_shadow, {
+        **claude_user([{"type": "tool_result", "tool_use_id": "toolu_1",
+                        "content": "Launching skill"}], uuid="tr-early"),
+        "parentUuid": "a-late", "sessionId": sid})
+    write_line(env.claude_shadow, {
+        **claude_assistant([{"type": "tool_use", "id": "toolu_1", "name": "Skill",
+                             "input": {"skill": "x"}}], uuid="a-late"),
+        "parentUuid": seed_leaf, "sessionId": sid})
+    assert validate_transcript("claude", env.claude_shadow, sid) == []
+
+
+def test_parent_absent_from_the_whole_file_is_still_flagged(env_factory):
+    env = env_factory()
+    sid = env.session.native_id("claude")
+    write_line(env.claude_shadow, {**claude_user("orphan", uuid="u-orphan"),
+                                   "parentUuid": "never-written", "sessionId": sid})
+    problems = validate_transcript("claude", env.claude_shadow, sid)
+    assert problems == ["line 1: parentUuid 'never-written' not found in transcript"]
+
+
 def usage_record():
     usage = {"input_tokens": 100, "cached_input_tokens": 64,
              "cache_write_input_tokens": 0, "output_tokens": 10,
