@@ -37,6 +37,15 @@ from ..events import (Answers, ApprovalRequest, LimitsUpdate, LiveEvent, Questio
 from . import child_env, first_line, summarize_args, terminate
 
 _COMMAND_TOOLS = ("Bash",)
+_FILE_TOOLS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path",
+               "NotebookEdit": "notebook_path"}
+
+
+def _tool_paths(name: str, inp) -> tuple[str, ...]:
+    key = _FILE_TOOLS.get(name)
+    if key and isinstance(inp, dict) and isinstance(inp.get(key), str) and inp[key]:
+        return (inp[key],)
+    return ()
 
 
 def _text_of(content) -> str:
@@ -129,7 +138,8 @@ class ClaudeRuntime:
                 if b.get("type") == "tool_use":
                     name = b.get("name", "")
                     emit(ToolStarted(b.get("id", ""), f"agent/{name}" if child else name,
-                                     summarize_args(b.get("name", ""), b.get("input"))))
+                                     summarize_args(b.get("name", ""), b.get("input")),
+                                     paths=() if child else _tool_paths(name, b.get("input"))))
                 elif b.get("type") == "text" and not child and not self._streamed_text and b.get("text"):
                     emit(TextDelta(b["text"]))       # partial messages off: paint the block
             return None
@@ -163,7 +173,8 @@ class ClaudeRuntime:
                 status = "failed" if m.get("is_error") else "completed"
             usage = f"{m.get('num_turns', 0)} turns"
             emit(TurnFinished(status, usage))
-            return TurnOutcome(status, error=str(m.get("result", "")) if status == "failed" else "")
+            return TurnOutcome(status, error=str(m.get("result", "")) if status == "failed" else "",
+                               structured=m.get("structured_output"))
         return None     # system/init, rate_limit_event, control_response: nothing to paint
 
     # -- process -------------------------------------------------------------

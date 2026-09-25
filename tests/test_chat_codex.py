@@ -523,3 +523,16 @@ def test_worker_reactivated_after_idle_is_waited_for_again():
     handle(subagent_status("child", "active"))
     assert handle(subagent_done("parent")) is None
     assert handle(subagent_done("child", "t1")).status == "completed"
+
+
+def test_file_change_items_carry_their_paths():
+    rt = CodexRuntime(ChatConfig())
+    rec = Recorder()
+    rt.handle({"jsonrpc": "2.0", "method": "item/started", "params": {
+        "threadId": "t", "turnId": "u", "startedAtMs": 1,
+        "item": {"type": "fileChange", "id": "fc-1", "status": "inProgress", "changes": [
+            {"path": "/p/a.py", "kind": {"type": "update"}, "diff": "-x\n+y\n"},
+            {"path": "/p/b.py", "kind": {"type": "add"}, "diff": "+z\n"}]}}},
+        lambda o: None, rec.emit, rec)
+    started = [e for e in rec.events if isinstance(e, ToolStarted)]
+    assert started and started[0].tool == "patch" and started[0].paths == ("/p/a.py", "/p/b.py")

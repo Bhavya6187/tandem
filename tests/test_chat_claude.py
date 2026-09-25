@@ -305,3 +305,27 @@ def test_rate_limit_event_without_windows_says_nothing():
     rt.handle_line({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}},
                    rec.emit, rec, lambda _: None)
     assert rec.events == []
+
+
+def test_file_change_tools_carry_their_paths():
+    rt = ClaudeRuntime(ChatConfig())
+    rec = Recorder()
+    for name, inp in [("Edit", {"file_path": "/p/a.py", "old_string": "x"}),
+                      ("Write", {"file_path": "/p/b.py", "content": ""}),
+                      ("NotebookEdit", {"notebook_path": "/p/c.ipynb"}),
+                      ("Bash", {"command": "ls"}),
+                      ("Read", {"file_path": "/p/d.py"}),
+                      ("Edit", {})]:
+        rt.handle_line({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": f"t-{name}", "name": name, "input": inp}]}}, rec.emit, rec, lambda o: None)
+    paths = [e.paths for e in rec.events if isinstance(e, ToolStarted)]
+    assert paths == [("/p/a.py",), ("/p/b.py",), ("/p/c.ipynb",), (), (), ()]
+
+
+def test_result_carries_structured_output():
+    rt = ClaudeRuntime(ChatConfig())
+    rec = Recorder()
+    out = rt.handle_line({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+                          "result": "{}", "structured_output": {"verdict": "clean"}},
+                         rec.emit, rec, lambda o: None)
+    assert out.status == "completed" and out.structured == {"verdict": "clean"}

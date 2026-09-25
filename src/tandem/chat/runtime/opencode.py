@@ -305,7 +305,10 @@ class OpencodeRuntime:
                 status = state.get("status")
                 if status in ("running", "completed", "error") and call_id not in st.started:
                     st.started.add(call_id)
-                    emit(ToolStarted(call_id, tool, summarize_args(tool, state.get("input"))))
+                    inp = state.get("input")
+                    fp = inp.get("filePath") if tool in ("edit", "write") and isinstance(inp, dict) else None
+                    emit(ToolStarted(call_id, tool, summarize_args(tool, inp),
+                                     paths=(fp,) if isinstance(fp, str) and fp else ()))
                 if status == "completed":
                     if state.get("output"):
                         emit(ToolOutput(call_id, state["output"]))

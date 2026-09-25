@@ -309,8 +309,8 @@ class CodexRuntime:
             if kind == "commandExecution":
                 emit(ToolStarted(it.id, "exec", first_line(strip_shell(it.command or ""))))
             elif kind == "fileChange":
-                paths = ", ".join(c.path for c in (getattr(it, "changes", None) or []))
-                emit(ToolStarted(it.id, "patch", first_line(paths)))
+                names = tuple(c.path for c in (getattr(it, "changes", None) or []) if getattr(c, "path", ""))
+                emit(ToolStarted(it.id, "patch", first_line(", ".join(names)), paths=names))
             elif kind == "mcpToolCall":
                 emit(ToolStarted(it.id, f"mcp:{getattr(it, 'server', '?')}.{getattr(it, 'tool', '?')}", ""))
             elif kind == "webSearch":
