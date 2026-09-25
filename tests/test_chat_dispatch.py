@@ -883,7 +883,9 @@ def test_facts_reach_the_navigator_after_sync(env_factory):
     assert isinstance(events[-1], Idle)
 
 
-def test_the_first_turn_is_flagged(env_factory):
+def test_a_seeded_first_turn_is_reviewed(env_factory):
+    """Seeding runs before the facts are taken, so a turn that completed —
+    and needed the seeding to — is not skipped as a first turn."""
     env = env_factory()
     nav = StubNavigator()
     events, done = [], threading.Event()
@@ -891,7 +893,7 @@ def test_the_first_turn_is_flagged(env_factory):
     runtimes = {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env)}
     d = Dispatcher(env.store, env.session, runtimes, emit, Answers(), first_turn=lambda: None, navigator=nav)
     d.submit("hello"); assert done.wait(5)
-    assert nav.ended[0][0].first_turn is True
+    assert nav.ended[0][0].first_turn is False
 
 
 def test_a_pending_note_rides_the_prompt_as_a_trailer(env_factory):

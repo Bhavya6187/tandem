@@ -248,12 +248,10 @@ class Dispatcher:
         # still reaches it
         note = nav.take(harness) if nav is not None else None
         prompt = item.prompt + note.trailer() if note is not None else item.prompt
-        first = self._first_turn is not None
         self.emit(TurnStarted(harness, item.model, item.prompt,
                               carried=note.summary if note is not None else ""))
-        facts = (FactsCollector(harness, item.prompt, note is not None, first, self.emit)
-                 if nav is not None else None)
-        emit = facts.emit if facts is not None else self.emit
+        facts = None
+        emit = self.emit
         lock = nav.shadow_lock if nav is not None else contextlib.nullcontext()
         outcome = None
         synced = False
@@ -261,6 +259,12 @@ class Dispatcher:
             if self._first_turn is not None:
                 self._first_turn()
                 self._first_turn = None
+            # read after the seeding: a turn that gets this far has its
+            # shadows, so its review is not skipped as a first turn
+            first = self._first_turn is not None
+            if nav is not None:
+                facts = FactsCollector(harness, item.prompt, note is not None, first, self.emit)
+                emit = facts.emit
             problems = self._validate(harness)
             if problems:
                 self.emit(Failure(f"{harness} transcript: " + "; ".join(problems)))
