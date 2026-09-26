@@ -28,6 +28,7 @@ from ..ratelimit import RateLimitPoller, remember
 from ..runner import UsageFeed
 from ..state import SyncCursor
 from .activity import Activity
+from .commands import Command, catalog, help_lines
 from .composer import Answer, Cancel, Composer, CtrlC, Interrupt, Repaint, Submit
 from .dispatch import Dispatcher
 from .events import (ApprovalRequest, Failure, Idle, LimitsUpdate, LiveEvent, QuestionRequest,
@@ -39,7 +40,7 @@ from .render import Screen
 from .reviewers import make_reviewer
 from .runtime.factory import make_runtimes
 
-WINDOW_COMMANDS = ("/quit", "/status", "/skip-permissions", "/note")
+WINDOW_COMMANDS = ("/quit", "/status", "/skip-permissions", "/note", "/help")
 _BUSY_TICK = 0.12            # the spinner's frame is 0.1 s; slower and it visibly skips
 _LONG_TURN_SECONDS = 15.0    # a turn this long ends with the bell
 
@@ -114,7 +115,8 @@ class Window:
                  dispatcher, answers: WindowAnswers, bar: StatusBar, usage_state: dict,
                  meters: dict, poller: RateLimitPoller | None = None,
                  stdin_fd: int | None = None, clock: Callable[[], float] = time.monotonic,
-                 navigator=None):
+                 navigator=None,
+                 harness_commands: Callable[[], dict[str, list[Command]]] | None = None):
         self.session, self.store, self.cfg = session, store, cfg
         self.screen, self.composer, self.dispatcher = screen, composer, dispatcher
         self.answers, self.bar, self.usage_state, self.meters, self.poller = answers, bar, usage_state, meters, poller
@@ -123,6 +125,7 @@ class Window:
         self._ctrlc_at = 0.0
         self.navigator = navigator
         self._deferred: list[ReviewFinished] = []   # verdicts that landed mid-turn
+        self._harness_commands = harness_commands or (lambda: {})
 
     # -- painting ------------------------------------------------------------
 
@@ -186,6 +189,12 @@ class Window:
             self.screen.note("no pending note")
         else:
             self.screen.note("note dropped" if had else "feedback recorded")
+
+    def catalog(self) -> list[Command]:
+        """What `/` can be right now: tandem's, the routes, and the default
+        harness's own commands as its runtime last reported them."""
+        return catalog(list(self.session.participants), self.dispatcher.default,
+                       self._harness_commands())
 
     def status_line(self) -> str:
         """What `/status` prints: the session this window is driving, where
@@ -360,6 +369,10 @@ class Window:
                     return False
                 if command == "/status":
                     self.screen.note(self.status_line())
+                    continue
+                if command == "/help":
+                    for line in help_lines(self.catalog()):
+                        self.screen.note(line)
                     continue
                 if command == "/skip-permissions":
                     self.set_skip_permissions(action.text.strip()[len(command):].strip())

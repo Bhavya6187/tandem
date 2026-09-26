@@ -11,6 +11,7 @@ import tty
 import pytest
 from conftest import claude_assistant, claude_user, write_line
 
+from tandem.chat.commands import Command
 from tandem.chat.composer import Composer
 from tandem.chat.events import (ApprovalRequest, Evidence, Idle, LimitsUpdate, QuestionRequest,
                                 ReviewFinished, ReviewStarted, TextDelta, Verdict,
@@ -46,7 +47,7 @@ class Clock:
     def __call__(self): return self.now
 
 
-def make_window(env, cfg=None, stdin_fd=None, clock=None):
+def make_window(env, cfg=None, stdin_fd=None, clock=None, harness_commands=None):
     cfg = cfg or ChatConfig()
     out = Out()
     screen = Screen(out, 24, 60, cfg, color=False)
@@ -54,7 +55,8 @@ def make_window(env, cfg=None, stdin_fd=None, clock=None):
     d = StubDispatcher()
     bar = StatusBar(24, 60, "claude", ["codex"], hint="/claude /codex route")
     w = Window(env.session, env.store, cfg, screen, Composer(), d, answers, bar, {"limits": {}}, {},
-               stdin_fd=stdin_fd, **({"clock": clock} if clock else {}))
+               stdin_fd=stdin_fd, harness_commands=harness_commands,
+               **({"clock": clock} if clock else {}))
     return w, d, out, answers
 
 
@@ -141,6 +143,21 @@ class TestWindowCommands:
         d.pins = {"codex": "gpt-5.5"}
         w.handle_input(b"/status\r")
         assert "pins: codex=gpt-5.5" in out.text()
+
+    def test_help_prints_the_catalog_and_runs_nothing(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        assert w.handle_input(b"/help\r") is True
+        assert d.submitted == []
+        text = out.text()
+        assert "tandem:" in text and "/help" in text and "/compact" in text
+        assert "routes:" in text and "/claude" in text and "/codex" in text
+
+    def test_help_lists_the_default_harnesss_own_commands(self, env_factory):
+        env = env_factory()
+        w, d, out, _ = make_window(env, harness_commands=lambda: {
+            "claude": [Command("deep-research", "claude command", "claude")]})
+        w.handle_input(b"/help\r")
+        assert "claude:" in out.text() and "/deep-research" in out.text()
 
 
 def test_approval_round_trip(env_factory):
