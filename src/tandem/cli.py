@@ -155,6 +155,29 @@ _skip_permissions_option = click.option(
          "launch [default: the skip_permissions config key].")
 
 
+_review_option = click.option(
+    "--review/--no-review", "review", default=None,
+    help="Review mode for this launch: the harness that is not taking your "
+         "prompts follows along and comments on each turn (the chat navigator) "
+         "[default: the [chat] navigator config key].")
+
+
+def _reviewer(session: PairedSession, cfg) -> str:
+    """Who follows and comments under `--review`: the configured navigator
+    when it is not the harness taking the prompts, else the first of claude
+    and codex that is a participant and not that harness. A navigator never
+    reviews its own turns, so the executing harness is always passed over."""
+    from .config import navigator_choices
+
+    executing = session.active
+    for h in (cfg.navigator, *navigator_choices()):
+        if h and h != executing and h in session.participants:
+            return h
+    raise click.ClickException(
+        f"--review needs a second participant that can review (claude or codex) "
+        f"besides {executing}; this session has {', '.join(session.participants)}.")
+
+
 def _apply_skip_permissions(value: bool | None) -> None:
     """One launch's `--[no-]skip-permissions`. A subcommand's callback runs
     after the group's, so the nearer spelling wins, as it does for `--on`."""
@@ -171,10 +194,11 @@ def _apply_skip_permissions(value: bool | None) -> None:
 @click.option("--continue", "-c", "continue_last", is_flag=True, help=_CONTINUE_HELP)
 @click.option("--active", type=_HARNESS_CHOICE, default=None, hidden=True)
 @_skip_permissions_option
+@_review_option
 @click.pass_context
 def main(ctx: click.Context, harness: str | None, fresh: bool,
          continue_last: bool, active: str | None,
-         skip_permissions: bool | None) -> None:
+         skip_permissions: bool | None, review: bool | None) -> None:
     """Run Claude Code and Codex as one paired session.
 
     With no subcommand, starts a fresh chat. Use `tandem resume [ID]` to
@@ -200,9 +224,13 @@ def main(ctx: click.Context, harness: str | None, fresh: bool,
         raise click.UsageError(
             "--skip-permissions only applies to the sessions tandem opens: "
             "tandem, tandem resume, tandem native and tandem native resume.")
+    if review is not None and ctx.invoked_subcommand not in (None, "resume"):
+        # the navigator lives in the chat window; native sessions have none
+        raise click.UsageError(
+            "--review only applies to chat sessions: tandem and tandem resume.")
     _apply_skip_permissions(skip_permissions)
     if ctx.invoked_subcommand is None:
-        _chat(harness, fresh, continue_last=continue_last)
+        _chat(harness, fresh, continue_last=continue_last, review=review)
 
 
 def _pair_session(store: StateStore, cwd: str, active: str,
@@ -589,9 +617,10 @@ def run_cmd(target: str, prompt: tuple[str, ...]) -> None:
 @click.argument("tandem_id", required=False)
 @click.option("--on", "harness", type=_HARNESS_CHOICE, default=None, help=_ON_HELP)
 @_skip_permissions_option
+@_review_option
 @click.pass_context
 def resume(ctx: click.Context, tandem_id: str | None, harness: str | None,
-           skip_permissions: bool | None) -> None:
+           skip_permissions: bool | None, review: bool | None) -> None:
     """Resume a chat by ID, or choose from sessions across all directories.
 
     Restores the conversation, last-used harness and model pins. The session
@@ -600,7 +629,8 @@ def resume(ctx: click.Context, tandem_id: str | None, harness: str | None,
     _apply_skip_permissions(skip_permissions)
     parent_options = ctx.parent.params if ctx.parent is not None else {}
     _chat(harness if harness is not None else parent_options.get("harness"),
-          False, tandem_id or "")
+          False, tandem_id or "",
+          review=review if review is not None else parent_options.get("review"))
 
 
 def _pid_alive(pid: int) -> bool:
@@ -672,7 +702,9 @@ def _select_chat_session(store: StateStore, resume_id: str | None,
 
 
 def _chat(harness: str | None, fresh: bool, resume_id: str | None = None,
-          continue_last: bool = False) -> None:
+          continue_last: bool = False, review: bool | None = None) -> None:
+    from dataclasses import replace
+
     from .chat.window import run_chat
     from .config import load_chat_config
 
@@ -702,6 +734,20 @@ def _chat(harness: str | None, fresh: bool, resume_id: str | None = None,
                 sys.exit(1)
             store.set_active(session.tandem_id, harness)
             session = store.get_session(session.tandem_id) or session
+        cfg = load_chat_config()
+        if review is True:
+            # decided here, with the session in hand: the reviewer is whoever
+            # is not taking the prompts, which only the session knows
+            try:
+                cfg = replace(cfg, navigator=_reviewer(session, cfg), navigator_invalid="")
+            except click.ClickException:
+                if paired:
+                    # nothing outside the state db exists yet; a pairing
+                    # refused for want of a reviewer leaves no row behind
+                    store.delete_session(session.tandem_id)
+                raise
+        elif review is False:
+            cfg = replace(cfg, navigator="", navigator_invalid="")
         store.touch_used(session.tandem_id)
         if not paired:
             click.echo(f"resuming {session.tandem_id} ({session.active} active, "
@@ -711,7 +757,7 @@ def _chat(harness: str | None, fresh: bool, resume_id: str | None = None,
 
             offer_install()
         if not paired:
-            code = run_chat(session, store, load_chat_config())
+            code = run_chat(session, store, cfg)
         else:
             # The shadows wait for the first prompt, seeded from the session
             # as it was paired (a bare `/codex` typed first moves the active
@@ -731,7 +777,7 @@ def _chat(harness: str | None, fresh: bool, resume_id: str | None = None,
                 marker.unlink(missing_ok=True)
 
             try:
-                code = run_chat(session, store, load_chat_config(), first_turn=first_turn)
+                code = run_chat(session, store, cfg, first_turn=first_turn)
             finally:
                 if not used:
                     store.delete_session(session.tandem_id)
