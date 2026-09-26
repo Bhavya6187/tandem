@@ -235,7 +235,12 @@ before anything harness-specific happens. `Pending` gains
   {threadId}` instead of `turn/start`. The response is an empty object;
   the turn ends on the first of `thread/compacted` for this thread or
   `turn/completed` for this thread (the schema allows a compaction framed
-  as a turn), with the existing 60 s `_call` timeout as the backstop.
+  as a turn). The wait for that completion is bounded — the request's own
+  60 s `_call` timeout covers only the `{}` acknowledgement, after which
+  the read loop would otherwise block for ever — by a runtime setting
+  (`compact_timeout`, 300 s by default; a compaction is one model call),
+  and a server that never reports completion fails the turn with a
+  message rather than parking the worker.
   `handle` learns `thread/compacted` as a terminal notification only while
   a compact command is running; outside one it stays ignored.
 - opencode: `ensure_server` runs as for a turn (so the server exists), then

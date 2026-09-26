@@ -30,6 +30,7 @@ Inputs the spec implies but no test would otherwise exercise. Each has a test pi
 3. `/compact` with trailing words (`/compact keep the API notes`) must go to the harness verbatim, never as the command. (Task 3: `test_compact_with_arguments_is_ordinary_pass_through`.)
 4. `/compact` on a codex participant that has never run (no thread id) must fail with a message, not hang waiting for `thread/compacted`. (Task 5: `test_compact_without_a_thread_fails_at_once`.)
 5. A `thread/compacted` notification arriving during an ordinary turn must be ignored, not end the turn. (Task 5: `test_compacted_outside_a_compact_is_ignored`.)
+6. A codex server that acknowledges `thread/compact/start` and then never reports completion must fail the turn within `compact_timeout`, not park the worker. (Task 5: `test_compact_that_never_completes_times_out`, on the fake's `compactsilent` scenario.)
 
 ---
 
@@ -1020,6 +1021,17 @@ def test_compact_without_a_thread_fails_at_once(env):
     assert env.params("thread/start") is None
 
 
+def test_compact_that_never_completes_times_out(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "compactsilent")
+    rec = Recorder()
+    env.runtime.compact_timeout = 0.5
+    t0 = time.monotonic()
+    out = env.runtime.run_turn(env.session, "thread-1", "/compact", "", rec.emit, rec, command="compact")
+    assert out.status == "failed" and "did not report" in out.error
+    assert time.monotonic() - t0 < 5
+    assert rec.kinds()[-1] == "TurnFinished"
+
+
 def test_compacted_outside_a_compact_is_ignored():
     rt = CodexRuntime(ChatConfig()); rec = Recorder()
     rt._thread_id = "t"
@@ -1047,7 +1059,14 @@ In `CodexRuntime.__init__` add:
 ```python
         self.harness_commands: list = []      # the app-server has no text-level skill invocation
         self._compacting = False
+        # how long a compact may go without thread/compacted or turn/completed:
+        # `_call`'s timeout covers only the `{}` acknowledgement, and an
+        # unbounded q.get() after it would park the worker on a server that
+        # never reports. One model call; tests shrink it.
+        self.compact_timeout = 300.0
 ```
+
+(`import time` is not needed; the wait uses `queue.Queue.get(timeout=)`.) Add `import time` to the test file if it is not already imported.
 
 Add the two helpers above `run_turn` (moved verbatim from its head and tail):
 
@@ -1122,8 +1141,16 @@ Add the two helpers above `run_turn` (moved verbatim from its head and tail):
             else:
                 turn = cp.TurnStartParams(...)      # unchanged
                 ...
-            while True:                             # unchanged read loop
-                ...
+            while True:
+                try:
+                    m = q.get(timeout=self.compact_timeout if self._compacting else None)
+                except queue.Empty:
+                    return fail(f"codex did not report the compaction within {self.compact_timeout:.0f}s")
+                if m is None:
+                    break
+                outcome = self.handle(m, send, emit, answers)
+                if outcome is not None:
+                    break
         finally:
             self._teardown(proc, drain, pump)
         ...  # unchanged outcome fallback
