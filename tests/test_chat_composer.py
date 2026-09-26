@@ -471,3 +471,111 @@ def test_a_recalled_prompt_ending_in_a_mention_does_not_trap_history():
     assert c.text == "see @ren" and c.candidates == []
     feed(c, b"\x1b[A")
     assert c.text == "first"
+
+
+# -- the / picker --------------------------------------------------------------
+
+from tandem.chat.commands import Command  # noqa: E402
+
+CMDS = [Command("help", "list what / can be", "tandem"), Command("mode", "set the mode", "tandem"),
+        Command("model", "list models", "tandem"), Command("codex", "route", "route"),
+        Command("deep-research", "claude command", "claude")]
+
+
+def commanding(paths=PATHS, cmds=CMDS):
+    return Composer(paths=lambda: list(paths), commands=lambda: list(cmds))
+
+
+def test_a_leading_slash_opens_the_command_picker():
+    c = commanding()
+    feed(c, "/")
+    assert c.picker_kind == "command"
+    assert [x.name for x in c.candidates] == [x.name for x in CMDS]
+    feed(c, "mo")
+    assert [x.name for x in c.candidates] == ["mode", "model"]
+
+
+def test_command_matching_is_prefix_and_case_insensitive():
+    c = commanding()
+    feed(c, "/DEEP")
+    assert [x.name for x in c.candidates] == ["deep-research"]
+
+
+def test_a_slash_not_at_the_start_is_text():
+    c = commanding()
+    feed(c, "see /help")
+    assert c.candidates == [] and c.picker_kind == ""
+
+
+def test_without_a_command_source_a_slash_is_just_text():
+    c = picking()
+    feed(c, "/he")
+    assert c.candidates == []
+    assert feed(c, "\r") == [Submit("/he")]
+
+
+def test_accepting_a_command_inserts_it_with_a_space_and_closes():
+    c = commanding()
+    feed(c, "/he")
+    assert feed(c, "\t") == []
+    assert c.text == "/help " and c.cur == 6 and c.candidates == []
+    assert feed(c, "\r") == [Submit("/help ")]
+
+
+def test_enter_with_the_picker_open_accepts_the_selection():
+    c = commanding()
+    feed(c, "/mo")
+    feed(c, b"\x1b[B")                                # down → model
+    assert feed(c, "\r") == []
+    assert c.text == "/model "
+
+
+def test_a_name_typed_in_full_closes_the_picker_even_with_a_longer_sibling():
+    c = commanding()
+    feed(c, "/mode")
+    assert c.candidates == []                          # not ["model"]
+    assert feed(c, "\r") == [Submit("/mode")]
+
+
+def test_a_route_with_a_model_closes_the_picker_and_submits_raw():
+    c = commanding()
+    feed(c, "/codex:gpt-5.5 go")
+    assert c.candidates == []
+    assert feed(c, "\r") == [Submit("/codex:gpt-5.5 go")]
+
+
+def test_a_path_like_slash_word_is_not_a_command():
+    c = commanding()
+    feed(c, "/codex/README.md")
+    assert c.candidates == []
+
+
+def test_after_the_first_word_the_at_picker_still_works():
+    c = commanding()
+    feed(c, "/codex look at @ren")
+    assert c.picker_kind == "path"
+    assert c.candidates == ["docs/render-notes.md", "src/tandem/chat/render.py",
+                            "src/tandem/chat/window.py"]
+
+
+def test_esc_closes_the_command_picker_without_interrupting():
+    c = commanding()
+    feed(c, "/he")
+    assert feed(c, b"\x1b") == []
+    assert c.candidates == [] and c.text == "/he"
+
+
+def test_command_rows_show_the_name_padded_and_the_description():
+    c = commanding()
+    feed(c, "/mo")
+    rows, r, col = c.rows(60, 8)
+    assert rows[0] == "> /mo"
+    assert rows[1].startswith("  ❯ /mode ") and "set the mode" in rows[1]
+    assert rows[2].startswith("    /model") and "list models" in rows[2]
+
+
+def test_a_recalled_command_does_not_reopen_the_picker():
+    c = commanding()
+    feed(c, "/help\r")
+    feed(c, b"\x1b[A")                                 # up: recall
+    assert c.text == "/help" and c.candidates == []

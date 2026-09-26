@@ -12,11 +12,18 @@ as the rows the window paints — long lines wrapped, a tall draft scrolled
 around the cursor. A partial escape sequence at the end of a read is
 carried to the next one; a lone Esc is a key.
 
-A word that starts with `@` is a file mention, and while the cursor is on
-one the picker is open: the paths that match it are listed under the draft,
-Up/Down choose, Tab or Enter puts the choice in the draft, Esc closes the
-list. The paths come from a callable the window hands in — nothing here
-reads the filesystem — and the mention itself is sent as written."""
+Two pickers share one list under the draft. A word that starts with `@`
+is a file mention: while the cursor is on one, the paths that match it are
+listed, Up/Down choose, Tab or Enter puts the choice in the draft, Esc
+closes the list. A `/` at the very start of the draft, with the cursor
+still inside that first word, lists commands the same way — tandem's, the
+routes, the harness's own — matched by name prefix; a first word that is
+not a bare name (`/codex:gpt-5.5`, `/codex/README.md`) is not a command
+and closes the list, so a route submits untouched. A namespaced claude
+command (`plugin:name`) is listed while the query is still before its
+colon; accepting it inserts the whole name. Both lists come from callables
+the window hands in; nothing here reads the filesystem, and the mention or
+command is sent as written."""
 
 from __future__ import annotations
 
@@ -27,6 +34,7 @@ from dataclasses import dataclass
 from typing import Union
 from unicodedata import east_asian_width
 
+from .commands import Command
 from .events import ApprovalRequest, QuestionRequest, offered_labels
 from .files import match
 
@@ -81,6 +89,7 @@ _NO_WRAP = 1 << 30
 _WORD_ARROW = {"left": "word_left", "right": "word_right"}
 _PICKER_ROWS = 6
 _PICKER_MATCHES = 50
+_CMD_NAME = re.compile(r"[A-Za-z0-9_-]*")
 
 
 def approval_row(choices: tuple[str, ...] | None = None) -> str:
@@ -89,7 +98,8 @@ def approval_row(choices: tuple[str, ...] | None = None) -> str:
 
 class Composer:
     def __init__(self, history_limit: int = 200,
-                 paths: Callable[[], list[str]] | None = None):
+                 paths: Callable[[], list[str]] | None = None,
+                 commands: Callable[[], list[Command]] | None = None):
         self.buf: list[str] = []
         self.cur = 0
         self.history: list[str] = []
@@ -106,11 +116,13 @@ class Composer:
         self._top = 0
         self._goal: tuple[int, int] | None = None   # (cursor, column) a run of Up/Down aims for
         self._list_paths = paths
-        self._paths: list[str] = []
-        self._listed_at: int | None = None          # where the mention the paths were listed for starts
-        self._dismissed: int | None = None          # where the mention Esc closed the picker on starts
-        self._matched: tuple[int, str] | None = None
-        self._matches: list[str] = []
+        self._list_commands = commands
+        self._items: list = []                       # what the open picker was listed from
+        self._listed_at: tuple[str, int] | None = None   # (kind, start) the items were listed for
+        self._dismissed: int | None = None          # where the word Esc closed the picker on starts
+        self._matched: tuple[str, int, str] | None = None
+        self._matches: list = []
+        self._kind = ""
         self.selected = 0
         self._pick_top = 0
 
@@ -164,7 +176,7 @@ class Composer:
                     self._paste = True
                 elif name == "esc":
                     if self.candidates:
-                        self._dismissed = self._mention()[0]
+                        self._dismissed = self._locate()[1]
                     else:
                         actions.append(Cancel() if self.mode != "prompt" else Interrupt())
                 elif name:
@@ -298,57 +310,90 @@ class Composer:
         elif name == "down":
             self._vertical(1) or self._history_step(1)
 
-    # -- the @ picker ----------------------------------------------------------
+    # -- the pickers -----------------------------------------------------------
 
-    def _mention(self) -> tuple[int, str] | None:
-        """(where the `@` word under the cursor starts, what follows the `@`
-        up to the cursor), in prompt mode with somewhere to list paths from."""
-        if self.mode != "prompt" or self._list_paths is None:
+    def _locate(self) -> tuple[str, int, str] | None:
+        """(picker kind, where its word starts, the query up to the cursor),
+        in prompt mode. A `/` at index 0 with the cursor inside that first
+        word is a command when the word is a bare name; an `@` word under
+        the cursor anywhere is a path."""
+        if self.mode != "prompt":
+            return None
+        if self.buf and self.buf[0] == "/" and self._list_commands is not None:
+            end = 1
+            while end < len(self.buf) and not self.buf[end].isspace():
+                end += 1
+            if 0 < self.cur <= end:
+                word = "".join(self.buf[1:end])
+                if _CMD_NAME.fullmatch(word):
+                    return "command", 0, "".join(self.buf[1:self.cur])
+                return None
+        if self._list_paths is None:
             return None
         start = self.cur
         while start > 0 and not self.buf[start - 1].isspace():
             start -= 1
         if start == self.cur or self.buf[start] != "@":
             return None
-        return start, "".join(self.buf[start + 1:self.cur])
+        return "path", start, "".join(self.buf[start + 1:self.cur])
 
     @property
-    def candidates(self) -> list[str]:
-        """The paths the picker is offering; empty is a closed picker."""
+    def picker_kind(self) -> str:
+        """`"path"`, `"command"`, or `""` for a closed picker."""
+        self._sync_picker()
+        return self._kind
+
+    @property
+    def candidates(self) -> list:
+        """What the picker is offering — paths or Commands; empty is closed."""
         return self._sync_picker()
 
-    def _sync_picker(self) -> list[str]:
-        """Bring the picker in line with the draft. The paths are listed once
-        per mention, not once per keystroke; the selection starts over when
-        the query changes."""
-        mention = self._mention()
-        if mention is None:
+    def _sync_picker(self) -> list:
+        """Bring the picker in line with the draft. Items are listed once per
+        word, not once per keystroke; the selection starts over when the
+        query changes. A name typed out in full is not offered back — Enter
+        has to submit it — and for a command that includes a full name with
+        a longer sibling (`/mode` beside `/model`)."""
+        loc = self._locate()
+        if loc is None:
             self._listed_at = self._dismissed = None
+            self._kind = ""
             return []
-        start, query = mention
+        kind, start, query = loc
         if start == self._dismissed:
+            self._kind = ""
             return []
         self._dismissed = None
-        if start != self._listed_at:
-            self._paths, self._listed_at, self._matched = self._list_paths(), start, None
-        if mention != self._matched:
-            # a path typed out in full is not offered back: Enter has to submit
-            self._matches = [p for p in match(query, self._paths, _PICKER_MATCHES + 1)
-                             if p != query][:_PICKER_MATCHES]
-            self._matched, self.selected, self._pick_top = mention, 0, 0
+        if (kind, start) != self._listed_at:
+            self._items = list(self._list_paths() if kind == "path" else self._list_commands())
+            self._listed_at, self._matched = (kind, start), None
+        if loc != self._matched:
+            if kind == "path":
+                self._matches = [p for p in match(query, self._items, _PICKER_MATCHES + 1)
+                                 if p != query][:_PICKER_MATCHES]
+            else:
+                q = query.lower()
+                self._matches = ([] if any(c.name == query for c in self._items)
+                                 else [c for c in self._items if c.name.lower().startswith(q)])
+            self._matched, self.selected, self._pick_top = loc, 0, 0
+        self._kind = kind
         return self._matches
 
     def _accept(self) -> None:
-        """The chosen path takes the mention's place. A directory leaves the
-        cursor on it, so the picker goes on into it."""
-        start, _ = self._mention()
-        path = self.candidates[self.selected]
+        """The chosen item takes the word's place. A directory leaves the
+        cursor on it, so the picker goes on into it; a command gets a
+        trailing space, so the picker closes and the prompt can follow."""
+        kind, start, _ = self._locate()
+        pick = self.candidates[self.selected]
         end = self.cur
         while end < len(self.buf) and not self.buf[end].isspace():
             end += 1
-        text = f'@"{path}"' if any(ch.isspace() for ch in path) else "@" + path
-        if not path.endswith("/"):
-            text += " "
+        if kind == "command":
+            text = f"/{pick.name} "
+        else:
+            text = f'@"{pick}"' if any(ch.isspace() for ch in pick) else "@" + pick
+            if not pick.endswith("/"):
+                text += " "
         self.buf[start:end] = list(text)
         self.cur = start + len(text)
 
@@ -416,10 +461,10 @@ class Composer:
 
     def _set(self, text: str) -> None:
         self.buf, self.cur = list(text), len(text)
-        # a recalled prompt that ends in a mention does not open the picker:
-        # the next Up has to keep stepping through history
-        mention = self._mention()
-        self._dismissed = mention[0] if mention else None
+        # a recalled prompt that ends in a mention, or is a command, does not
+        # open the picker: the next Up has to keep stepping through history
+        loc = self._locate()
+        self._dismissed = loc[1] if loc else None
 
     def _insert(self, text: str) -> None:
         if text:
@@ -502,8 +547,14 @@ class Composer:
                  for i, row in enumerate(rows)][top:top + max_rows]
         # the picker's rows ride under the draft and scroll with the selection
         self._pick_top = min(max(self._pick_top, self.selected - n + 1), self.selected)
-        shown += [("  ❯ " if i == self.selected else "    ") + _printable(picks[i])
-                  for i in range(self._pick_top, self._pick_top + n)]
+        if self._kind == "command":
+            width = max((len(c.name) for c in picks), default=0) + 2
+            shown += [("  ❯ " if i == self.selected else "    ")
+                      + f"/{picks[i].name}".ljust(width) + " " + _printable(picks[i].description)
+                      for i in range(self._pick_top, self._pick_top + n)]
+        else:
+            shown += [("  ❯ " if i == self.selected else "    ") + _printable(picks[i])
+                      for i in range(self._pick_top, self._pick_top + n)]
         return shown, r - top, len(prompt) + col
 
 
