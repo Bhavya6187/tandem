@@ -196,6 +196,15 @@ class Window:
         return catalog(list(self.session.participants), self.dispatcher.default,
                        self._harness_commands())
 
+    def _record(self, text: str) -> None:
+        """Every prompt the user submits, window commands and routes
+        included, goes to the directory's history before anything runs on
+        it. The store is a courtesy here: a write that fails is a note."""
+        try:
+            self.store.add_prompt(self.session.cwd, text)
+        except Exception as exc:
+            self.screen.note(f"history not saved: {type(exc).__name__}: {exc}")
+
     def status_line(self) -> str:
         """What `/status` prints: the session this window is driving, where
         the next bare prompt goes, and the model pins that would ride with it."""
@@ -367,6 +376,7 @@ class Window:
     def handle_input(self, data: bytes) -> bool:
         for action in self.composer.feed(data):
             if isinstance(action, Submit):
+                self._record(action.text)
                 command = window_command(action.text)
                 if command == "/quit":
                     return False
@@ -464,7 +474,12 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
     # the picker's command list is the window's catalog, read at each open of
     # the picker: `win` is bound below, and the lambda looks it up when called
     harness_commands = lambda: {h: list(getattr(rt, "harness_commands", [])) for h, rt in runtimes.items()}
-    composer = Composer(paths=lambda: list_paths(session.cwd), commands=lambda: win.catalog())
+    try:
+        seed = store.recent_prompts(session.cwd, 200)
+    except Exception:                                   # a courtesy, never a blocker
+        seed = []
+    composer = Composer(paths=lambda: list_paths(session.cwd), commands=lambda: win.catalog(),
+                        history=seed)
     answers = WindowAnswers(post)
     meters: dict = {}
 

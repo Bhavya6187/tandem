@@ -480,6 +480,46 @@ def test_slash_lists_and_completes_a_command_on_a_pty(env_factory):
     assert "echo:/hel" not in text
 
 
+def test_every_submit_is_recorded_before_anything_runs(env_factory):
+    env = env_factory(); w, d, out, _ = make_window(env)
+    assert w.handle_input(b"hello there\r") is True
+    assert w.handle_input(b"/status\r") is True
+    assert w.handle_input(b"/quit\r") is False
+    assert env.store.recent_prompts(env.session.cwd, 10) == ["hello there", "/status", "/quit"]
+
+
+def test_answers_are_never_recorded(env_factory):
+    env = env_factory(); w, d, out, answers = make_window(env)
+    w.handle_event(ApprovalRequest("command", "ls"))
+    w.handle_input(b"y")
+    w.handle_event(QuestionRequest("Which?", ("a", "b")))
+    w.handle_input(b"2")
+    w.handle_event(QuestionRequest("Name?", ()))
+    w.handle_input(b"free text\r")
+    assert env.store.recent_prompts(env.session.cwd, 10) == []
+
+
+def test_a_failed_history_write_is_a_note_not_a_lost_turn(env_factory, monkeypatch):
+    env = env_factory(); w, d, out, _ = make_window(env)
+
+    def boom(cwd, text):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(env.store, "add_prompt", boom)
+    assert w.handle_input(b"still runs\r") is True
+    assert d.submitted == ["still runs"]
+    assert "history not saved" in out.text() and "disk full" in out.text()
+
+
+def test_the_window_opens_with_the_directorys_history(env_factory):
+    """Seeded at open: Up recalls a prompt typed in an earlier window here."""
+    env = env_factory()
+    hermetic_frame()
+    env.store.add_prompt(env.session.cwd, "older prompt")
+    code, text = drive_chat(env, keys=b"\x1b[A\r", expect=b"echo:older prompt")
+    assert code == 0 and "echo:older prompt" in text
+
+
 def test_resume_from_another_directory_restores_history_and_continues_native_session(
         env_factory, monkeypatch, tmp_path):
     from click.testing import CliRunner

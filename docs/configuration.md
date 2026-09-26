@@ -192,6 +192,14 @@ closes. Every other leading `/word` goes to the current harness as its own
 slash command; for opencode a listed command runs through its command
 endpoint, as its TUI would.
 
+Prompts you submit are kept per directory, across windows, in tandem's
+own state store (the newest 500; approval keys and question answers are
+never recorded). Up and Down step through them from the newest, as they
+do within a window; Ctrl-R searches them: type to narrow to the newest
+entry containing the text, Ctrl-R again steps to an older one (wrapping
+round), Enter or Tab puts the match in the composer to edit or send, Esc
+brings back what you were typing.
+
 Routes are only ever spelled with `/`: `@` belongs to file mentions, so
 `@codex:astra` is sent as ordinary text. Model names after the `:` may be
 shorthand. Codex shorthand is matched against its local model
