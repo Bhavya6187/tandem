@@ -460,9 +460,12 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
             view = view[n:]
 
     screen = Screen(write, rows, cols, cfg, color="NO_COLOR" not in os.environ)
-    composer = Composer(paths=lambda: list_paths(session.cwd))
-    answers = WindowAnswers(post)
     runtimes = runtimes if runtimes is not None else make_runtimes(session, cfg)
+    # the picker's command list is the window's catalog, read at each open of
+    # the picker: `win` is bound below, and the lambda looks it up when called
+    harness_commands = lambda: {h: list(getattr(rt, "harness_commands", [])) for h, rt in runtimes.items()}
+    composer = Composer(paths=lambda: list_paths(session.cwd), commands=lambda: win.catalog())
+    answers = WindowAnswers(post)
     meters: dict = {}
 
     def add_meters(sess) -> None:
@@ -499,7 +502,8 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
     bar = StatusBar(rows, cols, session.active, session.targets_for(session.active),
                     hint=route_hint(session.participants))
     win = Window(session, store, cfg, screen, composer, dispatcher, answers, bar, usage_state,
-                 meters, poller, stdin_fd=stdin_fd, navigator=navigator)
+                 meters, poller, stdin_fd=stdin_fd, navigator=navigator,
+                 harness_commands=harness_commands)
 
     old_attrs = termios.tcgetattr(stdin_fd)
     old_winch = signal.signal(signal.SIGWINCH, lambda *_: os.write(wake_w, b"W"))

@@ -379,6 +379,8 @@ def test_history_turns_zero_paints_nothing(env_factory):
 
 class EchoRuntime:
     harness = "claude"
+    harness_commands = []
+    def list_models(self, session): return []
     def run_turn(self, session, native_id, prompt, model, emit, answers, command=""):
         emit(TextDelta(f"echo:{prompt}")); emit(TurnFinished("completed", "")); return TurnOutcome("completed")
     def interrupt(self): pass
@@ -464,6 +466,18 @@ def test_at_sign_picks_a_file_from_the_session_directory(env_factory, monkeypatc
     code, text = drive_chat(env, keys=b"read @pick\t\r", expect=b"echo:read @picked.txt")
     assert code == 0
     assert "echo:read @picked.txt" in text
+
+
+def test_slash_lists_and_completes_a_command_on_a_pty(env_factory):
+    """The composer's command list is wired: Tab completes `/hel` to `/help `
+    and Enter runs it, so the catalog is printed. Without the wiring Tab is a
+    no-op and Enter would echo `/hel` through the runtime instead."""
+    env = env_factory()
+    hermetic_frame()
+    code, text = drive_chat(env, keys=b"/hel\t\r", expect=b"routes:")
+    assert code == 0
+    assert "tandem:" in text and "routes:" in text
+    assert "echo:/hel" not in text
 
 
 def test_resume_from_another_directory_restores_history_and_continues_native_session(
