@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
+from ..commands import Command
 from ..events import (Answers, ApprovalRequest, Failure, LiveEvent, QuestionRequest,
                       TextDelta, ThinkingDelta, ToolFinished, ToolOutput, ToolStarted,
                       TurnFinished, TurnOutcome)
@@ -124,6 +125,9 @@ class OpencodeRuntime:
         self._session_id: str | None = None
         self._interrupted = False
         self._lock = threading.Lock()
+        self.harness_commands: list[Command] = []
+        self._commands_url: str | None = None       # the server the list was read from
+        self._last_model: tuple[str, str] | None = None   # (providerID, modelID) of the last reply
 
     # -- server lifecycle ------------------------------------------------------
 
@@ -189,6 +193,31 @@ class OpencodeRuntime:
         self._forget(proc)
         raise RuntimeError(
             f"opencode serve did not become healthy within {health_timeout:g}s")
+
+    def _load_commands(self) -> None:
+        """`GET /command` once per server. Runs on the worker, after
+        ensure_server, so the window only ever reads the cached list."""
+        if self._commands_url == self.base_url:
+            return
+        try:
+            got = self._http("GET", "/command", timeout=10)
+        except Exception:
+            return                                   # the list is a courtesy; the turn goes on
+        if isinstance(got, list):
+            self.harness_commands = [
+                Command(c["name"], str(c.get("description") or ""), "opencode")
+                for c in got if isinstance(c, dict) and isinstance(c.get("name"), str) and c["name"]]
+            self._commands_url = self.base_url
+
+    def list_models(self, session) -> list[str]:
+        """`GET /api/model`: the models of every connected provider, as
+        `provider/id` so a line's first word is what `/opencode:…` pins."""
+        self.ensure_server(session.cwd, tandem_id=session.tandem_id)
+        got = self._http("GET", "/api/model", timeout=10)
+        data = (got or {}).get("data") if isinstance(got, dict) else None
+        return [f"{m['providerID']}/{m['id']}  {m.get('name') or ''}".rstrip()
+                for m in (data or []) if isinstance(m, dict)
+                and isinstance(m.get("providerID"), str) and isinstance(m.get("id"), str)]
 
     def _http(self, method: str, path: str, body=None, timeout: float = 600.0):
         u = urlparse(self.base_url)
@@ -360,22 +389,43 @@ class OpencodeRuntime:
     # -- turn ------------------------------------------------------------------
 
     def run_turn(self, session, native_id: str | None, prompt: str, model: str,
-                 emit: Callable[[LiveEvent], None], answers: Answers) -> TurnOutcome:
+                 emit: Callable[[LiveEvent], None], answers: Answers,
+                 command: str = "") -> TurnOutcome:
         assert native_id, "opencode sessions are created at pair time"
-        body: dict = {"parts": [{"type": "text", "text": prompt}, *mention_parts(prompt, session.cwd)]}
-        if model:
-            if "/" not in model:
-                msg = f"opencode models are spelled provider/model, got {model!r}"
-                emit(Failure(msg)); emit(TurnFinished("failed", ""))
-                return TurnOutcome("failed", msg)
-            provider, model_id = model.split("/", 1)
-            body["model"] = {"providerID": provider, "modelID": model_id}
+        if model and "/" not in model:
+            msg = f"opencode models are spelled provider/model, got {model!r}"
+            emit(Failure(msg)); emit(TurnFinished("failed", ""))
+            return TurnOutcome("failed", msg)
         try:
             self.ensure_server(session.cwd, tandem_id=session.tandem_id)
         except Exception as exc:        # an unhealthy server, a missing binary: both end the turn
             msg = str(exc) or type(exc).__name__
             emit(Failure(msg)); emit(TurnFinished("failed", ""))
             return TurnOutcome("failed", msg)
+        self._load_commands()
+        path = f"/session/{native_id}/message"
+        if command == "compact":
+            ids = tuple(model.split("/", 1)) if model else self._last_model
+            if not ids:
+                msg = ("nothing to compact with: pin a model (/opencode:provider/model) "
+                       "or run one opencode turn first")
+                emit(Failure(msg)); emit(TurnFinished("failed", ""))
+                return TurnOutcome("failed", msg)
+            path = f"/session/{native_id}/summarize"
+            body: dict = {"providerID": ids[0], "modelID": ids[1]}
+        else:
+            head = prompt.split(maxsplit=1)
+            names = {c.name for c in self.harness_commands}
+            if head and head[0].startswith("/") and head[0][1:] in names:
+                # a command the server lists runs through its command endpoint,
+                # as the opencode TUI would send it
+                path = f"/session/{native_id}/command"
+                body = {"command": head[0][1:], "arguments": head[1] if len(head) > 1 else ""}
+            else:
+                body = {"parts": [{"type": "text", "text": prompt}, *mention_parts(prompt, session.cwd)]}
+                if model:
+                    provider, model_id = model.split("/", 1)
+                    body["model"] = {"providerID": provider, "modelID": model_id}
         self._interrupted = False
         self._session_id = native_id
         st = TurnState(session_id=native_id)
@@ -392,7 +442,7 @@ class OpencodeRuntime:
 
             def post() -> None:
                 try:
-                    done["response"] = self._http("POST", f"/session/{native_id}/message", body, timeout=3600)
+                    done["response"] = self._http("POST", path, body, timeout=3600)
                 except Exception as exc:
                     done["error"] = str(exc) or type(exc).__name__
 
@@ -416,6 +466,8 @@ class OpencodeRuntime:
         resp = done.get("response")
         if isinstance(resp, dict):
             info = resp.get("info") or {}
+            if isinstance(info.get("providerID"), str) and isinstance(info.get("modelID"), str):
+                self._last_model = (info["providerID"], info["modelID"])   # what a later /compact summarizes with
             tokens = info.get("tokens") or {}
             if isinstance(tokens.get("input"), int) and isinstance(tokens.get("output"), int):
                 usage = f"{tokens['input']}↑ {tokens['output']}↓"

@@ -30,6 +30,8 @@ class FakeOpencode:
         self.replies: list[dict] = []          # permission replies received
         self.question_replies: list[dict] = []
         self.posts: list[dict] = []
+        self.commands: list[dict] = []         # /session/{id}/command bodies
+        self.summaries: list[dict] = []        # /session/{id}/summarize bodies
         self.aborted = threading.Event()
         self.dropped = threading.Event()       # the sse_drop stream was cut
         self.drop_once = self.scenario == "sse_drop"
@@ -78,6 +80,15 @@ class FakeOpencode:
                             self.wfile.write(payload); self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):
                         return
+                if self.path == "/command":
+                    return self._json(200, [{"name": "init", "description": "guided AGENTS.md setup",
+                                             "source": "command", "template": "..."},
+                                            {"name": "review", "description": "review changes",
+                                             "source": "command", "template": "..."}])
+                if self.path == "/api/model":
+                    return self._json(200, {"location": {}, "data": [
+                        {"id": "big-pickle", "providerID": "opencode", "name": "Big Pickle"},
+                        {"id": "gpt-5.5", "providerID": "openai", "name": "GPT-5.5"}]})
                 self._json(404, {"error": "no"})
 
             def do_POST(self):
@@ -89,6 +100,12 @@ class FakeOpencode:
                     return self._json(*fake.run_message(parts[1], body))
                 if parts[0] == "permission" and parts[-1] == "reply":
                     fake.replies.append({"id": parts[1], **body}); fake._reply.set()
+                    return self._json(200, True)
+                if parts[0] == "session" and parts[-1] == "command":
+                    fake.commands.append(body)
+                    return self._json(*fake.run_message(parts[1], {"parts": [{"type": "text", "text": body.get("command", "")}]}))
+                if parts[0] == "session" and parts[-1] == "summarize":
+                    fake.summaries.append(body)
                     return self._json(200, True)
                 if parts[0] == "session" and parts[-1] == "abort":
                     fake.aborted.set(); return self._json(200, True)
@@ -114,7 +131,9 @@ class FakeOpencode:
         self.push("session.status", {"sessionID": SID, "status": {"type": "busy"}})
         self.push("message.updated", {"sessionID": SID, "info": {"id": "msg_a", "role": "assistant", "sessionID": SID,
                                                                     "modelID": body.get("model", {}).get("modelID", "big-pickle")}})
-        info = {"id": "msg_a", "role": "assistant", "sessionID": SID, "tokens": {"input": 120, "output": 7}, "cost": 0.001}
+        info = {"id": "msg_a", "role": "assistant", "sessionID": SID, "tokens": {"input": 120, "output": 7},
+                "cost": 0.001, "providerID": "opencode",
+                "modelID": body.get("model", {}).get("modelID", "big-pickle")}
         if self.scenario == "error":
             self.push("session.error", {"sessionID": SID, "error": {"name": "ProviderError", "message": "provider down"}})
             return 500, {"error": "provider down"}
