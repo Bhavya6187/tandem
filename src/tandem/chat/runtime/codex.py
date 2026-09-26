@@ -22,6 +22,7 @@ import queue
 import re
 import subprocess
 import threading
+import time
 from collections import deque
 from typing import Callable
 
@@ -40,6 +41,21 @@ except ImportError:      # pragma: no cover
     _VERSION = "0"
 
 _SHELL_RE = re.compile(r"""^\S*(?:zsh|bash|sh)\s+-l?c\s+(['"])(.*)\1\s*$""", re.S)
+
+class _Declining:
+    """The answers a thread-less call (`model/list`) hands to `handle`: no
+    turn is running, so nobody is at the keyboard for a request the server
+    should not be sending — every approval is declined, every question
+    unanswered, and nothing raises."""
+
+    def approve(self, req) -> str:
+        return "deny"
+
+    def answer(self, req) -> str:
+        return ""
+
+
+_DECLINE = _Declining()
 
 _REQUEST_MODELS = {
     "item/commandExecution/requestApproval": cp.CommandExecutionRequestApprovalParams,
@@ -102,6 +118,13 @@ class CodexRuntime:
         # crashed one may never send turn/completed, and must not hold the turn
         self._quiet: dict[str, str] = {}          # thread -> the status it went to
         self._parent_outcome: TurnOutcome | None = None
+        self.harness_commands: list = []      # the app-server has no text-level skill invocation
+        self._compacting = False
+        # how long a compact may go without thread/compacted or turn/completed:
+        # `_call`'s timeout covers only the `{}` acknowledgement, and an
+        # unbounded q.get() after it would park the worker on a server that
+        # never reports. One model call; tests shrink it.
+        self.compact_timeout = 300.0
 
     def _agent_started(self, thread: str, emit, name: str = "") -> None:
         if thread not in self._agents:
@@ -170,6 +193,8 @@ class CodexRuntime:
                         answers: Answers) -> None:
         method, rid = m["method"], m["id"]
         params = m.get("params") or {}
+        if answers is None:
+            answers = _DECLINE
         model = _REQUEST_MODELS.get(method)
         if model is None:
             send({"jsonrpc": "2.0", "id": rid, "result": {}})
@@ -244,6 +269,14 @@ class CodexRuntime:
         params = m.get("params") or {}
         thread = params.get("threadId")
         child = bool(self._thread_id and thread and thread != self._thread_id)
+        if method == "thread/compacted":
+            # terminal only for a compact this runtime started; an ordinary
+            # turn that compacts on its own reports it as a contextCompaction
+            # item and ends with turn/completed as ever
+            if self._compacting and not child:
+                emit(TurnFinished("completed", self._usage))
+                return TurnOutcome("completed")
+            return None
         turn = params.get("turn") or {}
         turn_id = params.get("turnId") or turn.get("id")
         # Notifications from the app-server multiplex parent and child threads.
@@ -396,17 +429,12 @@ class CodexRuntime:
 
     # -- process -------------------------------------------------------------
 
-    def run_turn(self, session, native_id: str | None, prompt: str, model: str,
-                 emit: Callable[[LiveEvent], None], answers: Answers) -> TurnOutcome:
-        self._interrupted = False
-        self._usage = ""
-        self._thread_id = self._turn_id = None
-        self._streamed_output.clear(); self._streamed_text.clear()
-        self._agents.clear(); self._agent_names.clear(); self._quiet.clear()
-        self._parent_outcome = None
+    def _spawn(self, cwd: str, tandem_id: str | None):
+        """One app-server child with its stderr tail, and a queue its stdout
+        lines land on. `None` on the queue is EOF."""
         proc = subprocess.Popen(
-            [*self.binary, "app-server"], cwd=session.cwd,
-            env=child_env(tandem_id=session.tandem_id),
+            [*self.binary, "app-server"], cwd=cwd,
+            env=child_env(tandem_id=tandem_id),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1, start_new_session=True,
         )
@@ -430,6 +458,53 @@ class CodexRuntime:
 
         pump = threading.Thread(target=reader, name="tandem-chat-codex-reader", daemon=True)
         pump.start()
+        return proc, q, tail, drain, pump
+
+    def _teardown(self, proc, drain, pump, soft_timeout: float = 5.0) -> None:
+        terminate(proc, soft=lambda: proc.stdin.close(), soft_timeout=soft_timeout)
+        drain.join(2.0)         # the tail below must be the whole of stderr
+        pump.join(2.0)          # neither reader outlives the turn it reads
+        with self._lock:
+            self._proc = None
+
+    def _init_params(self) -> dict:
+        return cp.InitializeParams(clientInfo=cp.ClientInfo(name="tandem", version=_VERSION)) \
+            .model_dump(by_alias=True, exclude_none=True)
+
+    def list_models(self, session) -> list[str]:
+        """`model/list` on a thread-less app-server: one line per visible
+        model, the slug first so the pin can be matched against it."""
+        proc, q, tail, drain, pump = self._spawn(session.cwd, session.tandem_id)
+        quiet = lambda ev: None
+        try:
+            r = self._call(proc, q, "initialize", self._init_params(), quiet, _DECLINE)
+            if "error" in r:
+                raise RuntimeError(f"initialize failed: {r['error'].get('message', r['error'])}")
+            self._write(proc, {"jsonrpc": "2.0", "method": "initialized"})
+            r = self._call(proc, q, "model/list", {}, quiet, _DECLINE)
+            if "error" in r:
+                raise RuntimeError(str(r["error"].get("message", r["error"])))
+            data = (r.get("result") or {}).get("data") or []
+            return [f"{m.get('model') or m.get('id')}  {m.get('displayName') or ''}".rstrip()
+                    for m in data if isinstance(m, dict) and not m.get("hidden")]
+        finally:
+            self._teardown(proc, drain, pump, soft_timeout=2.0)
+
+    def run_turn(self, session, native_id: str | None, prompt: str, model: str,
+                 emit: Callable[[LiveEvent], None], answers: Answers,
+                 command: str = "") -> TurnOutcome:
+        self._interrupted = False
+        self._compacting = command == "compact"
+        self._usage = ""
+        self._thread_id = self._turn_id = None
+        self._streamed_output.clear(); self._streamed_text.clear()
+        self._agents.clear(); self._agent_names.clear(); self._quiet.clear()
+        self._parent_outcome = None
+        if self._compacting and not native_id:
+            msg = "nothing to compact: codex has never run in this session"
+            emit(Failure(msg)); emit(TurnFinished("failed", ""))
+            return TurnOutcome("failed", msg)
+        proc, q, tail, drain, pump = self._spawn(session.cwd, session.tandem_id)
         send = lambda obj: self._write(proc, obj)
         new_id: str | None = None
         outcome: TurnOutcome | None = None
@@ -444,9 +519,7 @@ class CodexRuntime:
             return TurnOutcome("failed", message, native_id=new_id)
 
         try:
-            r = self._call(proc, q, "initialize",
-                           cp.InitializeParams(clientInfo=cp.ClientInfo(name="tandem", version=_VERSION))
-                           .model_dump(by_alias=True, exclude_none=True), emit, answers)
+            r = self._call(proc, q, "initialize", self._init_params(), emit, answers)
             if "error" in r:
                 return fail(f"initialize failed: {r['error'].get('message', r['error'])}")
             self._write(proc, {"jsonrpc": "2.0", "method": "initialized"})
@@ -477,34 +550,46 @@ class CodexRuntime:
                     return fail("thread/start returned no thread id")
                 new_id = thread_id
             self._thread_id = thread_id
-            turn = cp.TurnStartParams(threadId=thread_id, input=[{"type": "text", "text": prompt}],
-                                      model=model or None, outputSchema=self.output_schema)
-            r = self._call(proc, q, "turn/start", turn.model_dump(by_alias=True, exclude_none=True), emit, answers)
-            if "error" in r:
-                return fail(str(r["error"].get("message", r["error"])))
-            try:
-                self._turn_id = cp.TurnStartResponse.model_validate(r.get("result")).turn.id
-            except ValidationError as exc:
-                # only turn.id is load-bearing here (interrupt needs it), so a
-                # response that drifts elsewhere still starts a usable turn
-                self._turn_id = ((r.get("result") or {}).get("turn") or {}).get("id")
-                if not self._turn_id:
-                    return fail("turn/start returned no turn id")
-                emit(Failure(f"codex sent a response tandem cannot parse: "
-                             f"turn/start: {first_line(str(exc))}"))
+            if self._compacting:
+                # the response is an empty object; completion is the
+                # thread/compacted notification (or turn/completed when the
+                # server frames the compaction as a turn), handled below
+                r = self._call(proc, q, "thread/compact/start", {"threadId": thread_id}, emit, answers)
+                if "error" in r:
+                    return fail(str(r["error"].get("message", r["error"])))
+            else:
+                turn = cp.TurnStartParams(threadId=thread_id, input=[{"type": "text", "text": prompt}],
+                                          model=model or None, outputSchema=self.output_schema)
+                r = self._call(proc, q, "turn/start", turn.model_dump(by_alias=True, exclude_none=True), emit, answers)
+                if "error" in r:
+                    return fail(str(r["error"].get("message", r["error"])))
+                try:
+                    self._turn_id = cp.TurnStartResponse.model_validate(r.get("result")).turn.id
+                except ValidationError as exc:
+                    # only turn.id is load-bearing here (interrupt needs it), so a
+                    # response that drifts elsewhere still starts a usable turn
+                    self._turn_id = ((r.get("result") or {}).get("turn") or {}).get("id")
+                    if not self._turn_id:
+                        return fail("turn/start returned no turn id")
+                    emit(Failure(f"codex sent a response tandem cannot parse: "
+                                 f"turn/start: {first_line(str(exc))}"))
+            # one deadline for the whole compact, not a wait per message: a
+            # server that keeps sending usage updates but never completes
+            # must still end
+            deadline = time.monotonic() + self.compact_timeout
             while True:
-                m = q.get()
+                try:
+                    m = q.get(timeout=max(0.0, deadline - time.monotonic()) if self._compacting else None)
+                except queue.Empty:
+                    return fail(f"codex did not report the compaction within {self.compact_timeout:.0f}s")
                 if m is None:
                     break
                 outcome = self.handle(m, send, emit, answers)
                 if outcome is not None:
                     break
         finally:
-            terminate(proc, soft=lambda: proc.stdin.close(), soft_timeout=5.0)
-            drain.join(2.0)         # the tail below must be the whole of stderr
-            pump.join(2.0)          # neither reader outlives the turn it reads
-            with self._lock:
-                self._proc = None
+            self._teardown(proc, drain, pump)
+            self._compacting = False        # a late thread/compacted must not end the next turn
         if outcome is None:
             status = "interrupted" if self._interrupted else "failed"
             outcome = TurnOutcome(status, error="\n".join(tail) or f"codex app-server exited {proc.returncode}")
@@ -516,7 +601,15 @@ class CodexRuntime:
         with self._lock:
             proc = self._proc
             thread_id, turn_id = self._thread_id, self._turn_id
-        if proc is None or proc.poll() is not None or not (thread_id and turn_id):
+        if proc is None or proc.poll() is not None:
+            return
+        if not (thread_id and turn_id):
+            # a compact has no turn to interrupt: it never got a turn/start
+            # response. Ending the process is the only way to stop it; the
+            # read loop sees EOF and reports the turn interrupted.
+            if self._compacting:
+                self._interrupted = True
+                self.close()
             return
         self._interrupted = True
         self._request(proc, "turn/interrupt",

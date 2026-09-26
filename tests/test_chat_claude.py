@@ -365,3 +365,49 @@ def test_rate_limit_event_carries_windows():
         rec.emit, rec, lambda o: None)
     ev = [e for e in rec.events if isinstance(e, LimitsUpdate)][0]
     assert ev.windows == (("5h", 25), ("7d", 50))
+
+
+# -- slash commands, /compact and /model ----------------------------------------
+
+from tandem.chat.commands import Command  # noqa: E402
+
+
+def test_builtins_are_listed_before_any_turn():
+    rt = ClaudeRuntime(ChatConfig())
+    assert [c.name for c in rt.harness_commands] == ["compact", "context"]
+    assert all(c.origin == "claude" for c in rt.harness_commands)
+
+
+def test_init_line_adds_the_sessions_slash_commands():
+    rt = ClaudeRuntime(ChatConfig()); rec = Recorder()
+    rt.handle_line({"type": "system", "subtype": "init", "session_id": "s",
+                    "slash_commands": ["deep-research", "compact", "tandem:switch"]},
+                   rec.emit, rec, lambda _: None)
+    assert [c.name for c in rt.harness_commands] == ["compact", "context", "deep-research", "tandem:switch"]
+
+
+def test_a_child_init_does_not_replace_the_list():
+    rt = ClaudeRuntime(ChatConfig()); rec = Recorder()
+    rt.handle_line({"type": "system", "subtype": "init", "session_id": "s", "slash_commands": ["x"]},
+                   rec.emit, rec, lambda _: None)
+    rt.handle_line({"type": "system", "subtype": "init", "session_id": "c", "parent_tool_use_id": "t",
+                    "slash_commands": []}, rec.emit, rec, lambda _: None)
+    assert [c.name for c in rt.harness_commands][-1] == "x"
+
+
+def test_golden_init_populates_the_commands():
+    rt = ClaudeRuntime(ChatConfig()); rec = Recorder()
+    for line in GOLDEN.read_text().splitlines():
+        rt.handle_line(json.loads(line), rec.emit, rec, lambda _: None)
+    assert "deep-research" in [c.name for c in rt.harness_commands]
+
+
+def test_compact_command_sends_the_slash_text(env):
+    rec = Recorder("allow")
+    env.runtime.run_turn(env.session, "sid-1", "ignored", "", rec.emit, rec, command="compact")
+    assert (env.tmp / "prompt.txt").read_text() == "/compact"
+
+
+def test_list_models_is_the_family_aliases():
+    rows = ClaudeRuntime(ChatConfig()).list_models(None)
+    assert [r.split()[0] for r in rows] == ["fable", "opus", "sonnet", "haiku"]

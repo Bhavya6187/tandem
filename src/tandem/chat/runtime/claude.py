@@ -29,14 +29,20 @@ import uuid
 from collections import deque
 from typing import Callable
 
+from ... import modelcat
 from ...harness import get_adapter
 from ...ratelimit import format_windows, parse_claude_event
+from ..commands import Command
 from ..events import (Answers, ApprovalRequest, LimitsUpdate, LiveEvent, QuestionRequest, TextDelta,
                       ThinkingDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished,
                       TurnOutcome)
 from . import child_env, first_line, summarize_args, terminate
 
 _COMMAND_TOOLS = ("Bash",)
+# the built-ins headless claude is verified to run from prompt text
+# (2026-09-26, 2.1.283): listed before the session has reported anything
+_BUILTINS = (Command("compact", "claude built-in: compact the conversation", "claude"),
+             Command("context", "claude built-in: show context usage", "claude"))
 _FILE_TOOLS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path",
                "NotebookEdit": "notebook_path"}
 
@@ -74,6 +80,7 @@ class ClaudeRuntime:
         self._lock = threading.Lock()
         self._interrupted = False
         self._streamed_text = False   # did the current message stream text deltas?
+        self.harness_commands: list[Command] = list(_BUILTINS)
 
     # -- argv ----------------------------------------------------------------
 
@@ -175,6 +182,12 @@ class ClaudeRuntime:
         if t == "system" and m.get("subtype") == "init" and not child:
             if self.on_init is not None and m.get("session_id"):
                 self.on_init(str(m["session_id"]))
+            names = m.get("slash_commands")
+            if isinstance(names, list):
+                taken = {c.name for c in _BUILTINS}
+                self.harness_commands = list(_BUILTINS) + [
+                    Command(n, "claude command", "claude") for n in names
+                    if isinstance(n, str) and n and n not in taken]
             return None
         if t == "result":
             if child or (not self._interrupted and
@@ -193,8 +206,11 @@ class ClaudeRuntime:
     # -- process -------------------------------------------------------------
 
     def run_turn(self, session, native_id: str | None, prompt: str, model: str,
-                 emit: Callable[[LiveEvent], None], answers: Answers) -> TurnOutcome:
+                 emit: Callable[[LiveEvent], None], answers: Answers,
+                 command: str = "") -> TurnOutcome:
         assert native_id, "claude session ids are minted at pair time"
+        if command == "compact":
+            prompt = "/compact"        # verified 2026-09-26: headless claude runs the built-in from text
         # no claude child outlives its turn, so nothing is appending to a moved file
         fresh = get_adapter("claude").reclaim_transcript(session.cwd, native_id) is None
         self._interrupted = False
@@ -262,6 +278,11 @@ class ClaudeRuntime:
             outcome = TurnOutcome(status, error="\n".join(tail) or f"claude exited {proc.returncode}")
             emit(TurnFinished(status, ""))
         return outcome
+
+    def list_models(self, session) -> list[str]:
+        """Headless claude has no list call; the families are what `--model`
+        takes as aliases for the latest of each."""
+        return [f"{f}  claude's alias for the latest {f}" for f in modelcat.CLAUDE_FAMILIES]
 
     def interrupt(self) -> None:
         with self._lock:

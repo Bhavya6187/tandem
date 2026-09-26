@@ -308,3 +308,73 @@ def test_edit_and_write_parts_carry_their_paths():
             st, rec.emit, rec)
     paths = [e.paths for e in rec.events if isinstance(e, ToolStarted)]
     assert paths == [("/p/a.py",), ("/p/b.py",), ()]
+
+
+# -- commands, /compact and /model ------------------------------------------------
+
+
+def test_commands_are_loaded_once_and_listed(fake):
+    f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
+    assert rt.harness_commands == []
+    rt.run_turn(SESSION, SID, "hi", "", rec.emit, rec)
+    assert [c.name for c in rt.harness_commands] == ["init", "review"]
+    assert rt.harness_commands[0].description == "guided AGENTS.md setup"
+    assert rt.harness_commands[0].origin == "opencode"
+
+
+def test_a_listed_command_goes_to_the_command_endpoint(fake):
+    f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
+    rt.run_turn(SESSION, SID, "hi", "", rec.emit, rec)              # loads the list
+    out = rt.run_turn(SESSION, SID, "/review branch main", "", rec.emit, rec)
+    assert out.status == "completed"
+    assert f.commands == [{"command": "review", "arguments": "branch main"}]
+    assert len(f.posts) == 1                                        # the first turn only
+
+
+def test_an_unlisted_slash_word_is_ordinary_text(fake):
+    f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
+    rt.run_turn(SESSION, SID, "/nonesuch", "", rec.emit, rec)
+    assert f.commands == [] and f.posts[-1]["parts"][0]["text"] == "/nonesuch"
+
+
+def test_compact_summarizes_with_the_pinned_model(fake):
+    f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
+    out = rt.run_turn(SESSION, SID, "/compact", "openai/gpt-5.5", rec.emit, rec, command="compact")
+    assert out.status == "completed"
+    assert f.summaries == [{"providerID": "openai", "modelID": "gpt-5.5"}]
+    assert f.posts == []
+
+
+def test_compact_falls_back_to_the_last_turns_model(fake):
+    f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
+    rt.run_turn(SESSION, SID, "hi", "", rec.emit, rec)
+    rt.run_turn(SESSION, SID, "/compact", "", rec.emit, rec, command="compact")
+    assert f.summaries == [{"providerID": "opencode", "modelID": "big-pickle"}]
+
+
+def test_compact_without_any_model_fails_with_advice(fake):
+    f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
+    out = rt.run_turn(SESSION, SID, "/compact", "", rec.emit, rec, command="compact")
+    assert out.status == "failed" and "pin a model" in out.error and f.summaries == []
+
+
+def test_list_models_reads_api_model(fake):
+    f = fake(); rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
+    assert rt.list_models(SESSION) == ["opencode/big-pickle  Big Pickle", "openai/gpt-5.5  GPT-5.5"]
+
+
+def test_a_listed_command_carries_the_model_pin(fake):
+    f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
+    rt.run_turn(SESSION, SID, "hi", "", rec.emit, rec)
+    rt.run_turn(SESSION, SID, "/review branch main", "openai/gpt-5.5", rec.emit, rec)
+    assert f.commands[-1]["model"] == "openai/gpt-5.5"
+
+
+def test_a_listed_command_carries_file_mentions_as_parts(fake, proj):
+    f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
+    session = SimpleNamespace(cwd=str(proj), tandem_id="tdm-opencode")
+    rt.run_turn(session, SID, "hi", "", rec.emit, rec)
+    rt.run_turn(session, SID, "/review @src/app.py", "", rec.emit, rec)
+    body = f.commands[-1]
+    assert body["arguments"] == "@src/app.py"
+    assert [p["type"] for p in body["parts"]] == ["file"] and body["parts"][0]["filename"] == "src/app.py"

@@ -175,12 +175,22 @@ The chat window runs every
 prompt headless inside the harness that ran the last one, unless the prompt starts with `/claude`, `/codex`, or
 `/opencode` (optionally `/codex:gpt-5.5` to pin a model for that harness,
 `/codex:default` to clear it). A bare route switches the default without a
-turn. Tandem's own window commands are `/quit` (leave the window, as two
-Ctrl-Cs do), `/status` (print the session id, the default harness, the
-participants and any model pins) and `/skip-permissions [on|off]` (turn
-claude's and codex's permission prompts off or on from the next turn —
-see [`skip_permissions`](#skip_permissions--no-permission-prompts-in-claude-and-codex)); every other leading `/word` goes to the
-current harness as its own slash command.
+turn. Tandem's own window commands are `/help` (list everything a leading
+`/` can be), `/quit` (leave the window, as two Ctrl-Cs do), `/status`
+(print the session id, the default harness, the participants and any model
+pins), `/skip-permissions [on|off]` (turn claude's and codex's permission
+prompts off or on from the next turn — see
+[`skip_permissions`](#skip_permissions--no-permission-prompts-in-claude-and-codex)),
+`/compact` (compact the default harness's conversation: claude runs its
+built-in, codex `thread/compact/start`, opencode `summarize` with the
+pinned model or the last reply's) and `/model` (list the default
+harness's models; `/model NAME` is `/harness:NAME`). Typing `/` opens a
+picker under the draft listing these, the routes, and the default
+harness's own commands — claude's from its session, opencode's from its
+server, none for codex — narrowing by prefix; Tab or Enter completes, Esc
+closes. Every other leading `/word` goes to the current harness as its own
+slash command; for opencode a listed command runs through its command
+endpoint, as its TUI would.
 
 Routes are only ever spelled with `/`: `@` belongs to file mentions, so
 `@codex:astra` is sent as ordinary text. Model names after the `:` may be

@@ -37,7 +37,8 @@ the last-used harness; start one with `/claude`, `/codex`, or `/opencode` to
 run it there and make that the default. `tandem --on codex` chooses the
 harness for the first prompt. Enter sends; **Option-Enter**, **Ctrl-J**, or a
 `\` before Enter starts a new line, and the composer grows to fit the draft. Type
-`@` to pick a file: Up/Down choose, Tab or Enter completes the path.
+`@` to pick a file: Up/Down choose, Tab or Enter completes the path. Type `/` to
+see the commands and routes; `/help` prints them.
 
 Native subagents finish within the current chat turn. Claude subagents run
 in the foreground; Codex can run workers concurrently, and chat waits for
