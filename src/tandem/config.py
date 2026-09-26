@@ -202,6 +202,11 @@ _NAVIGATORS = ("", "claude", "codex")
 _NAVIGATOR_DELIVERY = ("bar", "prompt")
 
 
+def navigator_choices() -> tuple[str, ...]:
+    """The harnesses that can be a navigator, in preference order."""
+    return tuple(h for h in _NAVIGATORS if h)
+
+
 @dataclass(frozen=True)
 class ChatConfig:
     """[chat]: the unified window. Every field forgiving, like the rest."""

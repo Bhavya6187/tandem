@@ -546,13 +546,13 @@ def test_chat_rejects_a_non_participant(env_factory, monkeypatch):
 def test_chat_on_an_unusable_harness_never_becomes_the_fresh_session_active(
         homes, ok_versions):
     """`--on` names a harness this machine cannot run and the directory has
-    no session yet: pairing must not stamp it as the active slot — a session
-    whose active harness is not a participant can never run a turn."""
+    no session yet: a session whose active harness is not a participant can
+    never run a turn, so the launch is refused before any row is written."""
     r = click.testing.CliRunner().invoke(cli.main, ["--on", "opencode"])
     assert r.exit_code == 1 and "not a participant" in r.output
+    assert "paired" not in r.output
     with StateStore() as store:
-        session = store.latest_session_for_cwd(str(homes))
-    assert session.active in session.participants
+        assert store.latest_session_for_cwd(str(homes)) is None
 
 
 # -- bare tandem is the chat window ------------------------------------------
@@ -1050,6 +1050,176 @@ def test_skip_permissions_flag_rejected_where_no_session_opens(homes, ok_version
     assert result.exit_code == 2
     assert "--skip-permissions only applies" in result.output
     assert load_skip_permissions() is False
+
+
+# -- --review -------------------------------------------------------------------
+
+
+def _config(text: str) -> None:
+    from tandem import paths
+
+    paths.tandem_home().mkdir(parents=True, exist_ok=True)
+    (paths.tandem_home() / "config.toml").write_text(text)
+
+
+def test_review_flag_makes_the_other_harness_the_navigator(homes, ok_versions, chat_cfgs):
+    # a fresh pairing starts on claude, so codex follows and comments
+    result = click.testing.CliRunner().invoke(cli.main, ["--review"])
+    assert result.exit_code == 0, result.output
+    assert [c.navigator for c in chat_cfgs] == ["codex"]
+
+
+def test_review_flag_follows_the_executing_harness(homes, ok_versions, chat_cfgs):
+    result = click.testing.CliRunner().invoke(cli.main, ["--on", "codex", "--review"])
+    assert result.exit_code == 0, result.output
+    assert [c.navigator for c in chat_cfgs] == ["claude"]
+
+
+@pytest.mark.parametrize("argv", [
+    ["resume", "{id}", "--review"],
+    ["--review", "resume", "{id}"],
+])
+def test_review_flag_reaches_a_resumed_window(homes, ok_versions, chat_cfgs, argv):
+    old = _mk_session(homes, active="codex")
+    argv = [a.format(id=old.tandem_id) for a in argv]
+    result = click.testing.CliRunner().invoke(cli.main, argv)
+    assert result.exit_code == 0, result.output
+    assert [c.navigator for c in chat_cfgs] == ["claude"]
+
+
+def test_review_flag_honours_a_configured_navigator_that_is_not_executing(
+        homes, ok_versions, chat_cfgs):
+    _config('[chat]\nnavigator = "codex"\nnavigator_model = "o3"\n')
+    result = click.testing.CliRunner().invoke(cli.main, ["--on", "claude", "--review"])
+    assert result.exit_code == 0, result.output
+    assert [(c.navigator, c.navigator_model) for c in chat_cfgs] == [("codex", "o3")]
+
+
+def test_review_flag_passes_over_a_configured_navigator_that_is_executing(
+        homes, ok_versions, chat_cfgs):
+    # the configured reviewer is the one taking the prompts: it cannot
+    # review its own turns, so the other harness follows instead
+    _config('[chat]\nnavigator = "codex"\n')
+    result = click.testing.CliRunner().invoke(cli.main, ["--on", "codex", "--review"])
+    assert result.exit_code == 0, result.output
+    assert [c.navigator for c in chat_cfgs] == ["claude"]
+
+
+def test_chat_has_no_navigator_without_the_flag(homes, ok_versions, chat_cfgs):
+    result = click.testing.CliRunner().invoke(cli.main, [])
+    assert result.exit_code == 0, result.output
+    assert [c.navigator for c in chat_cfgs] == [""]
+
+
+@pytest.mark.parametrize("argv", [
+    ["--no-review"],
+    ["resume", "{id}", "--no-review"],
+])
+def test_no_review_flag_beats_the_config(homes, ok_versions, chat_cfgs, argv):
+    _config('[chat]\nnavigator = "codex"\n')
+    old = _mk_session(homes)
+    argv = [a.format(id=old.tandem_id) for a in argv]
+    result = click.testing.CliRunner().invoke(cli.main, argv)
+    assert result.exit_code == 0, result.output
+    assert [c.navigator for c in chat_cfgs] == [""]
+
+
+def test_no_review_flag_silences_a_rejected_config_value(homes, ok_versions, chat_cfgs):
+    # off means off: the window must not print the "not supported" note
+    _config('[chat]\nnavigator = "opencode"\n')
+    result = click.testing.CliRunner().invoke(cli.main, ["--no-review"])
+    assert result.exit_code == 0, result.output
+    assert [(c.navigator, c.navigator_invalid) for c in chat_cfgs] == [("", "")]
+
+
+def test_a_subcommand_review_flag_beats_the_group_flag(homes, ok_versions, chat_cfgs):
+    old = _mk_session(homes)
+    result = click.testing.CliRunner().invoke(
+        cli.main, ["--review", "resume", old.tandem_id, "--no-review"])
+    assert result.exit_code == 0, result.output
+    assert [c.navigator for c in chat_cfgs] == [""]
+
+
+def test_review_flag_fails_when_no_other_harness_can_review(homes, ok_versions, chat_cfgs):
+    with StateStore() as store:
+        lone = store.create_session(str(homes), "claude", ["claude"], {"claude": "c-9"})
+    result = click.testing.CliRunner().invoke(cli.main, ["resume", lone.tandem_id, "--review"])
+    assert result.exit_code == 1
+    assert "--review needs a second participant" in result.output
+    assert chat_cfgs == []
+
+
+def test_review_flag_failure_leaves_no_fresh_session_behind(homes, chat_cfgs, monkeypatch):
+    # the pairing exists before the reviewer is chosen: a launch refused for
+    # want of one must not leave a row the next launch has to explain
+    monkeypatch.setattr(cli, "_resolve_participants",
+                        lambda warn_only=False: (["claude", "opencode"],
+                                                 {"claude": "2.1.220", "opencode": "1.18.31"}))
+    result = click.testing.CliRunner().invoke(cli.main, ["--review"])
+    assert result.exit_code == 1
+    assert "--review needs a second participant" in result.output
+    assert "paired" not in result.output      # never announced, never memory-synced
+    assert not (homes / "AGENTS.md").exists()
+    assert chat_cfgs == []
+    with StateStore() as store:
+        assert store.list_sessions() == []
+
+
+def test_review_flag_refusal_keeps_the_resumed_sessions_active_slot(homes, chat_cfgs, monkeypatch):
+    monkeypatch.setattr(cli, "_resolve_participants",
+                        lambda warn_only=False: (["claude", "opencode"],
+                                                 {"claude": "2.1.220", "opencode": "1.18.31"}))
+    with StateStore() as store:
+        old = store.create_session(str(homes), "opencode", ["claude", "opencode"],
+                                   {"claude": "c-9", "opencode": "o-9"})
+    result = click.testing.CliRunner().invoke(
+        cli.main, ["resume", old.tandem_id, "--on", "claude", "--review"])
+    assert result.exit_code == 1
+    assert "--review needs a second participant" in result.output
+    with StateStore() as store:
+        assert store.get_session(old.tandem_id).active == "opencode"
+
+
+def test_review_flag_with_continue(homes, ok_versions, chat_cfgs):
+    _mk_session(homes, active="codex")
+    result = click.testing.CliRunner().invoke(cli.main, ["--continue", "--review"])
+    assert result.exit_code == 0, result.output
+    assert [c.navigator for c in chat_cfgs] == ["claude"]
+
+
+def test_group_no_review_reaches_a_resumed_window(homes, ok_versions, chat_cfgs):
+    _config('[chat]\nnavigator = "codex"\n')
+    old = _mk_session(homes)
+    result = click.testing.CliRunner().invoke(cli.main, ["--no-review", "resume", old.tandem_id])
+    assert result.exit_code == 0, result.output
+    assert [c.navigator for c in chat_cfgs] == [""]
+
+
+def test_review_flag_falls_back_to_claude_when_opencode_executes(homes, chat_cfgs, monkeypatch):
+    # a stored three-way session, resumed: a fresh pairing's first turn
+    # would seed opencode's shadow through its binary, which CI lacks
+    monkeypatch.setattr(cli, "_resolve_participants",
+                        lambda warn_only=False: (["claude", "codex", "opencode"],
+                                                 {"claude": "2.1.220", "codex": "0.145.0",
+                                                  "opencode": "1.18.31"}))
+    with StateStore() as store:
+        old = store.create_session(str(homes), "opencode", ["claude", "codex", "opencode"],
+                                   {"claude": "c-9", "codex": "x-9", "opencode": "o-9"})
+    result = click.testing.CliRunner().invoke(cli.main, ["resume", old.tandem_id, "--review"])
+    assert result.exit_code == 0, result.output
+    assert [c.navigator for c in chat_cfgs] == ["claude"]
+
+
+
+@pytest.mark.parametrize("argv", [
+    ["--review", "status"], ["--review", "run", "hi"],
+    ["--no-review", "doctor"], ["--review", "native"],
+])
+def test_review_flag_rejected_where_no_chat_window_opens(homes, ok_versions, entered, argv):
+    result = click.testing.CliRunner().invoke(cli.main, argv)
+    assert result.exit_code == 2
+    assert "--review only applies" in result.output
+    assert entered == []
 
 
 def _nav_log(home, tandem_id, records):

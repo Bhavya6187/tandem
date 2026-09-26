@@ -160,6 +160,7 @@ locations.
 | `tandem resume [id]` | Resume a chat by ID from anywhere, or choose from all sessions when no ID is given |
 | `tandem --continue` / `-c` | Continue the most recently used session across directories |
 | `tandem --skip-permissions` | Open the session with claude's and codex's permission prompts off, for this launch only (also on `resume`, `native`, `native resume`; `skip_permissions = true` in the config makes it the default) |
+| `tandem --review` | Review mode: the harness not taking the first prompt follows along and comments on the other's turns (`tandem --on codex --review` = codex executes, claude reviews; also on `resume`; `--no-review` turns a configured navigator off for one launch). The reviewer is fixed at launch and never reviews its own turns. Sends each reviewed turn to the reviewer's vendor, on that account's quota |
 | `tandem native` | Pair a fresh session inside the CLIs' native interfaces (`--active codex` picks the starting CLI) |
 | `Ctrl-]` | In the native frame: continue in the next CLI |
 | `tandem native resume [id]` | Re-enter the latest or a specific session in this directory in the native frame |

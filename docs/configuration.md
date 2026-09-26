@@ -232,6 +232,20 @@ turn, on that account's quota.** It is off unless you set it. `/note` shows
 the pending note, `/note dismiss` drops it, `/note good` and `/note bad`
 record whether it helped (see `tandem navigator log`).
 
+For a single launch, pass `--review` instead: the harness not taking the
+first prompt becomes the navigator (the configured one when it is not the
+executing harness, otherwise claude, then codex). The choice is fixed for
+the launch, and a navigator never reviews its own turns: prompts you route
+to the reviewer go unreviewed until you route back. `--no-review` turns a
+configured navigator off for one launch. Both apply to `tandem` and
+`tandem resume` only; the native frame has no navigator.
+
+```bash
+tandem --review                 # claude executes, codex follows and comments
+tandem --on codex --review      # codex executes, claude follows and comments
+tandem resume <id> --no-review  # this launch without the configured navigator
+```
+
 Keys: Enter sends; Esc interrupts the running turn; Ctrl-C once interrupts,
 twice within two seconds quits; Ctrl-L repaints. An approval prompt takes
 `y`, `a` (allow for the rest of the session), or `n`; a question takes its
