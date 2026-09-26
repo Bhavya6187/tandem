@@ -87,10 +87,31 @@ validation rather than being silently declared compatible.
   `{id, thread_name, updated_at}`. `~/.codex/history.jsonl` is a global
   prompt history.
 - Every line is `{timestamp, type, payload}`.
+- **Paginated rollouts (0.155.1).** Codex now writes its own threads with
+  `history_mode: "paginated"` and a top-level `ordinal` on every record —
+  `session_meta` is 0, then every `response_item`, `event_msg`,
+  `turn_context`, … counts up contiguously. It keeps a projection of the
+  thread in `~/.codex/thread_history_1.sqlite` (`thread_history_projection_
+  state` holds the next byte offset + next ordinal it expects). On resume
+  it catches the projection up from that offset, and a final record without
+  an ordinal is fatal: `final paginated rollout record at <path> is missing
+  an ordinal` (thread never starts). `CodexAdapter.shadow_append` therefore
+  continues the file's own sequence whenever the last record carries one;
+  tandem's seeded shadows say `history_mode: "legacy"`, carry no ordinals,
+  and get none (codex still resumes those). Live-checked 2026-09-25 on a
+  codex-created thread: unchanged tail → the error verbatim; the same tail
+  re-appended with ordinals → codex initialised the thread, advanced its
+  projection over tandem's records, numbered its own next records after
+  them, and answered a prompt by quoting the synced `[via claude-code]`
+  message verbatim. So a paginated thread's model context does include
+  tandem's out-of-turn synced records (no `turn_context` / `task_started`
+  framing needed), even though codex's `thread_items` projection indexes
+  only its own prompts.
 - `type` values observed:
   - `session_meta` — first line: `{session_id, id, timestamp, cwd,
     originator, cli_version, source, thread_source, model_provider,
-    base_instructions, history_mode: "legacy", context_window}`.
+    base_instructions, history_mode: "legacy" | "paginated",
+    context_window}`.
   - `response_item` — the **model-facing** history. `payload.type`:
     - `message` — `role` developer/user/assistant; content blocks
       `input_text` (developer/user) or `output_text` (assistant); assistant

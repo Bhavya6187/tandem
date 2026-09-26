@@ -6,6 +6,8 @@ Session format observed on codex-cli 0.145.0, rechecked on 0.153.4
 - each line {timestamp, type, payload}; model-facing history is the
   response_item lines, UI history is the event_msg lines
 - first line is session_meta; ~/.codex/session_index.jsonl indexes threads
+- 0.155.1: codex's own threads are `history_mode: "paginated"` and every
+  record carries a contiguous top-level `ordinal` (see shadow_append)
 """
 
 from __future__ import annotations
@@ -94,6 +96,31 @@ def output_text(output: Any) -> str:
             if isinstance(b, dict) and isinstance(b.get("text"), str)
         )
     return "" if output is None else str(output)
+
+
+def _last_line(path: Path, block: int = 65536) -> bytes:
+    """The last non-empty line of a file, read backwards in blocks so a
+    final record of any length (a huge tool output) is found without
+    loading the whole rollout."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            end = f.tell()
+            buf = b""
+            while end > 0:
+                start = max(0, end - block)
+                f.seek(start)
+                buf = f.read(end - start) + buf
+                end = start
+                body = buf.rstrip(b"\r\n")
+                if not body:
+                    continue
+                nl = body.rfind(b"\n")
+                if nl != -1 or end == 0:
+                    return body[nl + 1:].strip()
+            return b""
+    except OSError:
+        return b""
 
 
 class CodexAdapter(HarnessAdapter):
@@ -222,6 +249,44 @@ class CodexAdapter(HarnessAdapter):
                 },
             },
         ]
+
+    # -- appending -----------------------------------------------------------
+
+    def shadow_append(self, ref: Path, entries: list[dict]) -> None:
+        """codex >= 0.155 writes `history_mode: "paginated"` rollouts whose
+        every record carries a contiguous top-level `ordinal` (session_meta
+        is 0) and refuses to resume a thread whose final record lacks one
+        ("final paginated rollout record at ... is missing an ordinal").
+        Continue the file's own sequence when its last record has one; a
+        legacy rollout (tandem's seeded shadows) has none and gets none.
+        The file is the truth rather than a cached counter: codex itself may
+        have appended since tandem last wrote, and a crash-skip re-append
+        must land on whatever is actually there."""
+        nxt = self.next_ordinal(ref)
+        if nxt is not None:
+            stamped = []
+            for e in entries:
+                e = dict(e)
+                e["ordinal"] = nxt
+                nxt += 1
+                stamped.append(e)
+            entries = stamped
+        append_jsonl_fsync(ref, entries)
+
+    def next_ordinal(self, ref: Path) -> int | None:
+        """One past the last record's `ordinal`, or None when the last
+        record has none (legacy rollout, or empty file)."""
+        last = _last_line(ref)
+        if not last:
+            return None
+        try:
+            obj = json.loads(last)
+        except json.JSONDecodeError:
+            return None
+        ordinal = obj.get("ordinal") if isinstance(obj, dict) else None
+        if isinstance(ordinal, bool) or not isinstance(ordinal, int):
+            return None
+        return ordinal + 1
 
     # -- launching -----------------------------------------------------------
 
