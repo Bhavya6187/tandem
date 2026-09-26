@@ -13,14 +13,19 @@ import subprocess
 from typing import Callable, Protocol
 
 from ...constants import SESSION_ENV
+from ..commands import Command
 from ..events import Answers, LiveEvent, TurnOutcome
 
 
 class RuntimeClient(Protocol):
     harness: str
+    harness_commands: list[Command]     # the harness's own slash commands, as last reported
 
     def run_turn(self, session, native_id: str | None, prompt: str, model: str,
-                 emit: Callable[[LiveEvent], None], answers: Answers) -> TurnOutcome: ...
+                 emit: Callable[[LiveEvent], None], answers: Answers,
+                 command: str = "") -> TurnOutcome: ...
+
+    def list_models(self, session) -> list[str]: ...    # one display line per model, name first
 
     def interrupt(self) -> None: ...
 

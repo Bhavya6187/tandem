@@ -23,7 +23,7 @@ from ..constants import TURN_ENDED_NOTE
 from ..harness import get_adapter
 from ..promptroute import RouteError, parse_route
 from ..sync import SyncSetupError
-from .events import (Answers, Failure, Idle, LiveEvent, TurnFinished, TurnOutcome,
+from .events import (Answers, Failure, Idle, LiveEvent, Notice, TurnFinished, TurnOutcome,
                      TurnStarted)
 from .navigator import FactsCollector
 
@@ -33,6 +33,21 @@ class Pending:
     harness: str
     model: str
     prompt: str
+    command: str = ""      # "" for a prompt; "compact" | "models" for a window command
+
+
+def parse_command(prompt: str) -> tuple[str, str] | None:
+    """(command, argument) when the prompt is one of tandem's dispatcher
+    commands, else None. `/compact` is the whole prompt or nothing —
+    `/compact focus on X` is claude's own form and goes through as text."""
+    head = prompt.split(maxsplit=1)
+    if not head:
+        return None
+    if head[0] == "/compact" and len(head) == 1:
+        return "compact", ""
+    if head[0] == "/model":
+        return "models", head[1].strip() if len(head) > 1 else ""
+    return None
 
 
 def _close_note(harness: str, outcome: TurnOutcome) -> str | None:
@@ -133,7 +148,15 @@ class Dispatcher:
                 self._set_default(harness)
                 model = self.pin(harness)
                 return f"default → {harness}" + (f" · {model}" if model else "")
-        item = Pending(harness, self.pin(harness), prompt)
+        command = ""
+        parsed = parse_command(prompt)
+        if parsed is not None:
+            command, arg = parsed
+            if command == "models" and arg:
+                return self.submit(f"/{harness}:{arg}")     # `/model NAME` is the pin route
+            if command == "compact":
+                prompt = "/compact"
+        item = Pending(harness, self.pin(harness), prompt, command)
         with self._lock:
             if self._closed:
                 return "closed"
@@ -239,14 +262,35 @@ class Dispatcher:
                                         name="tandem-chat-turn", daemon=True)
         self._thread.start()
 
+    def _list_models(self, item: Pending) -> None:
+        """`/model` with no name: ask the runtime, on this worker, and hand
+        the rows back as one Notice. No transcript is touched, so none of
+        the turn pipeline runs."""
+        try:
+            pin = self.pin(item.harness)
+            rows = self.runtimes[item.harness].list_models(self.session)
+            marked = [("* " if pin and row.split()[0] == pin else "  ") + row for row in rows]
+            self.emit(Notice("\n".join(marked) if marked else f"{item.harness}: no models listed"))
+        except Exception as exc:                       # a listing must never take the window down
+            self.emit(Failure(f"{item.harness} models: {exc}"))
+        finally:
+            with self._lock:
+                self._current = None
+                self._running = False
+            self.emit(Idle())
+
     def _run(self, item: Pending, spoken: int) -> None:
         harness = item.harness
+        if item.command == "models":
+            self._list_models(item)
+            return
         ran = False
         nav = self.navigator
         # a note the navigator left rides this prompt as a trailer — taken
         # now, not at submit, so a note that lands while a prompt is queued
-        # still reaches it
-        note = nav.take(harness) if nav is not None else None
+        # still reaches it. A command turn (a compact) carries none: the
+        # note keeps waiting for a prompt a model will read.
+        note = nav.take(harness) if nav is not None and not item.command else None
         prompt = item.prompt + note.trailer() if note is not None else item.prompt
         self.emit(TurnStarted(harness, item.model, item.prompt,
                               carried=note.summary if note is not None else ""))
@@ -262,7 +306,7 @@ class Dispatcher:
             # read after the seeding: a turn that gets this far has its
             # shadows, so its review is not skipped as a first turn
             first = self._first_turn is not None
-            if nav is not None:
+            if nav is not None and not item.command:
                 facts = FactsCollector(harness, item.prompt, note is not None, first, self.emit)
                 emit = facts.emit
             problems = self._validate(harness)
@@ -287,7 +331,8 @@ class Dispatcher:
             # either: an active codex with no id is the only harness a fresh
             # pairing leaves fileless, and every other side already has one.
             outcome = self.runtimes[harness].run_turn(
-                session, session.native_id(harness), prompt, item.model, emit, self.answers)
+                session, session.native_id(harness), prompt, item.model, emit, self.answers,
+                command=item.command)
             ran = True      # from here on the runtime has emitted its own TurnFinished
             if outcome.native_id:
                 self.session = ops.adopt_native_id(self.store, session, harness, outcome.native_id)

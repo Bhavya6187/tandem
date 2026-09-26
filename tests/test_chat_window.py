@@ -13,7 +13,7 @@ from conftest import claude_assistant, claude_user, write_line
 
 from tandem.chat.commands import Command
 from tandem.chat.composer import Composer
-from tandem.chat.events import (ApprovalRequest, Evidence, Idle, LimitsUpdate, QuestionRequest,
+from tandem.chat.events import (ApprovalRequest, Evidence, Idle, LimitsUpdate, Notice, QuestionRequest,
                                 ReviewFinished, ReviewStarted, TextDelta, Verdict,
                                 ToolStarted, TurnFinished, TurnOutcome, TurnStarted)
 from tandem.chat.navigator import Note
@@ -158,6 +158,12 @@ class TestWindowCommands:
             "claude": [Command("deep-research", "claude command", "claude")]})
         w.handle_input(b"/help\r")
         assert "claude:" in out.text() and "/deep-research" in out.text()
+
+
+def test_a_notice_paints_each_line_dim(env_factory):
+    env = env_factory(); w, d, out, _ = make_window(env)
+    w.handle_event(Notice("one\ntwo"))
+    assert "one" in out.text() and "two" in out.text()
 
 
 def test_approval_round_trip(env_factory):
@@ -373,7 +379,7 @@ def test_history_turns_zero_paints_nothing(env_factory):
 
 class EchoRuntime:
     harness = "claude"
-    def run_turn(self, session, native_id, prompt, model, emit, answers):
+    def run_turn(self, session, native_id, prompt, model, emit, answers, command=""):
         emit(TextDelta(f"echo:{prompt}")); emit(TurnFinished("completed", "")); return TurnOutcome("completed")
     def interrupt(self): pass
     def close(self): pass
@@ -478,7 +484,7 @@ def test_resume_from_another_directory_restores_history_and_continues_native_ses
     turns = []
 
     class ResumedRuntime(EchoRuntime):
-        def run_turn(self, session, native_id, prompt, model, emit, answers):
+        def run_turn(self, session, native_id, prompt, model, emit, answers, command=""):
             turns.append((session.cwd, native_id, model, prompt))
             return super().run_turn(session, native_id, prompt, model, emit, answers)
 
@@ -533,7 +539,7 @@ def test_a_flush_does_not_leave_the_loop_blocked_on_a_dead_read(env_factory, mon
     class AsksThenStreams:
         harness = "claude"
 
-        def run_turn(self, session, native_id, prompt, model, emit, answers):
+        def run_turn(self, session, native_id, prompt, model, emit, answers, command=""):
             emit(ApprovalRequest("command", "rm -rf ~/"))   # queued, no wake byte
             real_write(master, b"and then fix the tests")   # …and now stdin is readable
             time.sleep(0.5)                                 # the pass above has run

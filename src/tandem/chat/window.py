@@ -31,9 +31,9 @@ from .activity import Activity
 from .commands import Command, catalog, help_lines
 from .composer import Answer, Cancel, Composer, CtrlC, Interrupt, Repaint, Submit
 from .dispatch import Dispatcher
-from .events import (ApprovalRequest, Failure, Idle, LimitsUpdate, LiveEvent, QuestionRequest,
-                     ReviewFinished, ReviewStarted, TextDelta, ThinkingDelta, ToolFinished,
-                     ToolOutput, ToolStarted, TurnFinished, TurnStarted)
+from .events import (ApprovalRequest, Failure, Idle, LimitsUpdate, LiveEvent, Notice,
+                     QuestionRequest, ReviewFinished, ReviewStarted, TextDelta, ThinkingDelta,
+                     ToolFinished, ToolOutput, ToolStarted, TurnFinished, TurnStarted)
 from .files import list_paths
 from .navigator import Navigator, NavigatorLog, headroom_ok, log_path
 from .render import Screen
@@ -317,6 +317,9 @@ class Window:
                 self._ring()
         elif isinstance(ev, Failure):
             s.failure(ev)
+        elif isinstance(ev, Notice):
+            for line in ev.text.split("\n"):
+                s.note(line)
         elif isinstance(ev, LimitsUpdate):
             limits = dict(self.usage_state.get("limits") or {})
             limits[ev.harness] = ev.text

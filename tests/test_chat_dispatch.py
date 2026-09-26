@@ -10,7 +10,7 @@ import pytest
 
 from tandem.chat import dispatch
 from tandem.chat.dispatch import Dispatcher
-from tandem.chat.events import Failure, Idle, TextDelta, TurnFinished, TurnOutcome, TurnStarted
+from tandem.chat.events import Failure, Idle, Notice, TextDelta, TurnFinished, TurnOutcome, TurnStarted
 from tandem.harness import get_adapter
 from tandem.sync import SyncSetupError
 from tandem.util import read_jsonl
@@ -39,7 +39,7 @@ class FakeRuntime:
     a model call that errors out (a 401, say) leaves in the transcript: the
     prompt is there, no reply ever follows it."""
 
-    def __init__(self, harness, env, *, block=None, fresh_id=None, half_turn=False):
+    def __init__(self, harness, env, *, block=None, fresh_id=None, half_turn=False, fail_models=False):
         self.harness = harness
         self.env = env
         self.calls = []
@@ -47,9 +47,16 @@ class FakeRuntime:
         self.fresh_id = fresh_id
         self.half_turn = half_turn
         self.interrupts = 0
+        self.models = None if fail_models else [f"{harness}-a  first", f"{harness}-b  second"]
+        self.harness_commands = []
 
-    def run_turn(self, session, native_id, prompt, model, emit, answers):
-        self.calls.append((native_id, prompt, model))
+    def list_models(self, session):
+        if self.models is None:
+            raise RuntimeError("no catalog")
+        return list(self.models)
+
+    def run_turn(self, session, native_id, prompt, model, emit, answers, command=""):
+        self.calls.append((native_id, prompt, model) if not command else (native_id, prompt, model, command))
         if self.block is not None:
             self.block.wait(5)
         emit(TextDelta(f"{self.harness} says hi"))
@@ -94,7 +101,7 @@ class CountingRuntime:
         self.peak = 0
         self._lock = threading.Lock()
 
-    def run_turn(self, session, native_id, prompt, model, emit, answers):
+    def run_turn(self, session, native_id, prompt, model, emit, answers, command=""):
         with self._lock:
             self.calls.append(prompt)
             self.live += 1
@@ -658,7 +665,7 @@ class TestClose:
         class AsksRuntime:
             harness = "claude"
 
-            def run_turn(self, session, native_id, prompt, model, emit, answers):
+            def run_turn(self, session, native_id, prompt, model, emit, answers, command=""):
                 answered.append(answers.approve(ApprovalRequest("command", "rm -rf ~/")))
                 emit(TurnFinished("interrupted", ""))
                 return TurnOutcome("interrupted")
@@ -696,7 +703,7 @@ class TestClose:
         class AsksTwice:
             harness = "claude"
 
-            def run_turn(self, session, native_id, prompt, model, emit, answers):
+            def run_turn(self, session, native_id, prompt, model, emit, answers, command=""):
                 for q in ("one?", "two?"):
                     answered.append(answers.answer(QuestionRequest(q, ())))
                 emit(TurnFinished("interrupted", ""))
@@ -981,3 +988,87 @@ def test_a_turn_whose_sync_failed_is_not_reviewed(env_factory, monkeypatch):
     assert runtimes["claude"].calls
     assert [e.message for e in events if isinstance(e, Failure)][0].startswith("sync:")
     assert nav.ended == [] and nav.given_back == []
+
+
+# -- dispatcher commands: /model and /compact -----------------------------------
+
+
+def collect(env, runtimes=None, **kw):
+    events, done = [], threading.Event()
+
+    def emit(ev):
+        events.append(ev)
+        if isinstance(ev, Idle):
+            done.set()
+
+    runtimes = runtimes or {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env)}
+    return Dispatcher(env.store, env.session, runtimes, emit, Answers(), **kw), runtimes, events, done
+
+
+def test_model_alone_lists_the_default_harnesss_models_as_a_notice(env_factory):
+    env = env_factory()
+    d, runtimes, events, done = collect(env)
+    assert d.submit("/model") == ""
+    assert done.wait(5)
+    notices = [e for e in events if isinstance(e, Notice)]
+    assert len(notices) == 1 and "claude-a  first" in notices[0].text
+    assert not any(isinstance(e, TurnStarted) for e in events)
+    assert runtimes["claude"].calls == []                      # no turn ran
+
+
+def test_model_marks_the_pinned_one(env_factory):
+    env = env_factory()
+    env.store.set_pin(env.session.tandem_id, "claude", "claude-b")
+    d, runtimes, events, done = collect(env)
+    d.submit("/model"); assert done.wait(5)
+    text = next(e for e in events if isinstance(e, Notice)).text
+    assert "* claude-b" in text and "  claude-a" in text
+
+
+def test_model_with_a_name_is_the_pin_route(env_factory):
+    env = env_factory()
+    d, runtimes, events, done = collect(env)
+    assert d.submit("/model haiku") == "default → claude · haiku"
+    assert d.pin("claude") == "haiku"
+
+
+def test_model_listing_failure_is_a_failure_event(env_factory):
+    env = env_factory()
+    rts = {"claude": FakeRuntime("claude", env, fail_models=True), "codex": FakeRuntime("codex", env)}
+    d, runtimes, events, done = collect(env, rts)
+    d.submit("/model"); assert done.wait(5)
+    assert any(isinstance(e, Failure) and "no catalog" in e.message for e in events)
+
+
+def test_compact_runs_as_a_command_turn(env_factory):
+    env = env_factory()
+    d, runtimes, events, done = collect(env)
+    assert d.submit("/compact") == ""
+    assert done.wait(5)
+    assert runtimes["claude"].calls[-1][1:] == ("/compact", "", "compact")
+    started = next(e for e in events if isinstance(e, TurnStarted))
+    assert started.prompt == "/compact" and started.harness == "claude"
+
+
+def test_a_routed_compact_runs_on_the_routed_harness(env_factory):
+    env = env_factory()
+    d, runtimes, events, done = collect(env)
+    d.submit("/codex /compact"); assert done.wait(5)
+    assert runtimes["codex"].calls[-1][3] == "compact"
+    assert runtimes["claude"].calls == []
+
+
+def test_compact_with_arguments_is_ordinary_pass_through(env_factory):
+    env = env_factory()
+    d, runtimes, events, done = collect(env)
+    d.submit("/compact keep the API notes"); assert done.wait(5)
+    assert runtimes["claude"].calls[-1] == (env.session.native_id("claude"), "/compact keep the API notes", "")
+
+
+def test_compact_takes_no_navigator_note_and_reports_no_facts(env_factory):
+    env = env_factory()
+    nav = StubNavigator(make_note())
+    d, runtimes, events, done = collect(env, navigator=nav)
+    d.submit("/codex /compact"); assert done.wait(5)
+    assert nav.takes == [] and nav.ended == []
+    assert nav.note is not None                                 # still waiting for a real prompt

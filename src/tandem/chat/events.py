@@ -89,6 +89,13 @@ class Failure:
 
 
 @dataclass(frozen=True)
+class Notice:
+    """Text the window prints dim, outside any turn: a `/model` listing, a
+    command's one-line result. Never transcript content."""
+    text: str
+
+
+@dataclass(frozen=True)
 class LimitsUpdate:
     harness: str
     text: str           # bar-ready, e.g. "5h 4% 7d 41%"
@@ -139,7 +146,7 @@ class Idle:
 
 LiveEvent = Union[TextDelta, ThinkingDelta, ToolStarted, ToolOutput, ToolFinished,
                   ApprovalRequest, QuestionRequest, TurnStarted, TurnFinished,
-                  Failure, LimitsUpdate, ReviewStarted, ReviewFinished, Idle]
+                  Failure, Notice, LimitsUpdate, ReviewStarted, ReviewFinished, Idle]
 
 STATUSES = ("completed", "interrupted", "failed")
 
