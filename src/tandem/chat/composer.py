@@ -1,11 +1,15 @@
 """The editor at the bottom of the window, and the key parser that drives
 it. Pure: bytes in, actions out, no terminal access.
 
-Three modes. `prompt` edits text and submits on Enter; `approval` answers
+Four modes. `prompt` edits text and submits on Enter; `approval` answers
 a permission request with one key — a lone keypress at the head of a read,
 so two keystrokes the terminal coalesced into one (`yn`) answer nothing and
 land in the draft, by design; `question` picks a numbered option or takes
-free text. The draft is multi-line: Option-Enter, Ctrl-J, a backslash
+free text; `search` is Ctrl-R over the history: the row reads `(search)
+'query': candidate`, typing narrows to the newest entry containing the
+query, Ctrl-R again steps older and wraps, Enter or Tab puts the candidate
+in the draft, Esc restores the draft that was there, any arrow keeps the
+candidate and then moves. The draft is multi-line: Option-Enter, Ctrl-J, a backslash
 before Enter, and Shift-Enter where the terminal reports it all break the
 line, and a bracketed paste keeps its newlines. `rows` lays the draft out
 as the rows the window paints — long lines wrapped, a tall draft scrolled
@@ -107,6 +111,10 @@ class Composer:
         self.history_limit = history_limit
         self._hidx: int | None = None
         self._draft = ""
+        # Ctrl-R state while mode == "search": the query typed so far, the
+        # history index of the candidate (None = no match), the draft to
+        # restore on Esc, and whether the last step wrapped to the newest
+        self._search: dict | None = None
         self.mode = "prompt"
         self.pending: ApprovalRequest | QuestionRequest | None = None
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -130,10 +138,12 @@ class Composer:
     # -- modes ---------------------------------------------------------------
 
     def begin_approval(self, req: ApprovalRequest) -> None:
+        self._leave_search(keep=False)
         self.mode, self.pending = "approval", req
         self._reset_history_cursor()
 
     def begin_question(self, req: QuestionRequest) -> None:
+        self._leave_search(keep=False)
         self.mode, self.pending = "question", req
         self.buf, self.cur = [], 0
         self._reset_history_cursor()
@@ -184,6 +194,12 @@ class Composer:
                 i += n
                 if name == "paste_start":
                     self._paste = True
+                elif self.mode == "search":
+                    if name == "esc":
+                        self._leave_search(keep=False)
+                    elif name:
+                        self._leave_search(keep=True)
+                        self._key(name)
                 elif name == "esc":
                     if self.candidates:
                         self._dismissed = self._locate()[:2]
@@ -197,6 +213,16 @@ class Composer:
                 actions.append(CtrlC())
             elif b == 0x0C:
                 actions.append(Repaint())
+            elif b == 0x12:
+                self._ctrl_r()
+            elif self.mode == "search" and b in (0x0D, 0x09):
+                self._leave_search(keep=True)          # Enter / Tab: the candidate is the draft
+            elif self.mode == "search" and b in (0x7F, 0x08):
+                self._search["query"] = self._search["query"][:-1]
+                self._find(restart=True)
+            elif self.mode == "search" and b < 0x20:
+                self._leave_search(keep=True)          # any other control key: keep, then drop
+                continue                               # the key (Ctrl-U would kill the find)
             elif b == 0x0D:
                 self._enter(actions)
             elif b == 0x0A:                       # Ctrl-J: the tty is raw, so Enter is CR
@@ -264,6 +290,10 @@ class Composer:
 
     def _typed(self, text: str, actions: list[Action], *, first: bool = False) -> None:
         if not text:
+            return
+        if self.mode == "search":
+            self._search["query"] += text
+            self._find(restart=True)
             return
         if self.mode == "approval":
             # An answer is a lone keypress at the head of the read, never a
@@ -469,6 +499,55 @@ class Composer:
         self._hidx = idx
         self._set(self.history[idx])
 
+    # -- Ctrl-R search -----------------------------------------------------------
+
+    def _ctrl_r(self) -> None:
+        if self.mode == "search":
+            self._find(restart=False)                # step to the next older match
+            return
+        if self.mode != "prompt":
+            return                                   # an answer row is not a place to search
+        if self.candidates:
+            self._dismissed = self._locate()[:2]     # the picker closes before the search opens
+        self._search = {"query": "", "pos": None, "saved": self.text, "wrapped": False}
+        self._reset_history_cursor()
+        self.mode = "search"
+        self._find(restart=True)
+
+    def _find(self, *, restart: bool) -> None:
+        """Newest history entry containing the query, case-insensitively.
+        `restart` searches from the newest; otherwise from just above the
+        current candidate, wrapping to the newest once (and saying so)."""
+        s = self._search
+        q = s["query"].lower()
+        n = len(self.history)
+        start = n - 1 if restart or s["pos"] is None else s["pos"] - 1
+        s["wrapped"] = False
+        for i in range(start, -1, -1):
+            if q in self.history[i].lower():
+                s["pos"] = i
+                return
+        if not restart:
+            for i in range(n - 1, start, -1):
+                if q in self.history[i].lower():
+                    s["pos"], s["wrapped"] = i, True
+                    return
+        s["pos"] = None
+
+    def _leave_search(self, *, keep: bool) -> None:
+        """Back to prompt mode with the candidate as the draft (`keep`), or
+        with the draft that was there before Ctrl-R. A search with no match
+        has nothing to keep and restores the draft either way. The mode goes
+        back first: `_set` consults the pickers, which sleep while searching."""
+        s = self._search
+        if s is None:
+            return
+        self._search = None
+        self.mode = "prompt"
+        text = self.history[s["pos"]] if keep and s["pos"] is not None else s["saved"]
+        self._set(text)
+        self._reset_history_cursor()
+
     def _set(self, text: str) -> None:
         self._goal = None                       # a new draft has no column to aim for
         self.buf, self.cur = list(text), len(text)
@@ -489,7 +568,12 @@ class Composer:
             text = text[1:]
         if text:
             self._paste_cr = text.endswith("\r")
-        self._insert(text.replace("\r\n", "\n").replace("\r", "\n"))
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if self.mode == "search":
+            self._search["query"] += text          # a pasted query narrows like a typed one
+            self._find(restart=True)
+            return
+        self._insert(text)
 
     def _backspace(self) -> None:
         if self.cur > 0:
@@ -546,6 +630,13 @@ class Composer:
         `max_rows` scrolls only when the cursor leaves the view."""
         if self.mode == "approval":
             return [approval_row(getattr(self.pending, "choices", None))[:cols]], 0, 0
+        if self.mode == "search":
+            s = self._search
+            shown_q = _printable(s["query"].replace("\n", "⏎"))
+            label = ("(search, wrapped) '" if s["wrapped"] else "(search) '") + shown_q + "': "
+            cand = self.history[s["pos"]] if s["pos"] is not None else "(no match)"
+            row = label + _printable(cand.replace("\n", "⏎"))
+            return [_clip_cells(row, cols)], 0, min(len(label) - 3, cols - 1)
         prompt = "? " if self.mode == "question" else "> "
         self._avail = max(1, cols - len(prompt))
         rows, _, (r, col) = self._layout(self._avail)
@@ -575,6 +666,16 @@ def _printable(text: str) -> str:
 
 def _width(ch: str) -> int:
     return 2 if east_asian_width(ch) in ("W", "F") else 1
+
+
+def _clip_cells(text: str, cells: int) -> str:
+    """The longest prefix of `text` that fits in `cells` terminal cells."""
+    used = 0
+    for i, ch in enumerate(text):
+        used += _width(ch)
+        if used > cells:
+            return text[:i]
+    return text
 
 
 def _trailing_prefix(data: bytes, marker: bytes) -> int:
