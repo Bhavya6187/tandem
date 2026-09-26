@@ -603,3 +603,43 @@ def test_list_models_skips_hidden_ones(env):
     assert rows == ["gpt-5.5  GPT-5.5"]
     assert env.params("model/list") == {}
     assert env.params("thread/resume") is None and env.params("thread/start") is None
+
+
+def test_interrupt_ends_a_compact_that_has_no_turn_id(env, monkeypatch):
+    """A compact never gets a turn id, so the ordinary interrupt path has
+    nothing to send: Esc must still end it instead of waiting out the timeout."""
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "compactsilent")
+    rec = Recorder(); rt = env.runtime; rt.compact_timeout = 30
+    holder = {}
+    t = threading.Thread(target=lambda: holder.update(
+        out=rt.run_turn(env.session, "thread-1", "/compact", "", rec.emit, rec, command="compact")))
+    t.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not (env.tmp / "params.jsonl").exists():
+        time.sleep(0.05)
+    while time.monotonic() < deadline and env.params("thread/compact/start") is None:
+        time.sleep(0.05)
+    t0 = time.monotonic()
+    rt.interrupt()
+    t.join(5)
+    assert not t.is_alive() and holder["out"].status == "interrupted"
+    assert time.monotonic() - t0 < 5
+
+
+def test_compact_timeout_is_a_deadline_not_a_per_message_wait(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "compactchatty")
+    rec = Recorder(); env.runtime.compact_timeout = 0.5
+    t0 = time.monotonic()
+    out = env.runtime.run_turn(env.session, "thread-1", "/compact", "", rec.emit, rec, command="compact")
+    assert out.status == "failed" and "did not report" in out.error
+    assert time.monotonic() - t0 < 5
+    assert env.runtime._compacting is False            # a failed compact does not linger
+
+
+def test_a_server_request_during_model_list_is_declined_not_crashed():
+    rt = CodexRuntime(ChatConfig()); rec = Recorder(); sent = []
+    rt.handle({"method": "item/commandExecution/requestApproval", "id": 3, "params": {
+        "threadId": "t", "turnId": "u", "itemId": "i", "startedAtMs": 1, "command": "rm -rf /",
+        "cwd": "/p", "commandActions": [], "availableDecisions": ["accept", "decline"]}},
+              sent.append, rec.emit, None)
+    assert sent[-1]["result"]["decision"] == "decline"

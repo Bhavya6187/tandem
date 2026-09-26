@@ -151,6 +151,17 @@ def main():
             out({"jsonrpc": "2.0", "id": rid, "result": {}})
             if scenario == "compactsilent":
                 continue                        # never says compacted: the caller's timeout owns it
+            if scenario == "compactchatty":     # keeps talking, never completes
+                import select as _sel
+                for _ in range(200):
+                    if _sel.select([sys.stdin], [], [], 0.1)[0]:
+                        return                  # stdin closed under us: the client gave up
+                    notify("thread/tokenUsage/updated", {"threadId": m["params"]["threadId"],
+                            "turnId": None, "tokenUsage": {"total": {"totalTokens": 1, "inputTokens": 1,
+                            "cachedInputTokens": 0, "outputTokens": 0, "reasoningOutputTokens": 0},
+                            "last": {"totalTokens": 1, "inputTokens": 1, "cachedInputTokens": 0,
+                            "outputTokens": 0, "reasoningOutputTokens": 0}}})
+                continue
             notify("thread/compacted", {"threadId": m["params"]["threadId"]})
         elif meth == "model/list":
             out({"jsonrpc": "2.0", "id": rid, "result": {"nextCursor": None, "data": [

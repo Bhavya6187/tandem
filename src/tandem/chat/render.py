@@ -321,7 +321,9 @@ class Screen:
             self.line(self._dim("  " + _clip(where, width)))
 
     def note(self, text: str) -> None:
-        self.line(self._dim(text))
+        """A dim line outside any turn. Sanitized like every other painter:
+        a `/model` row or a `/help` description is the harness's text."""
+        self.line(self._dim(_safe(text)))
 
     def bell(self) -> None:
         self._w("\x07")                 # moves nothing, so it is safe from either focus

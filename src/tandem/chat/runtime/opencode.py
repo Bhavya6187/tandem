@@ -421,6 +421,11 @@ class OpencodeRuntime:
                 # as the opencode TUI would send it
                 path = f"/session/{native_id}/command"
                 body = {"command": head[0][1:], "arguments": head[1] if len(head) > 1 else ""}
+                if model:
+                    body["model"] = model           # the endpoint takes `provider/model` as one string
+                parts = mention_parts(prompt, session.cwd)
+                if parts:
+                    body["parts"] = parts
             else:
                 body = {"parts": [{"type": "text", "text": prompt}, *mention_parts(prompt, session.cwd)]}
                 if model:

@@ -579,3 +579,17 @@ def test_a_recalled_command_does_not_reopen_the_picker():
     feed(c, "/help\r")
     feed(c, b"\x1b[A")                                 # up: recall
     assert c.text == "/help" and c.candidates == []
+
+
+def test_a_name_typed_in_full_in_another_case_still_submits_raw():
+    c = commanding()
+    feed(c, "/CODEX")
+    assert c.candidates == []
+    assert feed(c, "\r") == [Submit("/CODEX")]
+
+
+def test_dismissing_a_mention_at_the_start_does_not_close_a_later_command():
+    c = commanding()
+    feed(c, b"@ren\x1b")                              # a lone Esc ends the read: dismiss the @
+    feed(c, b"\x7f\x7f\x7f\x7f/he")                    # then replace the word with a command
+    assert [x.name for x in c.candidates] == ["help"]

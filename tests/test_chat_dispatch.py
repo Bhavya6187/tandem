@@ -1072,3 +1072,11 @@ def test_compact_takes_no_navigator_note_and_reports_no_facts(env_factory):
     d.submit("/codex /compact"); assert done.wait(5)
     assert nav.takes == [] and nav.ended == []
     assert nav.note is not None                                 # still waiting for a real prompt
+
+
+def test_model_with_a_spaced_name_is_an_error_not_a_turn(env_factory):
+    env = env_factory()
+    d, runtimes, events, done = collect(env)
+    got = d.submit("/model gpt 5.5")
+    assert got.startswith("error:") and "one model name" in got
+    assert d.pin("claude") == "" and runtimes["claude"].calls == []

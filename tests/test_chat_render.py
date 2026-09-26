@@ -599,3 +599,11 @@ def test_a_lone_surrogate_in_a_note_cannot_take_the_window_down(screen_factory):
     text = out.text()
     assert "  bad ? loop" in text and "  x?.py:2 — w?" in text
     assert "  + navigator note: bad ? loop" in text
+
+
+def test_a_note_strips_escapes_the_harness_could_have_supplied(screen):
+    s, out = screen
+    s.enter()
+    s.note("gpt-x\x1b[2J  A \x1b]8;;http://x\x07model")
+    t = out.text()
+    assert "gpt-x  A model" in t and "\x1b[2J" not in t and "\x1b]8" not in t

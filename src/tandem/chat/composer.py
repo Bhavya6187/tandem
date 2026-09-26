@@ -119,7 +119,7 @@ class Composer:
         self._list_commands = commands
         self._items: list = []                       # what the open picker was listed from
         self._listed_at: tuple[str, int] | None = None   # (kind, start) the items were listed for
-        self._dismissed: int | None = None          # where the word Esc closed the picker on starts
+        self._dismissed: tuple[str, int] | None = None   # the (kind, start) Esc closed the picker on
         self._matched: tuple[str, int, str] | None = None
         self._matches: list = []
         self._kind = ""
@@ -176,7 +176,7 @@ class Composer:
                     self._paste = True
                 elif name == "esc":
                     if self.candidates:
-                        self._dismissed = self._locate()[1]
+                        self._dismissed = self._locate()[:2]
                     else:
                         actions.append(Cancel() if self.mode != "prompt" else Interrupt())
                 elif name:
@@ -360,7 +360,7 @@ class Composer:
             self._kind = ""
             return []
         kind, start, query = loc
-        if start == self._dismissed:
+        if (kind, start) == self._dismissed:
             self._kind = ""
             return []
         self._dismissed = None
@@ -373,7 +373,7 @@ class Composer:
                                  if p != query][:_PICKER_MATCHES]
             else:
                 q = query.lower()
-                self._matches = ([] if any(c.name == query for c in self._items)
+                self._matches = ([] if any(c.name.lower() == q for c in self._items)
                                  else [c for c in self._items if c.name.lower().startswith(q)])
             self._matched, self.selected, self._pick_top = loc, 0, 0
         self._kind = kind
@@ -464,7 +464,7 @@ class Composer:
         # a recalled prompt that ends in a mention, or is a command, does not
         # open the picker: the next Up has to keep stepping through history
         loc = self._locate()
-        self._dismissed = loc[1] if loc else None
+        self._dismissed = loc[:2] if loc else None
 
     def _insert(self, text: str) -> None:
         if text:

@@ -153,6 +153,9 @@ class Dispatcher:
         if parsed is not None:
             command, arg = parsed
             if command == "models" and arg:
+                if any(ch.isspace() for ch in arg):
+                    # `/{harness}:gpt 5.5` would pin `gpt` and run `5.5` as a prompt
+                    return "error: /model takes one model name"
                 return self.submit(f"/{harness}:{arg}")     # `/model NAME` is the pin route
             if command == "compact":
                 prompt = "/compact"

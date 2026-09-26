@@ -22,6 +22,7 @@ import queue
 import re
 import subprocess
 import threading
+import time
 from collections import deque
 from typing import Callable
 
@@ -40,6 +41,21 @@ except ImportError:      # pragma: no cover
     _VERSION = "0"
 
 _SHELL_RE = re.compile(r"""^\S*(?:zsh|bash|sh)\s+-l?c\s+(['"])(.*)\1\s*$""", re.S)
+
+class _Declining:
+    """The answers a thread-less call (`model/list`) hands to `handle`: no
+    turn is running, so nobody is at the keyboard for a request the server
+    should not be sending — every approval is declined, every question
+    unanswered, and nothing raises."""
+
+    def approve(self, req) -> str:
+        return "deny"
+
+    def answer(self, req) -> str:
+        return ""
+
+
+_DECLINE = _Declining()
 
 _REQUEST_MODELS = {
     "item/commandExecution/requestApproval": cp.CommandExecutionRequestApprovalParams,
@@ -177,6 +193,8 @@ class CodexRuntime:
                         answers: Answers) -> None:
         method, rid = m["method"], m["id"]
         params = m.get("params") or {}
+        if answers is None:
+            answers = _DECLINE
         model = _REQUEST_MODELS.get(method)
         if model is None:
             send({"jsonrpc": "2.0", "id": rid, "result": {}})
@@ -459,11 +477,11 @@ class CodexRuntime:
         proc, q, tail, drain, pump = self._spawn(session.cwd, session.tandem_id)
         quiet = lambda ev: None
         try:
-            r = self._call(proc, q, "initialize", self._init_params(), quiet, None)
+            r = self._call(proc, q, "initialize", self._init_params(), quiet, _DECLINE)
             if "error" in r:
                 raise RuntimeError(f"initialize failed: {r['error'].get('message', r['error'])}")
             self._write(proc, {"jsonrpc": "2.0", "method": "initialized"})
-            r = self._call(proc, q, "model/list", {}, quiet, None)
+            r = self._call(proc, q, "model/list", {}, quiet, _DECLINE)
             if "error" in r:
                 raise RuntimeError(str(r["error"].get("message", r["error"])))
             data = (r.get("result") or {}).get("data") or []
@@ -555,9 +573,13 @@ class CodexRuntime:
                         return fail("turn/start returned no turn id")
                     emit(Failure(f"codex sent a response tandem cannot parse: "
                                  f"turn/start: {first_line(str(exc))}"))
+            # one deadline for the whole compact, not a wait per message: a
+            # server that keeps sending usage updates but never completes
+            # must still end
+            deadline = time.monotonic() + self.compact_timeout
             while True:
                 try:
-                    m = q.get(timeout=self.compact_timeout if self._compacting else None)
+                    m = q.get(timeout=max(0.0, deadline - time.monotonic()) if self._compacting else None)
                 except queue.Empty:
                     return fail(f"codex did not report the compaction within {self.compact_timeout:.0f}s")
                 if m is None:
@@ -567,6 +589,7 @@ class CodexRuntime:
                     break
         finally:
             self._teardown(proc, drain, pump)
+            self._compacting = False        # a late thread/compacted must not end the next turn
         if outcome is None:
             status = "interrupted" if self._interrupted else "failed"
             outcome = TurnOutcome(status, error="\n".join(tail) or f"codex app-server exited {proc.returncode}")
@@ -578,7 +601,15 @@ class CodexRuntime:
         with self._lock:
             proc = self._proc
             thread_id, turn_id = self._thread_id, self._turn_id
-        if proc is None or proc.poll() is not None or not (thread_id and turn_id):
+        if proc is None or proc.poll() is not None:
+            return
+        if not (thread_id and turn_id):
+            # a compact has no turn to interrupt: it never got a turn/start
+            # response. Ending the process is the only way to stop it; the
+            # read loop sees EOF and reports the turn interrupted.
+            if self._compacting:
+                self._interrupted = True
+                self.close()
             return
         self._interrupted = True
         self._request(proc, "turn/interrupt",

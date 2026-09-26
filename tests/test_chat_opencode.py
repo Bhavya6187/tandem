@@ -361,3 +361,20 @@ def test_compact_without_any_model_fails_with_advice(fake):
 def test_list_models_reads_api_model(fake):
     f = fake(); rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
     assert rt.list_models(SESSION) == ["opencode/big-pickle  Big Pickle", "openai/gpt-5.5  GPT-5.5"]
+
+
+def test_a_listed_command_carries_the_model_pin(fake):
+    f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
+    rt.run_turn(SESSION, SID, "hi", "", rec.emit, rec)
+    rt.run_turn(SESSION, SID, "/review branch main", "openai/gpt-5.5", rec.emit, rec)
+    assert f.commands[-1]["model"] == "openai/gpt-5.5"
+
+
+def test_a_listed_command_carries_file_mentions_as_parts(fake, proj):
+    f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(), base_url=f.base_url)
+    session = SimpleNamespace(cwd=str(proj), tandem_id="tdm-opencode")
+    rt.run_turn(session, SID, "hi", "", rec.emit, rec)
+    rt.run_turn(session, SID, "/review @src/app.py", "", rec.emit, rec)
+    body = f.commands[-1]
+    assert body["arguments"] == "@src/app.py"
+    assert [p["type"] for p in body["parts"]] == ["file"] and body["parts"][0]["filename"] == "src/app.py"
