@@ -157,25 +157,46 @@ _skip_permissions_option = click.option(
 
 _review_option = click.option(
     "--review/--no-review", "review", default=None,
-    help="Review mode for this launch: the harness that is not taking your "
-         "prompts follows along and comments on each turn (the chat navigator) "
+    help="Review mode for this launch: the harness not taking the first prompt "
+         "follows along and comments on the other's turns (the chat navigator) "
          "[default: the [chat] navigator config key].")
 
 
-def _reviewer(session: PairedSession, cfg) -> str:
+def _reviewer(executing: str, participants: list[str], cfg) -> str:
     """Who follows and comments under `--review`: the configured navigator
-    when it is not the harness taking the prompts, else the first of claude
-    and codex that is a participant and not that harness. A navigator never
-    reviews its own turns, so the executing harness is always passed over."""
+    when it is not the harness taking the first prompt, else the first of
+    claude and codex that is a participant and not that harness. A navigator
+    never reviews its own turns, so the executing harness is passed over."""
     from .config import navigator_choices
 
-    executing = session.active
     for h in (cfg.navigator, *navigator_choices()):
-        if h and h != executing and h in session.participants:
+        if h and h != executing and h in participants:
             return h
     raise click.ClickException(
         f"--review needs a second participant that can review (claude or codex) "
-        f"besides {executing}; this session has {', '.join(session.participants)}.")
+        f"besides {executing}; this session has {', '.join(participants)}.")
+
+
+def _review_config(cfg, review: bool | None, executing: str, participants: list[str]):
+    """One launch's `--[no-]review` folded into the chat config. Resolved
+    before any row is written or moved: a launch refused for want of a
+    reviewer changes nothing."""
+    from dataclasses import replace
+
+    if review is True:
+        return replace(cfg, navigator=_reviewer(executing, participants, cfg), navigator_invalid="")
+    if review is False:
+        return replace(cfg, navigator="", navigator_invalid="")
+    return cfg
+
+
+def _not_a_participant(harness: str, participants: list[str]) -> None:
+    click.secho(
+        f"error: {harness} is not a participant in this session "
+        f"(participants: {', '.join(participants)}).",
+        fg="red", err=True,
+    )
+    sys.exit(1)
 
 
 def _apply_skip_permissions(value: bool | None) -> None:
@@ -703,8 +724,6 @@ def _select_chat_session(store: StateStore, resume_id: str | None,
 
 def _chat(harness: str | None, fresh: bool, resume_id: str | None = None,
           continue_last: bool = False, review: bool | None = None) -> None:
-    from dataclasses import replace
-
     from .chat.window import run_chat
     from .config import load_chat_config
 
@@ -714,40 +733,25 @@ def _chat(harness: str | None, fresh: bool, resume_id: str | None = None,
         _drop_abandoned(store)
         session = _select_chat_session(store, resume_id, continue_last)
         paired = session is None
+        cfg = load_chat_config()
+        # Every refusal below lands before a row is written or moved: a
+        # --on naming a harness this machine cannot run, or a --review with
+        # nobody to review, exits with the store as it was found.
         if paired:
             usable, _ = _resolve_participants()
-            # a --on naming a harness this machine cannot run must never
-            # become the fresh session's active slot: an active harness
-            # outside the participants can never run a turn. Pair on the
-            # default and let the participant check below report it.
-            active = harness if harness in usable else usable[0]
+            if harness is not None and harness not in usable:
+                _not_a_participant(harness, usable)
+            active = harness or usable[0]
+            cfg = _review_config(cfg, review, active, usable)
             session = _pair_session(store, _cwd(), active, usable, seed=False)
         else:
             session = _narrow_participants(store, session)
-        if harness is not None:
-            if harness not in session.participants:
-                click.secho(
-                    f"error: {harness} is not a participant in this session "
-                    f"(participants: {', '.join(session.participants)}).",
-                    fg="red", err=True,
-                )
-                sys.exit(1)
-            store.set_active(session.tandem_id, harness)
-            session = store.get_session(session.tandem_id) or session
-        cfg = load_chat_config()
-        if review is True:
-            # decided here, with the session in hand: the reviewer is whoever
-            # is not taking the prompts, which only the session knows
-            try:
-                cfg = replace(cfg, navigator=_reviewer(session, cfg), navigator_invalid="")
-            except click.ClickException:
-                if paired:
-                    # nothing outside the state db exists yet; a pairing
-                    # refused for want of a reviewer leaves no row behind
-                    store.delete_session(session.tandem_id)
-                raise
-        elif review is False:
-            cfg = replace(cfg, navigator="", navigator_invalid="")
+            if harness is not None and harness not in session.participants:
+                _not_a_participant(harness, session.participants)
+            cfg = _review_config(cfg, review, harness or session.active, session.participants)
+            if harness is not None:
+                store.set_active(session.tandem_id, harness)
+                session = store.get_session(session.tandem_id) or session
         store.touch_used(session.tandem_id)
         if not paired:
             click.echo(f"resuming {session.tandem_id} ({session.active} active, "
