@@ -99,10 +99,11 @@ def approval_row(choices: tuple[str, ...] | None = None) -> str:
 class Composer:
     def __init__(self, history_limit: int = 200,
                  paths: Callable[[], list[str]] | None = None,
-                 commands: Callable[[], list[Command]] | None = None):
+                 commands: Callable[[], list[Command]] | None = None,
+                 history: list[str] | None = None):
         self.buf: list[str] = []
         self.cur = 0
-        self.history: list[str] = []
+        self.history: list[str] = list(history or [])      # oldest first; the seed is copied
         self.history_limit = history_limit
         self._hidx: int | None = None
         self._draft = ""
@@ -130,14 +131,23 @@ class Composer:
 
     def begin_approval(self, req: ApprovalRequest) -> None:
         self.mode, self.pending = "approval", req
+        self._reset_history_cursor()
 
     def begin_question(self, req: QuestionRequest) -> None:
         self.mode, self.pending = "question", req
         self.buf, self.cur = [], 0
+        self._reset_history_cursor()
 
     def end_answer(self) -> None:
         self.mode, self.pending = "prompt", None
         self.buf, self.cur = [], 0
+        self._reset_history_cursor()
+
+    def _reset_history_cursor(self) -> None:
+        """A mode change ends any walk through history: the next Up starts
+        from the newest entry, and no parked draft comes back. Kept out of
+        `_set`, which every recall calls."""
+        self._hidx, self._draft, self._goal = None, "", None
 
     @property
     def text(self) -> str:
@@ -460,6 +470,7 @@ class Composer:
         self._set(self.history[idx])
 
     def _set(self, text: str) -> None:
+        self._goal = None                       # a new draft has no column to aim for
         self.buf, self.cur = list(text), len(text)
         # a recalled prompt that ends in a mention, or is a command, does not
         # open the picker: the next Up has to keep stepping through history

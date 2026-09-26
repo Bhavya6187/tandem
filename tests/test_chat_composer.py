@@ -593,3 +593,65 @@ def test_dismissing_a_mention_at_the_start_does_not_close_a_later_command():
     feed(c, b"@ren\x1b")                              # a lone Esc ends the read: dismiss the @
     feed(c, b"\x7f\x7f\x7f\x7f/he")                    # then replace the word with a command
     assert [x.name for x in c.candidates] == ["help"]
+
+
+# -- seeded history and the reset rules ---------------------------------------
+
+
+def test_a_seed_is_the_initial_history():
+    c = Composer(history=["older", "newer"])
+    feed(c, b"\x1b[A"); assert c.text == "newer"
+    feed(c, b"\x1b[A"); assert c.text == "older"
+    feed(c, "\r")                                    # submitting a recalled entry
+    assert c.history == ["older", "newer", "older"]
+
+
+def test_the_seed_is_copied_not_shared():
+    seed = ["one"]
+    c = Composer(history=seed)
+    feed(c, "two\r")
+    assert seed == ["one"]
+
+
+def test_answering_a_question_resets_the_history_cursor():
+    c = Composer(history=["one", "two", "three"])
+    feed(c, b"\x1b[A"); feed(c, b"\x1b[A")           # at "two"
+    c.begin_question(QuestionRequest("Which?", ("a", "b")))
+    feed(c, "1")
+    c.end_answer()
+    feed(c, b"\x1b[A")
+    assert c.text == "three"                         # fresh from the newest, not resumed at "one"
+
+
+def test_an_approval_resets_the_history_cursor_and_the_draft():
+    c = Composer(history=["one", "two"])
+    feed(c, "dra"); feed(c, b"\x1b[A")               # draft parked, at "two"
+    c.begin_approval(ApprovalRequest("command", "ls"))
+    c.end_answer()
+    feed(c, b"\x1b[A")
+    assert c.text == "two"
+    feed(c, b"\x1b[B")
+    assert c.text == ""                              # the parked draft was dropped with the mode
+
+
+def test_recalling_a_multiline_entry_forgets_the_old_column_goal():
+    """The goal only bites when its cursor index equals the current cursor,
+    so the recalled entry is 19 chars long and the vertical move leaves the
+    goal at index 19, column 19."""
+    c = Composer(history=["abcdefghijkl\ncdefgh"])          # 19 chars
+    feed(c, "a" * 25 + "\n" + "z" * 19)                     # cursor on row 2, column 19
+    feed(c, b"\x1b[A")                                       # up: cursor index 19, goal (19, 19)
+    feed(c, b"\x01"); feed(c, b"\x1b[A")                    # line start, then Up recalls the entry
+    assert c.text == "abcdefghijkl\ncdefgh" and c.cur == 19
+    feed(c, b"\x1b[A")                                       # up inside the recalled entry, from column 6
+    assert c.cur == 6                                        # column 6 — a stale goal of 19 would give 12
+
+
+def test_a_step_through_history_keeps_the_cursor_and_the_draft():
+    """_set must not reset _hidx/_draft: repeated Up walks older, Down returns the draft."""
+    c = Composer(history=["one", "two", "three"])
+    feed(c, "dra")
+    feed(c, b"\x1b[A"); feed(c, b"\x1b[A"); feed(c, b"\x1b[A")
+    assert c.text == "one"
+    feed(c, b"\x1b[B"); feed(c, b"\x1b[B"); feed(c, b"\x1b[B")
+    assert c.text == "dra"
