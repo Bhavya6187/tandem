@@ -101,12 +101,12 @@ validation rather than being silently declared compatible.
   and get none (codex still resumes those). Live-checked 2026-09-25 on a
   codex-created thread: unchanged tail → the error verbatim; the same tail
   re-appended with ordinals → codex initialised the thread, advanced its
-  projection over tandem's records and numbered its own next records after
-  them. The model turn itself could not complete that day (codex auth was
-  returning 401 for every session, fresh ones included), so whether a
-  paginated thread's *model context* includes out-of-turn synced records —
-  the projection indexed only codex's own prompts as items — is still to be
-  confirmed with one answered turn.
+  projection over tandem's records, numbered its own next records after
+  them, and answered a prompt by quoting the synced `[via claude-code]`
+  message verbatim. So a paginated thread's model context does include
+  tandem's out-of-turn synced records (no `turn_context` / `task_started`
+  framing needed), even though codex's `thread_items` projection indexes
+  only its own prompts.
 - `type` values observed:
   - `session_meta` — first line: `{session_id, id, timestamp, cwd,
     originator, cli_version, source, thread_source, model_provider,
