@@ -147,6 +147,19 @@ def main():
         elif meth == "turn/interrupt":
             out({"jsonrpc": "2.0", "id": rid, "result": {}})
             notify("turn/completed", {"threadId": thread_id, "turn": {"id": TURN, "items": [], "itemsView": "summary", "status": "interrupted", "error": None, "startedAt": 1, "completedAt": 2, "durationMs": 1}})
+        elif meth == "thread/compact/start":
+            out({"jsonrpc": "2.0", "id": rid, "result": {}})
+            if scenario == "compactsilent":
+                continue                        # never says compacted: the caller's timeout owns it
+            notify("thread/compacted", {"threadId": m["params"]["threadId"]})
+        elif meth == "model/list":
+            out({"jsonrpc": "2.0", "id": rid, "result": {"nextCursor": None, "data": [
+                {"id": "gpt-5.5", "model": "gpt-5.5", "displayName": "GPT-5.5", "description": "",
+                 "hidden": False, "isDefault": True, "defaultReasoningEffort": "medium",
+                 "supportedReasoningEfforts": []},
+                {"id": "gpt-secret", "model": "gpt-secret", "displayName": "Hidden", "description": "",
+                 "hidden": True, "isDefault": False, "defaultReasoningEffort": "medium",
+                 "supportedReasoningEfforts": []}]}})
         elif rid == 7 and "result" in m:      # the user-input answer
             answer = m["result"]["answers"]["q1"]["answers"][0]
             notify("item/started", {"threadId": thread_id, "turnId": TURN, "startedAtMs": 1, "item": item("agentMessage", id="msg-1", text="", phase="final_answer")})
