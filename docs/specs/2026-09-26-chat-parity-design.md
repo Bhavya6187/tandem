@@ -142,11 +142,15 @@ Ordering and state rules, so search cannot fight the pickers:
   closes the picker first, then enters search.
 - Paste mode is untouched: a pasted 0x12 or escape sequence is literal
   text, as every pasted byte is today.
-- `begin_approval`, `begin_question`, `end_answer` and `_set` reset the
-  history cursor (`_hidx`, `_draft`) and the vertical-motion goal
-  (`_goal`): today they survive a mode change, so Up after answering a
-  question resumes from a stale index, and a recalled multi-line entry can
-  inherit an old column.
+- Two resets, kept apart because `_history_step` calls `_set` on every
+  recall. `_set` (a recalled or searched entry replacing the draft) resets
+  only the vertical-motion goal (`_goal`), so a recalled multi-line entry
+  cannot inherit an old column; it must leave `_hidx` and `_draft` alone,
+  or repeated Up would recall only the newest entry and lose the original
+  draft. The mode transitions — `begin_approval`, `begin_question`,
+  `end_answer`, and entering or leaving search — reset the history cursor
+  (`_hidx`, `_draft`) as well as `_goal`: today they survive a mode
+  change, so Up after answering a question resumes from a stale index.
 
 ## 2. Slash typeahead, `/help`, `/compact`, `/model` (`chat/commands.py` new, `chat/composer.py`, `chat/window.py`, `chat/dispatch.py`, `chat/events.py`, runtimes)
 
