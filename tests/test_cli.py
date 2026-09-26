@@ -1196,11 +1196,16 @@ def test_group_no_review_reaches_a_resumed_window(homes, ok_versions, chat_cfgs)
 
 
 def test_review_flag_falls_back_to_claude_when_opencode_executes(homes, chat_cfgs, monkeypatch):
+    # a stored three-way session, resumed: a fresh pairing's first turn
+    # would seed opencode's shadow through its binary, which CI lacks
     monkeypatch.setattr(cli, "_resolve_participants",
                         lambda warn_only=False: (["claude", "codex", "opencode"],
                                                  {"claude": "2.1.220", "codex": "0.145.0",
                                                   "opencode": "1.18.31"}))
-    result = click.testing.CliRunner().invoke(cli.main, ["--on", "opencode", "--review"])
+    with StateStore() as store:
+        old = store.create_session(str(homes), "opencode", ["claude", "codex", "opencode"],
+                                   {"claude": "c-9", "codex": "x-9", "opencode": "o-9"})
+    result = click.testing.CliRunner().invoke(cli.main, ["resume", old.tandem_id, "--review"])
     assert result.exit_code == 0, result.output
     assert [c.navigator for c in chat_cfgs] == ["claude"]
 
