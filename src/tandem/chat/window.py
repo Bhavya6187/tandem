@@ -8,7 +8,6 @@ plus one byte on the wake pipe, so the loop never polls."""
 
 from __future__ import annotations
 
-import dataclasses
 import os
 import queue
 import select
@@ -253,8 +252,7 @@ class Window:
                 if self.dispatcher.pin(h)]
         if pins:
             parts.append("pins: " + ", ".join(pins))
-        if self.cfg.effective_mode != "ask":
-            parts.append(self.mode_line())
+        parts.append(self.mode_line())             # the spec: /status prints the mode every time
         if self.navigator is not None:
             parts.append(f"navigator {self.navigator.harness} · {self.cfg.navigator_deliver}")
         return " · ".join(parts)

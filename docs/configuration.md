@@ -46,10 +46,12 @@ skip_permissions = true
 
 This removes the harnesses' own safety rails: commands run and files
 change without asking, and codex runs unsandboxed. Set it only if that
-is what you want. In the chat window the bar marks each slot with `skip`
-(once, after the slots, when that is every slot) and `/status` reads
-`mode skip …` while it is on — it is one of the window's four permission
-modes, see `/mode` under `[chat]` below — claude's questions to you (`AskUserQuestion`) still appear, and an
+is what you want. In the chat window the bar marks claude's and codex's
+slots with `skip` (opencode's with `skip?`, since the setting does not
+reach it; codex's with `cfg` when an explicit `[chat] codex_*` key decides
+instead; once, after the slots, when every slot has the same word) and
+`/status` reads `mode skip …` while it is on — it is one of the window's
+four permission modes, see `/mode` under `[chat]` below — claude's questions to you (`AskUserQuestion`) still appear, and an
 explicit `[chat] codex_approval_policy` / `codex_sandbox` still wins over
 the switch for codex. opencode is
 untouched — it has no such flag, and its permissions live in its own
@@ -192,9 +194,12 @@ alone prints it, `/skip-permissions on|off` is `/mode skip|ask`). `ask` is
 each harness's own default; `edits` lets edits apply without asking
 (claude `acceptEdits`; codex `on-request` in a `workspace-write` sandbox;
 opencode has no such mode and shows `edits?`); `plan` plans without
-changing files (claude `plan`; codex `on-request` in a `read-only`
-sandbox, so every write asks; opencode's `plan` agent); `skip` is
-`skip_permissions`. The bar shows the mode word per slot, `?` where a
+changing files (claude `plan`: it writes its plan and then asks, through
+the usual approval row, to leave plan mode — `n` keeps the turn read-only,
+`y` lets it carry on in the same turn asking for each edit; codex
+`on-request` in a `read-only` sandbox, so every write asks; opencode's
+`plan` agent, per message, so `/mode ask` on the next prompt writes again);
+`skip` is `skip_permissions`. The bar shows the mode word per slot, `?` where a
 harness runs as ask instead, and `cfg` on codex when an explicit
 `codex_approval_policy` / `codex_sandbox` decides instead. Typing `/` opens a
 picker under the draft listing these, the routes, and the default

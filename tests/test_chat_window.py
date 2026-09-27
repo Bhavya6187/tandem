@@ -777,12 +777,12 @@ def test_the_active_harness_gets_its_meter_once_its_first_turn_wrote_the_file(en
     assert "claude" in built
 
 
-def test_status_says_the_mode_when_it_is_not_ask(env_factory):
+def test_status_always_says_the_mode(env_factory):
     env = env_factory()
     w, *_ = make_window(env, cfg=ChatConfig(mode="skip"))
     assert "mode skip" in w.status_line() and "claude bypassPermissions" in w.status_line()
     w, *_ = make_window(env)
-    assert "mode" not in w.status_line()
+    assert "mode ask · claude default" in w.status_line()      # the spec: /status prints the mode
 
 
 def test_the_bar_marks_the_mode_per_harness(env_factory):
