@@ -528,3 +528,30 @@ def test_a_read_tool_produces_no_diff():
     rt.handle_line({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1",
                     "content": "text", "is_error": False}]}}, rec.emit, rec, lambda _: None)
     assert "FileDiff" not in rec.kinds()
+
+
+def test_argv_for_a_review_turn_is_read_only_with_the_schema_and_no_fork():
+    argv = ClaudeRuntime(ChatConfig(skip_permissions=True)).argv(
+        "sid-1", fresh=False, model="", review={"type": "object"})
+    assert "--fork-session" not in argv and "--resume" in argv
+    assert argv.count("--permission-mode") == 1
+    assert argv[argv.index("--permission-mode") + 1] == "default"
+    i = argv.index("--allowedTools"); assert argv[i + 1:i + 4] == ["Read", "Grep", "Glob"]
+    j = argv.index("--disallowedTools"); assert argv[j + 1:j + 8] == ["Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "Agent", "Task"]
+    assert argv[argv.index("--max-turns") + 1] == "4"
+    assert argv[argv.index("--json-schema") + 1] == '{"type": "object"}'
+
+
+def test_argv_without_review_is_unchanged():
+    rt = ClaudeRuntime(ChatConfig())
+    assert rt.argv("sid-1", fresh=False, model="") == rt.argv("sid-1", fresh=False, model="", review=None)
+    assert "--json-schema" not in rt.argv("sid-1", fresh=False, model="")
+
+
+def test_run_turn_hands_review_to_argv(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "review")
+    rec = Recorder()
+    out = env.runtime.run_turn(env.session, "sid-1", "review", "", rec.emit, rec, review={"type": "object"})
+    argv = json.loads((env.tmp / "argv.json").read_text())
+    assert "--json-schema" in argv and "--fork-session" not in argv and "--allowedTools" in argv
+    assert out.status == "completed" and out.structured is not None

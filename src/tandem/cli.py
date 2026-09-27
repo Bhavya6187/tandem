@@ -157,13 +157,13 @@ _skip_permissions_option = click.option(
 
 _review_option = click.option(
     "--review/--no-review", "review", default=None,
-    help="Review mode for this launch: the harness not taking the first prompt "
-         "follows along and comments on the other's turns (the chat navigator) "
-         "[default: the [chat] navigator config key].")
+    help="Review mode: the harness not taking the first prompt reviews each of the other's turns "
+         "as a shared turn, and a concern starts one follow-up turn (the chat navigator, "
+         "deliver = turn) [default: the [chat] navigator config keys].")
 
 
 def _reviewer(executing: str, participants: list[str], cfg) -> str:
-    """Who follows and comments under `--review`: the configured navigator
+    """Who reviews under `--review`: the configured navigator
     when it is not the harness taking the first prompt, else the first of
     claude and codex that is a participant and not that harness. A navigator
     never reviews its own turns, so the executing harness is passed over."""
@@ -184,7 +184,8 @@ def _review_config(cfg, review: bool | None, executing: str, participants: list[
     from dataclasses import replace
 
     if review is True:
-        return replace(cfg, navigator=_reviewer(executing, participants, cfg), navigator_invalid="")
+        return replace(cfg, navigator=_reviewer(executing, participants, cfg),
+                       navigator_deliver="turn", navigator_invalid="")
     if review is False:
         return replace(cfg, navigator="", navigator_invalid="")
     return cfg
@@ -491,9 +492,10 @@ def _first_prompt(session: PairedSession) -> str | None:
     """The first thing a human typed into this session, or None if nobody
     has yet. The active harness's transcript is asked first: a turn that
     was mirrored into a shadow carries a `[via …]` tag, which is stripped
-    when it is all there is. Tandem's own seed and close notes are not
-    prompts. A harness whose transcript is missing (a zero-turn shadow)
-    defers to the next participant."""
+    when it is all there is. Tandem's own seed and close notes, and a
+    review round's `[tandem navigator]` prompts, are not prompts. A harness
+    whose transcript is missing (a zero-turn shadow) defers to the next
+    participant."""
     order = [session.active] + [h for h in session.participants if h != session.active]
     for harness in order:
         sid = session.native_id(harness)
@@ -520,6 +522,8 @@ def _first_prompt(session: PairedSession) -> str | None:
                     if text.startswith(tag):
                         text = text[len(tag):].strip()
                         break
+                if text.startswith("[tandem navigator]"):
+                    continue            # a review round's prompt, not a human's
                 if text:
                     return text
     return None
@@ -1126,6 +1130,8 @@ def _nav_row(rec: dict, marks: dict[str, str], *, session_id: str | None = None)
             body += f" {rec['severity']}"
         if rec.get("note"):
             body += f"  {rec['note'][:70]}"
+        if rec.get("verdict") in ("error", "off") and rec.get("error"):
+            body += f"  {str(rec['error'])[:70]}"      # why: interrupted, failed, unparsable
     parts = [when, f"{who} → {rec.get('navigator', '?')}" if rec.get("gate") == "review" else who, body]
     if session_id:
         parts.insert(1, session_id)

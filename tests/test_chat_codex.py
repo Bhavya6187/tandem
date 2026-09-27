@@ -34,6 +34,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_ARGV_OUT", str(tmp_path / "argv.json"))
     monkeypatch.setenv("FAKE_PARAMS_OUT", str(tmp_path / "params.jsonl"))
     monkeypatch.setenv("FAKE_REPLY_OUT", str(tmp_path / "reply.json"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))    # no turn reads the real rollouts
     proj = tmp_path / "proj"; proj.mkdir()
 
     def params(method):
@@ -238,6 +239,26 @@ def test_interrupt(env, monkeypatch):
     rt.interrupt(); t.join(10)
     assert holder["out"].status == "interrupted"
     assert env.params("turn/interrupt") == {"threadId": "t", "turnId": "turn-1"}
+
+
+def test_an_interrupt_before_turn_start_is_sent_once_the_turn_id_arrives(env, monkeypatch):
+    """Ctrl-C while the app-server is still starting (spawn, initialize,
+    thread/resume) has no turn id to send: it must wait for one, not vanish."""
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "interrupt")
+    rec = Recorder(); rt = env.runtime
+    real_call = rt._call
+
+    def interrupt_during_resume(proc, q, method, params, emit, answers, timeout=60.0):
+        if method == "thread/resume":
+            rt.interrupt()
+        return real_call(proc, q, method, params, emit, answers, timeout)
+
+    monkeypatch.setattr(rt, "_call", interrupt_during_resume)
+    out = rt.run_turn(env.session, "t", "go", "", rec.emit, rec)
+    assert out.status == "interrupted"
+    assert env.params("turn/interrupt") == {"threadId": "t", "turnId": "turn-1"}
+    methods = [json.loads(l)["method"] for l in (env.tmp / "params.jsonl").read_text().splitlines()]
+    assert methods.index("turn/interrupt") > methods.index("turn/start")
 
 
 def test_question_round_trip(env, monkeypatch):
@@ -549,6 +570,22 @@ def test_an_output_schema_rides_turn_start(env):
     assert "outputSchema" not in env.params("turn/start")
 
 
+def test_a_review_turn_is_read_only_never_approves_and_carries_the_schema(env):
+    rt = CodexRuntime(ChatConfig(skip_permissions=True, codex_sandbox="workspace-write"),
+                      binary=[sys.executable, str(FAKE)])
+    rec = Recorder("allow")
+    rt.run_turn(env.session, "thread-1", "review", "gpt-5.5", rec.emit, rec, review={"type": "object"})
+    assert env.params("thread/resume") == {"threadId": "thread-1", "cwd": env.session.cwd,
+                                           "approvalPolicy": "never", "sandbox": "read-only"}
+    assert env.params("turn/start")["outputSchema"] == {"type": "object"}
+    assert env.params("turn/start")["model"] == "gpt-5.5"
+    # the same runtime, next turn, is the window's again
+    (env.tmp / "params.jsonl").unlink()
+    rt.run_turn(env.session, "thread-1", "go", "", rec.emit, rec)
+    assert env.params("thread/resume")["sandbox"] == "workspace-write"
+    assert "outputSchema" not in env.params("turn/start")
+
+
 def test_rate_limits_updated_carries_windows():
     rt = CodexRuntime(ChatConfig())
     rec = Recorder()
@@ -739,3 +776,188 @@ def test_an_added_or_deleted_file_is_shown_as_a_diff_not_raw_content():
     added, deleted = rec.events[-2], rec.events[-1]
     assert added.diff.splitlines() == ["@@ new file @@", "+# T", "+- bullet"]
     assert deleted.diff.splitlines() == ["@@ deleted @@", "-gone"]
+
+
+# -- a review's pinned policy is undone by the next ordinary turn ------------------
+
+import tandem.chat.runtime.codex as codex_mod  # noqa: E402
+from tandem import paths as tandem_paths  # noqa: E402
+
+
+REVIEW = "[tandem navigator] You are reviewing the assistant turn immediately above this message"
+
+
+def _user_record(text, legacy=False):
+    if legacy:
+        return json.dumps({"type": "event_msg", "payload": {"type": "user_message", "message": text}})
+    return json.dumps({"type": "response_item", "payload": {
+        "type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}})
+
+
+def write_rollout(path, turns, legacy=False, torn=False, trailing=(), compacted=()):
+    """Each turn is `(approval, sandbox, prompt)`: a turn_context record, then
+    the prompt as a user record. Paginated rollouts carry injected user-role
+    context before the first turn_context; `trailing` user records follow
+    with no turn_context of their own (what tandem syncs in)."""
+    lines = [json.dumps({"type": "session_meta", "payload": {"id": "x"}}),
+             _user_record("<recommended_plugins>\nnone</recommended_plugins>"),
+             _user_record(REVIEW)]          # a stray prompt before any turn_context attaches to nothing
+    for approval, sandbox, prompt in turns:
+        lines.append(json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t"}}))
+        lines.append(json.dumps({"type": "turn_context", "payload": {
+            "approval_policy": approval, "sandbox_policy": {"type": sandbox, "network_access": False},
+            "cwd": "/p", "model": "gpt-5.5"}}))
+        if torn:
+            lines.append('{"type": "turn_context", "payload": {"approval_pol')
+        lines.append(_user_record(prompt, legacy))
+        lines.append(json.dumps({"type": "event_msg", "payload": {"type": "agent_message", "message": "ok"}}))
+    for approval, sandbox in compacted:
+        # codex compacting mid-turn: a second turn_context for the same turn,
+        # no task_started and no prompt
+        lines.append(json.dumps({"type": "compacted", "payload": {"message": ""}}))
+        lines.append(json.dumps({"type": "world_state", "payload": {}}))
+        lines.append(json.dumps({"type": "turn_context", "payload": {
+            "approval_policy": approval, "sandbox_policy": {"type": sandbox}}}))
+    lines += [_user_record(t, legacy=True) for t in trailing]
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+@pytest.fixture
+def no_codex_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(tandem_paths, "codex_home", lambda: tmp_path / "nohome")
+
+
+def test_policy_after_review_restores_the_last_non_review_policy(tmp_path, no_codex_home):
+    p = write_rollout(tmp_path / "a.jsonl", [("on-request", "workspace-write", "fix it"),
+                                             ("never", "read-only", REVIEW), ("never", "read-only", REVIEW)])
+    assert codex_mod.policy_after_review(p) == {"approvalPolicy": "on-request", "sandbox": "workspace-write"}
+    p = write_rollout(tmp_path / "b.jsonl", [("never", "read-only", REVIEW), ("on-request", "read-only", "go")])
+    assert codex_mod.policy_after_review(p) is None
+    assert codex_mod.policy_after_review(tmp_path / "missing.jsonl") is None
+    assert codex_mod.policy_after_review(None) is None
+    p = write_rollout(tmp_path / "d.jsonl", [("untrusted", "workspace-write", "go"), ("never", "read-only", REVIEW)],
+                      torn=True)
+    assert codex_mod.policy_after_review(p) == {"approvalPolicy": "untrusted", "sandbox": "workspace-write"}
+
+
+def test_policy_after_review_reads_legacy_user_message_prompts(tmp_path, no_codex_home):
+    p = write_rollout(tmp_path / "a.jsonl", [("on-request", "workspace-write", "fix it"),
+                                             ("never", "read-only", REVIEW)], legacy=True)
+    assert codex_mod.policy_after_review(p) == {"approvalPolicy": "on-request", "sandbox": "workspace-write"}
+    p = write_rollout(tmp_path / "b.jsonl", [("never", "danger-full-access", "go"),
+                                             ("never", "read-only", "go again")], legacy=True)
+    assert codex_mod.policy_after_review(p) is None
+
+
+def test_policy_after_review_puts_a_users_own_never_read_only_back_as_itself(tmp_path, no_codex_home):
+    p = write_rollout(tmp_path / "a.jsonl", [("never", "read-only", "fix it"), ("never", "read-only", REVIEW)])
+    assert codex_mod.policy_after_review(p) == {"approvalPolicy": "never", "sandbox": "read-only"}
+    p = write_rollout(tmp_path / "b.jsonl", [("never", "danger-full-access", "go"), ("never", "read-only", "plan"),
+                                             ("never", "read-only", REVIEW)])
+    assert codex_mod.policy_after_review(p) == {"approvalPolicy": "never", "sandbox": "read-only"}
+
+
+def test_a_never_read_only_turn_that_was_not_a_review_restores_nothing(tmp_path, no_codex_home):
+    """The weakening case: an older, looser policy must not be re-sent just
+    because the last turn happens to run under never / read-only."""
+    p = write_rollout(tmp_path / "a.jsonl", [("never", "danger-full-access", "go"), ("never", "read-only", "go again")])
+    assert codex_mod.policy_after_review(p) is None
+
+
+def test_a_synced_review_prompt_does_not_mark_the_previous_turn_as_a_review(tmp_path, no_codex_home):
+    p = write_rollout(tmp_path / "a.jsonl", [("on-request", "read-only", "fix it")],
+                      trailing=["[via claude-code] " + REVIEW])
+    assert codex_mod.policy_after_review(p) is None
+
+
+def test_turns_synced_in_after_a_review_do_not_unmark_it(tmp_path, no_codex_home):
+    """The other harness's follow-up syncs in after the review with no
+    turn_context of its own: the review is still the last codex-run turn."""
+    p = write_rollout(tmp_path / "a.jsonl", [("on-request", "workspace-write", "fix it"),
+                                             ("never", "read-only", REVIEW)],
+                      trailing=["[via claude-code] address the review", "[via claude-code] done"])
+    assert codex_mod.policy_after_review(p) == {"approvalPolicy": "on-request", "sandbox": "workspace-write"}
+
+
+def test_a_review_that_compacts_mid_turn_stays_a_review(tmp_path, no_codex_home):
+    p = write_rollout(tmp_path / "a.jsonl", [("on-request", "workspace-write", "fix it"),
+                                             ("never", "read-only", REVIEW)],
+                      compacted=[("never", "read-only")])
+    assert codex_mod.policy_after_review(p) == {"approvalPolicy": "on-request", "sandbox": "workspace-write"}
+
+
+def test_an_ordinary_turn_that_compacts_after_a_review_restores_nothing(tmp_path, no_codex_home):
+    p = write_rollout(tmp_path / "a.jsonl", [("on-request", "workspace-write", "fix it"),
+                                             ("never", "read-only", REVIEW), ("on-request", "read-only", "next")],
+                      compacted=[("on-request", "read-only")])
+    assert codex_mod.policy_after_review(p) is None
+
+
+def test_policy_after_review_with_only_review_turns_uses_codex_default(tmp_path, no_codex_home):
+    p = write_rollout(tmp_path / "a.jsonl", [("never", "read-only", REVIEW)])
+    assert codex_mod.policy_after_review(p) == codex_mod.codex_default_policy()
+
+
+def test_policy_after_review_skips_a_policy_the_protocol_does_not_know(tmp_path, no_codex_home):
+    """A rollout may hold a deprecated `on-failure` or a sandbox type the
+    pinned models reject: sending it would fail thread/resume on every turn."""
+    p = write_rollout(tmp_path / "a.jsonl", [("on-request", "workspace-write", "a"), ("on-failure", "weird", "b"),
+                                             ("never", "read-only", REVIEW)])
+    assert codex_mod.policy_after_review(p) == {"approvalPolicy": "on-request", "sandbox": "workspace-write"}
+    p = write_rollout(tmp_path / "b.jsonl", [("on-failure", "read-only", "a"), ("never", "read-only", REVIEW)])
+    assert codex_mod.policy_after_review(p) == codex_mod.codex_default_policy()
+
+
+def test_review_prompt_starts_with_the_marker_the_restore_keys_on():
+    from tandem.chat import navigator
+    assert navigator._PROMPT.startswith(navigator.REVIEW_PROMPT_PREFIX)
+    assert REVIEW.startswith(navigator.REVIEW_PROMPT_PREFIX)
+
+
+def test_codex_default_policy_reads_config_toml_and_falls_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(tandem_paths, "codex_home", lambda: tmp_path)
+    assert codex_mod.codex_default_policy() == {"approvalPolicy": "on-request", "sandbox": "read-only"}
+    (tmp_path / "config.toml").write_text('approval_policy = "untrusted"\nsandbox_mode = "workspace-write"\n')
+    assert codex_mod.codex_default_policy() == {"approvalPolicy": "untrusted", "sandbox": "workspace-write"}
+    (tmp_path / "config.toml").write_text('sandbox_mode = "bogus"\n')
+    assert codex_mod.codex_default_policy() == {"approvalPolicy": "on-request", "sandbox": "read-only"}
+    (tmp_path / "config.toml").write_text('approval_policy = [not toml\n')
+    assert codex_mod.codex_default_policy() == {"approvalPolicy": "on-request", "sandbox": "read-only"}
+
+
+def test_an_ask_mode_turn_after_a_review_resends_the_pre_review_policy(env, monkeypatch):
+    consulted = []
+
+    def restore(path):
+        consulted.append(path)
+        return {"approvalPolicy": "on-request", "sandbox": "workspace-write"}
+
+    monkeypatch.setattr(codex_mod, "policy_after_review", restore)
+    rollout = env.tmp / ".codex" / "sessions" / "2026" / "rollout-2026-09-27T00-00-00-thread-1.jsonl"
+    rollout.parent.mkdir(parents=True); rollout.write_text("")
+    rec = Recorder()
+    rt = CodexRuntime(ChatConfig(), binary=[sys.executable, str(FAKE)])
+    rt.run_turn(env.session, "thread-1", "go", "", rec.emit, rec)
+    assert consulted == [rollout]                       # the thread's own rollout is read
+    assert env.params("thread/resume") == {"threadId": "thread-1", "cwd": env.session.cwd,
+                                           "approvalPolicy": "on-request", "sandbox": "workspace-write"}
+    # an explicit key keeps its slot; only the inherited one is restored
+    (env.tmp / "params.jsonl").unlink()
+    rt = CodexRuntime(ChatConfig(codex_sandbox="read-only"), binary=[sys.executable, str(FAKE)])
+    rt.run_turn(env.session, "thread-1", "go", "", rec.emit, rec)
+    assert env.params("thread/resume") == {"threadId": "thread-1", "cwd": env.session.cwd,
+                                           "approvalPolicy": "on-request", "sandbox": "read-only"}
+    # a review turn pins its own and never asks
+    consulted.clear(); (env.tmp / "params.jsonl").unlink()
+    rt.run_turn(env.session, "thread-1", "review", "", rec.emit, rec, review={"type": "object"})
+    assert consulted == []
+    assert env.params("thread/resume") == {"threadId": "thread-1", "cwd": env.session.cwd,
+                                           "approvalPolicy": "never", "sandbox": "read-only"}
+    # a fresh thread has no review to undo
+    (env.tmp / "params.jsonl").unlink()
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "fresh")
+    CodexRuntime(ChatConfig(), binary=[sys.executable, str(FAKE)]).run_turn(
+        env.session, None, "go", "", rec.emit, rec)
+    assert consulted == []
+    assert env.params("thread/start") == {"cwd": env.session.cwd}

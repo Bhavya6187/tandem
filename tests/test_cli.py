@@ -426,6 +426,20 @@ def test_session_title_skips_tandem_notes_and_strips_attribution(homes, monkeypa
     assert "[via codex]" not in row and "[tandem]" not in row
 
 
+def test_session_title_skips_a_review_prompt(homes, monkeypatch):
+    # codex executed and claude reviewed: claude's first user message is
+    # the review prompt, not anything a human typed
+    monkeypatch.setenv("COLUMNS", "160")
+    s = _mk_session(homes, n=1)
+    _write_claude_transcript(homes, "c-1", [
+        "[tandem navigator] You are reviewing the assistant turn immediately above this message",
+        "fix it"])
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    row = _row_for(r.output, s.tandem_id)
+    assert "fix it" in row
+    assert "[tandem navigator]" not in row
+
+
 def test_session_title_falls_back_to_another_participant(homes, monkeypatch):
     # the active harness (claude) never ran: its transcript is missing;
     # codex holds the only prompt
@@ -1260,6 +1274,16 @@ def test_navigator_log_prints_the_current_sessions_records_and_a_footer(homes, o
     assert lines[-1] == "reviewed 2 · spoken 1 · skipped 1 · helpful 1/1 (100%)"
 
 
+def test_navigator_log_shows_why_a_review_ended_in_error(homes, ok_versions):
+    with StateStore() as store:
+        session = cli._pair_session(store, str(homes), "claude", ["claude", "codex"], seed=False)
+    _nav_log(homes, session.tandem_id, [dict(NAV_RECORDS[0], verdict="error", severity="", note="",
+                                             error="interrupted")])
+    r = click.testing.CliRunner().invoke(cli.main, ["navigator", "log"])
+    assert r.exit_code == 0, r.output
+    assert "error  interrupted" in r.output.splitlines()[0]
+
+
 def test_navigator_log_limit_and_all(homes, ok_versions):
     with StateStore() as store:
         s1 = cli._pair_session(store, str(homes), "claude", ["claude", "codex"], seed=False)
@@ -1275,3 +1299,23 @@ def test_navigator_log_limit_and_all(homes, ok_versions):
 def test_navigator_log_without_a_session_or_records(homes, ok_versions):
     r = click.testing.CliRunner().invoke(cli.main, ["navigator", "log"])
     assert r.exit_code == 0 and "no navigator log" in r.output
+
+
+def test_review_flag_selects_turn_delivery(homes, ok_versions, chat_cfgs):
+    result = click.testing.CliRunner().invoke(cli.main, ["--review"])
+    assert result.exit_code == 0, result.output
+    assert [(c.navigator, c.navigator_deliver) for c in chat_cfgs] == [("codex", "turn")]
+
+
+def test_review_flag_selects_turn_delivery_over_a_configured_mode(homes, ok_versions, chat_cfgs):
+    _config('[chat]\nnavigator = "codex"\nnavigator_deliver = "prompt"\n')
+    result = click.testing.CliRunner().invoke(cli.main, ["--review"])
+    assert result.exit_code == 0, result.output
+    assert [c.navigator_deliver for c in chat_cfgs] == ["turn"]
+
+
+def test_no_review_flag_leaves_the_delivery_mode_alone(homes, ok_versions, chat_cfgs):
+    _config('[chat]\nnavigator = "codex"\nnavigator_deliver = "prompt"\n')
+    result = click.testing.CliRunner().invoke(cli.main, ["--no-review"])
+    assert result.exit_code == 0, result.output
+    assert [(c.navigator, c.navigator_deliver) for c in chat_cfgs] == [("", "prompt")]

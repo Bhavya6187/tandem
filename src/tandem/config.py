@@ -200,7 +200,7 @@ _SETTING_SOURCES = ("user", "project", "local")
 _CODEX_APPROVAL_POLICIES = ("untrusted", "on-request", "never")
 _CODEX_SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
 _NAVIGATORS = ("", "claude", "codex")
-_NAVIGATOR_DELIVERY = ("bar", "prompt")
+_NAVIGATOR_DELIVERY = ("bar", "prompt", "turn")
 MODES = ("ask", "edits", "plan", "skip")   # the chat window's permission modes, see /mode
 
 
@@ -225,7 +225,8 @@ class ChatConfig:
     mode: str = "ask"                   # ask | edits | plan | skip; skip_permissions is mode == "skip"
     navigator: str = ""                 # "claude" | "codex"; "" = off (the default, kept off)
     navigator_model: str = ""           # model pin for the review turn; "" = the harness default
-    navigator_deliver: str = "bar"      # "bar": you see it; "prompt": it also rides your next prompt
+    navigator_deliver: str = "bar"      # "bar": you see it; "prompt": it also rides your next prompt;
+                                        # "turn": the review is a turn both models share + one follow-up
     navigator_headroom: int = 20        # skip reviews under this % left in the navigator's 5h window
     navigator_interval: int = 180       # seconds between spoken notes
     navigator_invalid: str = ""         # the raw `navigator` string when it was rejected (the window says so)

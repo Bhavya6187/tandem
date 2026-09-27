@@ -626,3 +626,122 @@ def test_headroom_without_data_is_not_enforced():
     assert headroom_ok({"windows": {}}, "codex", 20) is True
     assert headroom_ok({"windows": {"codex": []}}, "codex", 20) is True
     assert headroom_ok({"limits": {"codex": "5h 99%"}}, "codex", 20) is True    # text alone is not data
+
+
+# -- turn mode: the round runs on the dispatcher --------------------------------
+
+
+def turn_cfg(**kw):
+    return ChatConfig(navigator="codex", navigator_deliver="turn", **kw)
+
+
+def test_turn_mode_hands_a_gated_turn_to_the_dispatcher_and_runs_no_review(tmp_path):
+    handed = []
+    nav, reviewer, posted, log = make_nav([CLEAN], tmp_path, cfg=turn_cfg(), dispatch=handed.append)
+    facts = facts_with(paths=("a.py",))
+    nav.turn_ended(facts, SESSION)
+    nav.join(1)
+    assert nav.turn_mode and handed == [facts]
+    assert reviewer.calls == [] and posted == []
+    assert NavigatorLog.read(log.path) == []          # the round logs when it settles
+    assert nav.mark() == "" and nav.pending() is None and nav.take("claude") is None
+
+
+def test_turn_mode_still_gates(tmp_path):
+    handed = []
+    nav, _, _, log = make_nav([], tmp_path, cfg=turn_cfg(), dispatch=handed.append)
+    nav.turn_ended(facts_with(), SESSION)             # quiet: no paths, no failure, no claim
+    assert handed == [] and NavigatorLog.read(log.path)[-1]["gate"] == "skip:quiet"
+
+
+def test_turn_mode_without_a_dispatcher_logs_and_skips(tmp_path):
+    nav, _, _, log = make_nav([], tmp_path, cfg=turn_cfg())
+    nav.turn_ended(facts_with(paths=("a.py",)), SESSION)
+    assert NavigatorLog.read(log.path)[-1]["gate"] == "skip:no-dispatcher"
+
+
+def test_settle_round_logs_posts_and_returns_the_note_when_spoken(tmp_path):
+    nav, _, posted, log = make_nav([], tmp_path, cfg=turn_cfg(), dispatch=lambda f: None)
+    facts = facts_with(paths=("a.py",))
+    v = Verdict("speak", severity="block", note="bad loop", evidence=(Evidence("s.py", 12, "w"),),
+                navigator="codex", elapsed=3.0)
+    note = nav.settle_round(facts, v)
+    assert note is not None and note.turn_harness == "claude" and note.verdict.note == "bad loop"
+    assert [type(e).__name__ for e in posted] == ["ReviewFinished"] and posted[0].verdict.spoken
+    rec = NavigatorLog.read(log.path)[-1]
+    assert rec["gate"] == "review" and rec["verdict"] == "speak" and rec["ts"] == note.ref
+    assert nav.pending() is None                      # nothing waits for a prompt in turn mode
+    assert nav.dismiss("good") is True                 # the last spoken ref is remembered
+    last = NavigatorLog.read(log.path)[-1]
+    assert last["kind"] == "feedback" and last["ref"] == note.ref and last["value"] == "good"
+    assert nav.settle_round(facts, Verdict("clean", navigator="codex")) is None
+    assert finished(posted)[-1].verdict.verdict == "clean"
+
+
+def test_settle_round_dedupes_and_counts_strikes_like_the_worker(tmp_path):
+    nav, _, posted, log = make_nav([], tmp_path, cfg=turn_cfg(), dispatch=lambda f: None)
+    facts = facts_with(paths=("a.py",))
+    ev = (Evidence("s.py", 12, "w"),)
+    assert nav.settle_round(facts, Verdict("speak", severity="warn", note="x", evidence=ev)) is not None
+    assert nav.settle_round(facts, Verdict("speak", severity="warn", note="x again", evidence=ev)) is None
+    assert finished(posted)[-1].verdict.verdict == "dup"
+    for _ in range(3):
+        nav.settle_round(facts, Verdict("error", error="boom"))
+    assert finished(posted)[-1].verdict.verdict == "off"
+    handed = []
+    nav.dispatch = handed.append
+    nav.turn_ended(facts, SESSION)
+    assert handed == [] and NavigatorLog.read(log.path)[-1]["gate"] == "skip:disabled"
+
+
+def test_an_interrupted_review_is_logged_but_not_a_strike(tmp_path):
+    nav, _, posted, log = make_nav([], tmp_path, cfg=turn_cfg(), dispatch=lambda f: None)
+    facts = facts_with(paths=("a.py",))
+    for _ in range(3):
+        assert nav.settle_round(facts, Verdict("error", error="interrupted")) is None
+    assert [r["error"] for r in NavigatorLog.read(log.path)] == ["interrupted"] * 3
+    assert finished(posted)[-1].verdict.verdict == "error"       # never "off"
+    handed = []
+    nav.dispatch = handed.append
+    nav.turn_ended(facts, SESSION)
+    assert handed == [facts]
+
+
+def test_a_post_that_raises_in_settle_round_still_returns_the_note(tmp_path):
+    def boom(ev):
+        raise RuntimeError("window gone")
+    nav, _, _, log = make_nav([], tmp_path, cfg=turn_cfg(), dispatch=lambda f: None)
+    nav.post = boom
+    note = nav.settle_round(facts_with(paths=("a.py",)),
+                            Verdict("speak", severity="block", note="n", evidence=(Evidence("s.py", 1),)))
+    assert note is not None and NavigatorLog.read(log.path)[-1]["verdict"] == "speak"
+
+
+def test_a_failed_round_review_posts_a_notice_but_an_interrupted_one_does_not(tmp_path):
+    from tandem.chat.events import Notice
+    nav, _, posted, _ = make_nav([], tmp_path, cfg=turn_cfg(), dispatch=lambda f: None)
+    facts = facts_with(paths=("a.py",))
+    assert nav.settle_round(facts, Verdict("error", error="boom", navigator="codex")) is None
+    assert [type(e).__name__ for e in posted] == ["Notice", "ReviewFinished"]
+    assert isinstance(posted[0], Notice) and posted[0].text == "codex review failed: boom"
+    posted.clear()
+    assert nav.settle_round(facts, Verdict("error", error="interrupted", navigator="codex")) is None
+    assert [type(e).__name__ for e in posted] == ["ReviewFinished"]
+
+
+def test_followup_prompt_starts_with_the_tandem_marker_and_is_never_reviewed():
+    note = Note("r", "codex", "claude", Verdict("speak", severity="block", note="bad loop",
+                                                 evidence=(Evidence("s.py", 12, "w"), Evidence("t.py", 3))))
+    p = note.followup_prompt()
+    assert p.splitlines() == [
+        "[tandem navigator] codex reviewed your previous turn and flagged (block): bad loop",
+        "s.py:12 — w",
+        "t.py:3",
+        "Act on this in this turn: fix what you agree with, and say plainly what you disagree with and why.",
+    ]
+    assert g(facts_with(prompt=p, paths=("s.py",))) == "skip:tandem-prompt"
+
+
+def test_deny_all_and_collector_live_in_navigator_and_reviewers_reexport_them():
+    from tandem.chat import navigator, reviewers
+    assert reviewers.DenyAll is navigator.DenyAll and reviewers.Collector is navigator.Collector

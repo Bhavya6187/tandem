@@ -342,6 +342,11 @@ def test_navigator_keys_read_and_validate(tmp_path, monkeypatch):
     assert cfg.navigator_headroom == 35 and cfg.navigator_interval == 60
 
 
+def test_navigator_deliver_turn_is_accepted(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, '[chat]\nnavigator = "codex"\nnavigator_deliver = "turn"\n')
+    assert load_chat_config().navigator_deliver == "turn"
+
+
 @pytest.mark.parametrize("value", ['"opencode"', '"gemini"', "true", "3"])
 def test_navigator_rejects_unknown_harnesses(tmp_path, monkeypatch, value):
     _write_config(tmp_path, monkeypatch, f'[chat]\nnavigator = {value}\n')

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable
@@ -23,17 +24,21 @@ from ..constants import TURN_ENDED_NOTE
 from ..harness import get_adapter
 from ..promptroute import RouteError, parse_route
 from ..sync import SyncSetupError
-from .events import (Answers, Failure, Idle, LiveEvent, Notice, TurnFinished, TurnOutcome,
-                     TurnStarted)
-from .navigator import FactsCollector
+from .events import (Answers, Failure, FileDiff, Idle, LiveEvent, Notice, TextDelta, ToolFinished,
+                     ToolOutput, ToolStarted, TurnFinished, TurnOutcome, TurnStarted, Verdict)
+from .navigator import SCHEMA, DenyAll, FactsCollector, build_prompt, compute_diff, parse_verdict
 
 
-@dataclass(frozen=True)
+@dataclass
 class Pending:
     harness: str
     model: str
     prompt: str
     command: str = ""      # "" for a prompt; "compact" | "models" for a window command
+    kind: str = ""         # "" for a prompt; "review" | "followup": the two turns of a review round
+    peer: str = ""         # the round's other harness (TurnStarted.peer)
+    carried: str = ""      # a follow-up: the note summary the header shows
+    facts: object = None   # a review: the TurnFacts of the turn it reviews
 
 
 def parse_command(prompt: str) -> tuple[str, str] | None:
@@ -57,6 +62,25 @@ def _close_note(harness: str, outcome: TurnOutcome) -> str | None:
         return None
     note = TURN_ENDED_NOTE.format(harness=harness, status=outcome.status)
     return f"{note}: {outcome.error}" if outcome.error else note
+
+
+def _mute_review(forward: Callable[[LiveEvent], None], sink: list[str]) -> Callable[[LiveEvent], None]:
+    """A review turn's emit: its reply is the JSON verdict, collected for
+    the parser and never painted; every other event goes through — except
+    claude's StructuredOutput call and everything under it."""
+    verdict_calls: set[str] = set()
+
+    def emit(ev: LiveEvent) -> None:
+        if isinstance(ev, TextDelta):
+            sink.append(ev.text)
+        elif isinstance(ev, ToolStarted) and ev.tool == "StructuredOutput":
+            # claude's --json-schema reply is a tool call: the verdict, not a tool
+            verdict_calls.add(ev.call_id)
+        elif isinstance(ev, (ToolOutput, ToolFinished, FileDiff)) and ev.call_id in verdict_calls:
+            pass
+        else:
+            forward(ev)
+    return emit
 
 
 class Dispatcher:
@@ -176,6 +200,18 @@ class Dispatcher:
             if not self._closed and not self._running and self.queue:
                 self._start(self.queue.popleft())
 
+    def start_round(self, facts) -> None:
+        """The navigator's turn mode: queue a review of the turn `facts`
+        describe ahead of anything typed. Called from the worker that ran
+        that turn, before it declares itself idle, so nothing typed can
+        start between the turn and its review."""
+        nav = self.navigator
+        with self._lock:
+            if self._closed or nav is None:
+                return
+            self.queue.appendleft(Pending(nav.harness, nav.cfg.navigator_model, "",
+                                          kind="review", peer=facts.harness, facts=facts))
+
     def interrupt(self) -> None:
         current = self._current
         if current is not None:
@@ -289,19 +325,28 @@ class Dispatcher:
             return
         ran = False
         nav = self.navigator
+        review = item.kind == "review"
+        started = time.monotonic()
         # a note the navigator left rides this prompt as a trailer — taken
         # now, not at submit, so a note that lands while a prompt is queued
-        # still reaches it. A command turn (a compact) carries none: the
-        # note keeps waiting for a prompt a model will read.
-        note = nav.take(harness) if nav is not None and not item.command else None
+        # still reaches it. A command turn (a compact) carries none, and a
+        # round's own turns carry none: the follow-up IS the note.
+        note = nav.take(harness) if nav is not None and not item.command and not item.kind else None
         prompt = item.prompt + note.trailer() if note is not None else item.prompt
-        self.emit(TurnStarted(harness, item.model, item.prompt,
-                              carried=note.summary if note is not None else ""))
+        carried = note.summary if note is not None else item.carried
+        # a review's prompt is built inside the try below, so a diff that
+        # cannot be read still settles the round and idles; its painter
+        # never echoes the prompt
+        self.emit(TurnStarted(harness, item.model, "" if review else item.prompt,
+                              carried=carried, kind=item.kind, peer=item.peer))
         facts = None
         emit = self.emit
+        text: list[str] = []
         lock = nav.shadow_lock if nav is not None else contextlib.nullcontext()
         outcome = None
         synced = False
+        settled = False
+        err = ""
         try:
             if self._first_turn is not None:
                 self._first_turn()
@@ -309,12 +354,20 @@ class Dispatcher:
             # read after the seeding: a turn that gets this far has its
             # shadows, so its review is not skipped as a first turn
             first = self._first_turn is not None
-            if nav is not None and not item.command:
-                facts = FactsCollector(harness, item.prompt, note is not None, first, self.emit)
+            if review:
+                # the diff is read here, on the worker, after the reviewed turn synced
+                prompt = build_prompt(item.facts, compute_diff(self.session.cwd, item.facts.paths,
+                                                               item.facts.commands))
+            if nav is not None and not item.command and not review:
+                facts = FactsCollector(harness, item.prompt, note is not None or item.kind == "followup",
+                                       first, self.emit)
                 emit = facts.emit
+            elif review:
+                emit = _mute_review(self.emit, text)
             problems = self._validate(harness)
             if problems:
-                self.emit(Failure(f"{harness} transcript: " + "; ".join(problems)))
+                err = f"{harness} transcript: " + "; ".join(problems)
+                self.emit(Failure(err))
                 self.emit(TurnFinished("failed", ""))
                 self._give_back(note)
                 return
@@ -334,15 +387,19 @@ class Dispatcher:
             # either: an active codex with no id is the only harness a fresh
             # pairing leaves fileless, and every other side already has one.
             outcome = self.runtimes[harness].run_turn(
-                session, session.native_id(harness), prompt, item.model, emit, self.answers,
-                command=item.command)
+                session, session.native_id(harness), prompt, item.model, emit,
+                DenyAll() if review else self.answers, command=item.command,
+                **({"review": SCHEMA} if review else {}))
             ran = True      # from here on the runtime has emitted its own TurnFinished
             if outcome.native_id:
                 self.session = ops.adopt_native_id(self.store, session, harness, outcome.native_id)
             # the target becomes the default — its file holds the turn, partial
             # or not — unless the user named another harness since this turn
-            # started: a bare `/codex` typed while claude worked is the later word
-            if self._spoken == spoken:
+            # started: a bare `/codex` typed while claude worked is the later word.
+            # A round's turns never take it: the review is an aside, and the
+            # follow-up was queued by tandem, not typed — a `/codex` sent while
+            # the review ran predates it and must outlive it
+            if self._spoken == spoken and not item.kind:
                 self._set_default(harness)
             else:
                 self._reload_session()          # keep the ids this turn minted alongside that word
@@ -363,17 +420,33 @@ class Dispatcher:
             meter = self.meters.get(harness)
             if meter is not None:
                 meter.poll()
+            if review:
+                # claimed before the call: a raise inside it must not settle the round twice
+                settled = True
+                self._settle_review(item, outcome, "".join(text), started)
         except SyncSetupError as exc:
-            self.emit(Failure(f"sync: {exc}"))
+            err = f"sync: {exc}"
+            self.emit(Failure(err))
             self._finish_unrun(ran)
             if not ran:
                 self._give_back(note)
         except Exception as exc:                       # a runtime bug must not kill the window
-            self.emit(Failure(f"{harness}: {type(exc).__name__}: {exc}"))
+            err = f"{harness}: {type(exc).__name__}: {exc}"
+            self.emit(Failure(err))
             self._finish_unrun(ran)
             if not ran:
                 self._give_back(note)
         finally:
+            # the navigator hears the turn before the dispatcher frees itself:
+            # in turn mode it queues the review from inside turn_ended, and a
+            # prompt submitted in between must land behind it
+            if facts is not None and outcome is not None and synced:
+                try:
+                    nav.turn_ended(facts.finish(outcome.status), self.session)
+                except Exception:
+                    pass                               # the navigator must never take the window down
+            if review and not settled:
+                self._fail_review(item, err or "review ended without a verdict", started)
             # free before the announcement: a window that pumps straight out
             # of this Idle — even synchronously, on this thread — must find
             # the dispatcher idle, or the queued turn stalls until the next
@@ -381,11 +454,6 @@ class Dispatcher:
             with self._lock:
                 self._current = None
                 self._running = False
-            if facts is not None and outcome is not None and synced:
-                try:
-                    nav.turn_ended(facts.finish(outcome.status), self.session)
-                except Exception:
-                    pass                               # the navigator must never take the window down
             self.emit(Idle())
 
     def _give_back(self, note) -> None:
@@ -395,6 +463,43 @@ class Dispatcher:
             return
         try:
             self.navigator.give_back(note)
+        except Exception:
+            pass                                       # the navigator must never take the window down
+
+    def _settle_review(self, item: Pending, outcome: TurnOutcome, text: str, started: float) -> None:
+        """A review turn ended and synced: parse the reply, let the navigator
+        settle and paint it, and queue the follow-up when it spoke."""
+        nav = self.navigator
+        base = dict(navigator=nav.harness, model=item.model, elapsed=time.monotonic() - started)
+        if outcome.status == "interrupted":
+            verdict = Verdict("error", error="interrupted", **base)
+        elif outcome.status != "completed":
+            verdict = Verdict("error", error=(outcome.error or f"{item.harness} review {outcome.status}")[:200],
+                              **base)
+        else:
+            verdict = parse_verdict(outcome.structured, text, **base)
+        try:
+            note = nav.settle_round(item.facts, verdict)
+            if note is None:
+                return
+            executor = item.facts.harness
+            followup = Pending(executor, self.pin(executor), note.followup_prompt(),
+                               kind="followup", peer=nav.harness, carried=note.summary)
+            with self._lock:
+                if self._closed:
+                    return
+                self.queue.appendleft(followup)
+            nav.log.ridden(note.ref, executor)
+        except Exception:
+            pass                                       # the navigator must never take the window down
+
+    def _fail_review(self, item: Pending, error: str, started: float) -> None:
+        """A review turn that never reached the parser: the round ends on an
+        error verdict the navigator logs and counts."""
+        nav = self.navigator
+        try:
+            nav.settle_round(item.facts, Verdict("error", error=error[:200], navigator=nav.harness,
+                                                 model=item.model, elapsed=time.monotonic() - started))
         except Exception:
             pass                                       # the navigator must never take the window down
 

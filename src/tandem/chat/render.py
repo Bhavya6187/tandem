@@ -24,13 +24,22 @@ import textwrap
 from typing import Callable
 from unicodedata import east_asian_width
 
+from ..constants import ATTRIBUTION
 from ..events import AssistantMessage, ToolCall, ToolResult, UserMessage
 from .events import (ApprovalRequest, Failure, FileDiff, QuestionRequest, ReviewFinished, TextDelta,
                      ThinkingDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished, TurnStarted,
                      offered_labels)
 from .activity import elapsed_text
 from .markdown import open_fence, ready_blocks, render_markdown
+from .navigator import REVIEW_PROMPT_PREFIX
 from .runtime import first_line, summarize_args
+
+# how the review prompt a turn-mode round syncs into a transcript begins:
+# bare in the reviewer's own file, behind the converter's `[via …] ` tag
+# in every other (the tag names the reviewer)
+_VIA_HARNESS = {tag: h for h, tag in ATTRIBUTION.items() if tag.startswith("[via ")}
+_REVIEW_PROMPT = re.compile(
+    r"(?:(" + "|".join(re.escape(t) for t in _VIA_HARNESS) + r") )?" + re.escape(REVIEW_PROMPT_PREFIX))
 
 _CSI = "\x1b["
 _CSI_RE = re.compile(r"\x1b\[[0-9:;<=>?]*[ -/]*[@-~]")
@@ -258,10 +267,17 @@ class Screen:
         self._speaker_shown = False
         self._tool_lines.clear(); self._tool_held.clear(); self._tool_dropped.clear()
         self._tool_partial.clear()
-        label = f"you → {ev.harness}" + (f" · {ev.model}" if ev.model else "")
-        prompt = _safe(ev.prompt)
         self.line()
-        if "\n" in prompt:
+        if ev.kind == "review":
+            # the prompt is tandem's own text and the diff; nothing to echo
+            self.line(self._bold(f"{ev.harness} reviewing {ev.peer}'s turn"))
+            return
+        who = f"{ev.peer} → {ev.harness}" if ev.kind == "followup" else f"you → {ev.harness}"
+        label = who + (f" · {ev.model}" if ev.model else "")
+        prompt = _safe(ev.prompt)
+        if ev.kind == "followup":
+            self.line(self._bold(label))       # the note it carries was painted as the verdict row
+        elif "\n" in prompt:
             self.line(self._bold(label))
             self.print(prompt + "\n")
         else:
@@ -445,7 +461,16 @@ class Screen:
         self._flush_md(final=True)      # nothing buffered may land after what is painted here
         for ev in events:
             if isinstance(ev, UserMessage):
-                self.turn_started(TurnStarted(source, "", ev.text))
+                review = _REVIEW_PROMPT.match(ev.text)
+                if review:
+                    # a synced review prompt is tandem's text plus the whole
+                    # diff: paint the header a live review paints instead
+                    reviewer = _VIA_HARNESS[review.group(1)] if review.group(1) else source
+                    m = re.search(r"which ran on (\w+)\.", ev.text)
+                    self.turn_started(TurnStarted(reviewer, "", "", kind="review",
+                                                  peer=m.group(1) if m else "the other"))
+                else:
+                    self.turn_started(TurnStarted(source, "", ev.text))
             elif isinstance(ev, AssistantMessage):
                 self._turn_harness = source
                 if self.cfg.markdown:

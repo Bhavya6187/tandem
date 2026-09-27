@@ -132,6 +132,31 @@ def test_turn_and_tool_rows(screen):
     assert not re.search(r"(?<!\r)\n", t)   # raw tty: never a bare LF
 
 
+def test_a_review_turn_header_names_both_harnesses_and_echoes_no_prompt(screen):
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.turn_started(TurnStarted("codex", "gpt-5.5", "[tandem navigator] You are reviewing…",
+                               kind="review", peer="claude"))
+    s.tool_started(ToolStarted("c1", "Read", "s.py"))
+    s.tool_finished(ToolFinished("c1", True, ""))
+    s.turn_finished(TurnFinished("completed", ""))
+    t = out.text()
+    assert "codex reviewing claude's turn\r\n" in t
+    assert "You are reviewing" not in t and "you →" not in t
+    assert "  ▸ Read s.py\r\n" in t
+
+
+def test_a_followup_turn_header_is_peer_to_harness_plus_the_note(screen):
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.turn_started(TurnStarted("claude", "opus", "[tandem navigator] codex reviewed your previous turn…",
+                               carried="bad loop", kind="followup", peer="codex"))
+    t = out.text()
+    assert "codex → claude · opus\r\n" in t
+    assert "  + navigator note: bad loop\r\n" in t
+    assert "[tandem navigator]" not in t and "you →" not in t
+
+
 def test_failed_tool_flushes_the_held_output_past_the_cap(screen):
     s, out = screen
     s.enter(); out.text(clear=True)
@@ -442,6 +467,35 @@ def test_history_paints_normalized_events(screen):
     t = out.text()
     assert "you → claude  fix it\r\n" in t and "claude\r\nDone.\r\n" in t
     assert "  ▸ Bash pytest\r\n    12 passed\r\n" in t
+
+
+def test_history_paints_a_synced_review_prompt_as_its_header_not_the_diff(screen):
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    review = ("[tandem navigator] You are reviewing the assistant turn immediately above this "
+              "message, which ran on claude. It touched: s.py.\n\ndiff --git a/s.py b/s.py\n+SECRET_DIFF_LINE")
+    s.history([
+        UserMessage(source="codex", text=review),
+        AssistantMessage(source="codex", text='{"verdict": "clean"}'),
+        UserMessage(source="codex", text="[tandem navigator] codex reviewed your previous turn and flagged"),
+    ], source="codex")
+    t = out.text()
+    assert "codex reviewing claude's turn" in t
+    assert "SECRET_DIFF_LINE" not in t and "You are reviewing" not in t
+    assert "you → codex  [tandem navigator] codex reviewed your previous turn" in t
+
+
+def test_history_paints_a_tagged_review_prompt_synced_into_the_executor_as_its_header(screen):
+    """On resume the window reads the executor's transcript, where the
+    review prompt arrives with the converter's attribution tag."""
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    review = ("[via codex] [tandem navigator] You are reviewing the assistant turn immediately above this "
+              "message, which ran on claude. It touched: s.py.\n\ndiff --git a/s.py b/s.py\n+SECRET_DIFF_LINE")
+    s.history([UserMessage(source="claude", text=review)], source="claude")
+    t = out.text()
+    assert "codex reviewing claude's turn" in t
+    assert "SECRET_DIFF_LINE" not in t and "You are reviewing" not in t and "you → claude" not in t
 
 
 # -- the activity line and the closing row -------------------------------------

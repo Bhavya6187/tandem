@@ -23,15 +23,20 @@ import re
 import subprocess
 import threading
 import time
+import tomllib
 from collections import deque
+from pathlib import Path
 from typing import Callable
 
 from pydantic import ValidationError
 
+from ... import paths
+from ...harness import get_adapter
 from ...ratelimit import Window, format_windows, window_label
 from ..events import (Answers, ApprovalRequest, Failure, FileDiff, LimitsUpdate, LiveEvent,
                       QuestionRequest, TextDelta, ThinkingDelta, ToolFinished, ToolOutput,
                       ToolStarted, TurnFinished, TurnOutcome)
+from ..navigator import REVIEW_PROMPT_PREFIX
 from . import child_env, first_line, terminate
 from . import codex_protocol as cp
 
@@ -62,6 +67,129 @@ _DECLINE = _Declining()
 CODEX_MODES = {"edits": ("on-request", "workspace-write"),
                "plan": ("on-request", "read-only"),
                "skip": ("never", "danger-full-access")}
+
+# the policy a review turn pins for itself
+_REVIEW_POLICY = ("never", "read-only")
+# the values the pinned protocol models accept: anything else (a deprecated
+# `on-failure`, a sandbox type from another release) would fail validation
+_APPROVAL_POLICIES = ("untrusted", "on-request", "never")
+_SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
+
+
+def _user_text(rec: dict) -> str | None:
+    """The text of a user prompt record: legacy `event_msg`/`user_message`
+    or paginated `response_item`/`message` with `input_text` blocks."""
+    payload = rec.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    if rec.get("type") == "event_msg" and payload.get("type") == "user_message":
+        text = payload.get("message")
+        return text if isinstance(text, str) else None
+    if rec.get("type") == "response_item" and payload.get("type") == "message" \
+            and payload.get("role") == "user":
+        content = payload.get("content")
+        if not isinstance(content, list):
+            return None
+        return "".join(b.get("text", "") for b in content
+                       if isinstance(b, dict) and b.get("type") == "input_text"
+                       and isinstance(b.get("text"), str))
+    return None
+
+
+def _turns(path: Path) -> list[tuple[str, str, bool]]:
+    """`(approval_policy, sandbox type, is_review)` of every turn_context
+    record in a rollout, in file order. Only codex writes turn_context, one
+    per turn it ran; a turn is a review when a user record after it (before
+    the next turn_context) starts, untagged, with the review prompt. Synced
+    records are tagged (`[via …]`, `[tandem]`) and never match; a user record
+    before any turn_context attaches to nothing. A turn_context with no
+    `task_started` since the previous one is a mid-turn compaction
+    continuation and keeps the previous turn's review mark. Unparsable lines
+    are skipped; an unreadable file has none."""
+    found: list[tuple[str, str, bool]] = []
+    started = False
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"turn_context"' not in line and '"user_message"' not in line \
+                        and '"task_started"' not in line \
+                        and '"role": "user"' not in line and '"role":"user"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                payload = rec.get("payload")
+                if rec.get("type") == "event_msg" and isinstance(payload, dict) \
+                        and payload.get("type") == "task_started":
+                    started = True
+                    continue
+                if rec.get("type") == "turn_context":
+                    if not isinstance(payload, dict):
+                        continue
+                    sandbox = payload.get("sandbox_policy")
+                    sandbox = sandbox.get("type") if isinstance(sandbox, dict) else sandbox
+                    approval = payload.get("approval_policy")
+                    if isinstance(approval, str) and isinstance(sandbox, str):
+                        # a continuation (no task_started) is the same turn
+                        found.append((approval, sandbox,
+                                      False if started or not found else found[-1][2]))
+                        started = False
+                    continue
+                if not found:
+                    continue
+                text = _user_text(rec)
+                # sticky: the other harness's follow-up syncs in after a
+                # review with no turn_context and must not unmark it
+                if text is not None and text.startswith(REVIEW_PROMPT_PREFIX) and not found[-1][2]:
+                    found[-1] = (found[-1][0], found[-1][1], True)
+    except OSError:
+        return []
+    return found
+
+
+def codex_default_policy() -> dict:
+    """The policy codex runs a turn under when nobody overrides it:
+    `approval_policy` / `sandbox_mode` from ~/.codex/config.toml when they
+    are values the protocol knows, else codex's built-in on-request /
+    read-only."""
+    try:
+        with open(paths.codex_home() / "config.toml", "rb") as f:
+            conf = tomllib.load(f)
+    except (OSError, ValueError):
+        conf = {}
+    approval, sandbox = conf.get("approval_policy"), conf.get("sandbox_mode")
+    return {"approvalPolicy": approval if approval in _APPROVAL_POLICIES else "on-request",
+            "sandbox": sandbox if sandbox in _SANDBOX_MODES else "read-only"}
+
+
+def policy_after_review(path: Path | None) -> dict | None:
+    """The policy to put back when the thread's last codex-run turn was a
+    review.
+
+    codex resumes a thread with its last turn_context's policy, so after a
+    review an ask-mode turn, which sends no overrides of its own, would
+    inherit the review's `never` / `read-only`. `None` unless that last turn
+    actually was a review (by its prompt, not its policy); otherwise the
+    policy of the last non-review turn — exactly what codex would have
+    persisted had the review not run, so a user's own `never` / `read-only`
+    is put back as itself — or codex's default when no earlier turn has one.
+    A recorded policy the protocol does not know is treated as absent:
+    sending it would fail thread/resume, and with no new turn_context, every
+    turn after it."""
+    if path is None:
+        return None
+    turns = _turns(path)
+    if not turns or not turns[-1][2]:
+        return None
+    for approval, sandbox, is_review in reversed(turns):
+        if is_review or approval not in _APPROVAL_POLICIES or sandbox not in _SANDBOX_MODES:
+            continue
+        return {"approvalPolicy": approval, "sandbox": sandbox}
+    return codex_default_policy()
+
 
 _REQUEST_MODELS = {
     "item/commandExecution/requestApproval": cp.CommandExecutionRequestApprovalParams,
@@ -128,6 +256,7 @@ class CodexRuntime:
         self._lock = threading.Lock()
         self._n = 0
         self._interrupted = False
+        self._interrupt_pending = False     # Ctrl-C before turn/start returned a turn id
         self._thread_id: str | None = None
         self._turn_id: str | None = None
         self._usage = ""
@@ -516,9 +645,10 @@ class CodexRuntime:
 
     def run_turn(self, session, native_id: str | None, prompt: str, model: str,
                  emit: Callable[[LiveEvent], None], answers: Answers,
-                 command: str = "") -> TurnOutcome:
+                 command: str = "", review: dict | None = None) -> TurnOutcome:
         cfg = self.cfg                 # the mode this turn runs under, whatever /mode says later
-        self._interrupted = False
+        with self._lock:
+            self._interrupted = self._interrupt_pending = False
         self._compacting = command == "compact"
         self._usage = ""
         self._thread_id = self._turn_id = None
@@ -557,6 +687,16 @@ class CodexRuntime:
                 overrides["approvalPolicy"] = cfg.codex_approval_policy
             if cfg.codex_sandbox:
                 overrides["sandbox"] = cfg.codex_sandbox
+            if review is not None:
+                # a review never inherits the window's mode or its codex_* keys
+                overrides = {"approvalPolicy": _REVIEW_POLICY[0], "sandbox": _REVIEW_POLICY[1]}
+            if review is None and native_id:
+                # the only place ask mode sends a policy, and only to undo a
+                # review's: codex keeps the review's never/read-only on the
+                # thread. setdefault, so a mode preset or codex_* key still wins
+                restore = policy_after_review(get_adapter("codex").transcript_path(session.cwd, native_id))
+                for k, v in (restore or {}).items():
+                    overrides.setdefault(k, v)
             if native_id:
                 params = cp.ThreadResumeParams(threadId=native_id, cwd=session.cwd, **overrides)
                 r = self._call(proc, q, "thread/resume", params.model_dump(by_alias=True, exclude_none=True), emit, answers)
@@ -585,20 +725,36 @@ class CodexRuntime:
                     return fail(str(r["error"].get("message", r["error"])))
             else:
                 turn = cp.TurnStartParams(threadId=thread_id, input=[{"type": "text", "text": prompt}],
-                                          model=model or None, outputSchema=self.output_schema)
+                                          model=model or None,
+                                          outputSchema=review if review is not None else self.output_schema)
                 r = self._call(proc, q, "turn/start", turn.model_dump(by_alias=True, exclude_none=True), emit, answers)
                 if "error" in r:
                     return fail(str(r["error"].get("message", r["error"])))
+                drift = None
                 try:
-                    self._turn_id = cp.TurnStartResponse.model_validate(r.get("result")).turn.id
+                    turn_id = cp.TurnStartResponse.model_validate(r.get("result")).turn.id
                 except ValidationError as exc:
                     # only turn.id is load-bearing here (interrupt needs it), so a
                     # response that drifts elsewhere still starts a usable turn
-                    self._turn_id = ((r.get("result") or {}).get("turn") or {}).get("id")
-                    if not self._turn_id:
-                        return fail("turn/start returned no turn id")
+                    turn_id = ((r.get("result") or {}).get("turn") or {}).get("id")
+                    drift = exc
+                # the id and the pending flag change hands under one lock: an
+                # interrupt() between the two would otherwise see no turn id,
+                # park itself as pending, and never be read again
+                with self._lock:
+                    self._turn_id = turn_id
+                    pending, self._interrupt_pending = self._interrupt_pending, False
+                if not turn_id:
+                    return fail("turn/start returned no turn id")
+                if drift is not None:
                     emit(Failure(f"codex sent a response tandem cannot parse: "
-                                 f"turn/start: {first_line(str(exc))}"))
+                                 f"turn/start: {first_line(str(drift))}"))
+                if pending:
+                    # _interrupted is already set, so a turn that completes
+                    # before this lands still reports interrupted
+                    self._request(proc, "turn/interrupt",
+                                  cp.TurnInterruptParams(threadId=thread_id, turnId=turn_id)
+                                  .model_dump(by_alias=True, exclude_none=True))
             # one deadline for the whole compact, not a wait per message: a
             # server that keeps sending usage updates but never completes
             # must still end
@@ -627,6 +783,14 @@ class CodexRuntime:
         with self._lock:
             proc = self._proc
             thread_id, turn_id = self._thread_id, self._turn_id
+            if proc is not None and proc.poll() is None and not (thread_id and turn_id) \
+                    and not self._compacting:
+                # the turn has not been acknowledged yet (spawn, initialize,
+                # thread/resume): run_turn sends the interrupt the moment
+                # turn/start returns a turn id. Set under the lock run_turn
+                # reads it under, so the two cannot pass each other.
+                self._interrupted = self._interrupt_pending = True
+                return
         if proc is None or proc.poll() is not None:
             return
         if not (thread_id and turn_id):

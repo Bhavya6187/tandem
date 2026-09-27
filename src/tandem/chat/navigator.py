@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .. import paths
-from .events import (Evidence, LiveEvent, ReviewFinished, ReviewStarted, TextDelta, ToolFinished,
-                     ToolStarted, Verdict)
+from .events import (ApprovalRequest, Evidence, Failure, LiveEvent, Notice, QuestionRequest, ReviewFinished,
+                     ReviewStarted, TextDelta, ToolFinished, ToolStarted, Verdict)
 
 # the command tool as each client names it (tandem's own labels for codex)
 COMMAND_TOOLS = frozenset({"Bash", "exec", "bash", "shell"})
@@ -122,7 +122,10 @@ SCHEMA: dict = {
     },
 }
 
-_PROMPT = """[tandem navigator] You are reviewing the assistant turn immediately above this message, which ran on {harness}. It touched: {paths}.
+# how every review prompt begins, untagged, in the reviewer's own rollout:
+# the codex runtime keys its post-review policy restore on it
+REVIEW_PROMPT_PREFIX = "[tandem navigator] You are reviewing"
+_PROMPT = REVIEW_PROMPT_PREFIX + """ the assistant turn immediately above this message, which ran on {harness}. It touched: {paths}.
 Its diff (may include earlier uncommitted changes in this tree):
 {diff}
 Speak only if you would block a pull request over something in that turn: a bug it introduced, a claim it made that its own output contradicts, a failing command it ignored. Do not restate the turn. Do not raise style.
@@ -335,6 +338,34 @@ class ReviewResult:
     text: str                   # the final assistant text (codex puts its JSON here)
 
 
+class DenyAll:
+    """A review's Answers: nobody is at the keyboard for a review."""
+
+    def approve(self, req: ApprovalRequest) -> str:
+        return "deny"
+
+    def answer(self, req: QuestionRequest) -> str:
+        return ""
+
+
+class Collector:
+    """A review's emit sink: the final text and any failures, nothing painted."""
+
+    def __init__(self) -> None:
+        self._parts: list[str] = []
+        self.failures: list[str] = []
+
+    def __call__(self, ev: LiveEvent) -> None:
+        if isinstance(ev, TextDelta):
+            self._parts.append(ev.text)
+        elif isinstance(ev, Failure):
+            self.failures.append(ev.message)
+
+    @property
+    def text(self) -> str:
+        return "".join(self._parts)
+
+
 class Reviewer(Protocol):
     harness: str
 
@@ -366,6 +397,16 @@ class Note:
         lines += [f"{e.file}:{e.line}" + (f" — {e.why}" if e.why else "") for e in self.verdict.evidence]
         return "\n\n" + "\n".join(lines)
 
+    def followup_prompt(self) -> str:
+        """The whole prompt of the follow-up turn in `turn` mode. Starts with
+        the `[tandem` marker, so the gate never reviews it: one round."""
+        lines = [f"[tandem navigator] {self.navigator} reviewed your previous turn and flagged "
+                 f"({self.verdict.severity or 'note'}): {self.verdict.note}"]
+        lines += [f"{e.file}:{e.line}" + (f" — {e.why}" if e.why else "") for e in self.verdict.evidence]
+        lines.append("Act on this in this turn: fix what you agree with, and say plainly what you "
+                     "disagree with and why.")
+        return "\n".join(lines)
+
 
 _MAX_FAILURES = 3
 # a review still running after this many seconds is cancelled (its process
@@ -375,15 +416,20 @@ REVIEW_TIMEOUT = 120.0
 
 class Navigator:
     """One review in flight, one pending slot (newest wins), one pending
-    note. `turn_ended` is called on the dispatcher's worker after sync and
-    returns at once; the review runs on this object's own thread and posts
-    ReviewStarted / ReviewFinished through the window's queue."""
+    note — in bar and prompt mode. In turn mode the review is a dispatcher
+    turn: `turn_ended` hands the facts to `dispatch` and `settle_round`
+    takes the verdict back. `turn_ended` is called on the dispatcher's
+    worker after sync and returns at once. In bar and prompt mode the review
+    runs on this object's own thread and posts ReviewStarted / ReviewFinished
+    through the window's queue; in turn mode see `settle_round`."""
 
     def __init__(self, harness: str, cfg, reviewer: Reviewer, post: Callable[[LiveEvent], None],
                  log: NavigatorLog, *, headroom: Callable[[], bool] = lambda: True,
-                 clock: Callable[[], float] = time.monotonic, diff=compute_diff):
+                 clock: Callable[[], float] = time.monotonic, diff=compute_diff,
+                 dispatch: Callable[[TurnFacts], None] | None = None):
         self.harness, self.cfg, self.reviewer, self.post, self.log = harness, cfg, reviewer, post, log
         self._headroom, self._clock, self._diff = headroom, clock, diff
+        self.dispatch = dispatch
         self.shadow_lock = threading.Lock()
         self._lock = threading.Lock()
         self._running = False
@@ -399,6 +445,13 @@ class Navigator:
         self._disabled = False
         self._closed = False
 
+    @property
+    def turn_mode(self) -> bool:
+        """`deliver = "turn"`: the review is a dispatcher turn on the shared
+        session and a spoken verdict starts one follow-up turn (a round).
+        Nothing here forks, runs a thread, or holds a note in that mode."""
+        return self.cfg.navigator_deliver == "turn"
+
     # -- what the dispatcher and the window ask ------------------------------
 
     def turn_ended(self, facts: TurnFacts, session) -> None:
@@ -408,6 +461,12 @@ class Navigator:
                           disabled=self._disabled or self._closed)
             if reason:
                 self.log.review(facts, reason, None)
+                return
+            if self.turn_mode:
+                if self.dispatch is None:
+                    self.log.review(facts, "skip:no-dispatcher", None)
+                else:
+                    self.dispatch(facts)
                 return
             with self._lock:
                 if self._running:
@@ -437,6 +496,28 @@ class Navigator:
         with self._lock:
             if self._note is None:
                 self._note = note
+
+    def settle_round(self, facts: TurnFacts, verdict: Verdict) -> Note | None:
+        """Turn mode: the dispatcher ran the review as a turn and parsed the
+        reply. Count, dedupe and log it as the worker would, paint the
+        verdict row, and hand back the note the follow-up turn carries —
+        None when there is nothing to act on. A review the user interrupted
+        is logged but is not the reviewer's failure: no strike."""
+        if not (verdict.verdict == "error" and verdict.error == "interrupted"):
+            verdict = self._settle(verdict)
+        ref = self.log.review(facts, "", verdict)
+        if verdict.spoken:
+            with self._lock:
+                self._last_spoken_ref = ref
+        try:
+            # the user watched the review run as a turn: say why it ended
+            # with nothing, where the bar and prompt modes stay silent
+            if verdict.verdict == "error" and verdict.error != "interrupted":
+                self.post(Notice(f"{self.harness} review failed: {verdict.error}"))
+            self.post(ReviewFinished(self.harness, verdict))
+        except Exception:
+            pass                                   # the window is gone; the log has it
+        return Note(ref, self.harness, facts.harness, verdict) if verdict.spoken else None
 
     def pending(self) -> Note | None:
         return self._note
