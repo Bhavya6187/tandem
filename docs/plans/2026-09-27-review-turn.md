@@ -15,7 +15,7 @@
 - No new dependencies.
 - `navigator_deliver` accepts exactly `"bar" | "prompt" | "turn"`; an unknown value falls back to `"bar"`, never raises.
 - The review turn runs read-only and never asks: codex `approvalPolicy: "never"`, `sandbox: "read-only"`; claude `--permission-mode default --allowedTools Read Grep Glob --disallowedTools Edit Write MultiEdit NotebookEdit Agent Task --max-turns 4`. Answers are `DenyAll`.
-- The review turn never becomes the default harness. The follow-up runs on the executor.
+- Neither round turn moves the default harness: the review is an aside, and the follow-up runs on the executor without touching `set_active`, so a `/codex` typed during the review survives the round.
 - The follow-up prompt's first line starts with `[tandem navigator]`; the gate skips it as `skip:tandem-prompt`. Nothing else enforces one round.
 - An interrupted review is logged as an error verdict with `error == "interrupted"` and does **not** count toward the three strikes.
 - The navigator must never take the window down: every dispatcher entry into it swallows.
@@ -29,6 +29,7 @@
 - Ctrl-C during the review turn: no follow-up, no strike, the next gated turn is still reviewed (Task 6 `test_an_interrupted_review_is_logged_but_not_a_strike`; Task 7 `test_an_interrupted_review_ends_the_round_without_a_strike`).
 - The window closing while a review or follow-up is queued: the queued item never runs (Task 7, `test_start_round_after_close_queues_nothing`).
 - A round on a session whose executor is codex and reviewer is claude (`--on codex --review`): the mirror works and the default stays codex (Task 7, `test_the_mirror_round_reviews_on_claude_and_follows_up_on_codex`).
+- A bare `/codex` typed while codex reviews: the follow-up starts after that route with a fresh spoken snapshot, and must still not move the default back (Task 7, `test_a_route_typed_during_the_review_outlives_the_followup`).
 
 ---
 
@@ -979,6 +980,33 @@ def test_start_round_puts_the_review_ahead_of_the_queue(env_factory):
         d.close()
 
 
+def test_a_route_typed_during_the_review_outlives_the_followup(env_factory):
+    """`/codex` sent while codex reviews claude moves the default at once.
+    The follow-up that runs next was queued by tandem, not typed, so it
+    must not move the default back — even though it starts after that
+    route and so carries a fresh spoken snapshot."""
+    env = env_factory(active="claude")
+    nav = RoundNavigator()
+    gate = threading.Event()
+    rts = {"claude": FakeRuntime("claude", env, review_reply=SPEAK),
+           "codex": FakeRuntime("codex", env, block=gate, review_reply=SPEAK)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it")
+        wait_idle(events, 1)                            # claude ran; the review is now blocked in codex
+        deadline = time.monotonic() + 5
+        while not rts["codex"].calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert rts["codex"].calls, "the review turn never started"
+        assert d.submit("/codex").startswith("default → codex")
+        gate.set()
+        wait_idle(events, 3)
+        assert starts(events)[1:] == [("codex", "review", "claude", ""), ("claude", "followup", "codex", "bad loop")]
+        assert env.store.get_session(env.session.tandem_id).active == "codex"
+    finally:
+        d.close()
+
+
 def test_the_mirror_round_reviews_on_claude_and_follows_up_on_codex(env_factory):
     env = env_factory(active="codex")
     nav = RoundNavigator(harness="claude")
@@ -1138,8 +1166,10 @@ def _mute_text(forward: Callable[[LiveEvent], None], sink: list[str]) -> Callabl
             # the target becomes the default — its file holds the turn, partial
             # or not — unless the user named another harness since this turn
             # started: a bare `/codex` typed while claude worked is the later word.
-            # A review is an aside: it never takes the default.
-            if self._spoken == spoken and not review:
+            # A round's turns never take it: the review is an aside, and the
+            # follow-up was queued by tandem, not typed — a `/codex` sent while
+            # the review ran predates it and must outlive it
+            if self._spoken == spoken and not item.kind:
                 self._set_default(harness)
             else:
                 self._reload_session()          # keep the ids this turn minted alongside that word
