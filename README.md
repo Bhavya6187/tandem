@@ -41,6 +41,7 @@ harness for the first prompt. Enter sends; **Option-Enter**, **Ctrl-J**, or a
 see the commands and routes; `/help` prints them. Up recalls earlier prompts from
 this directory, and Ctrl-R searches them. `/mode plan` plans without touching
 files, `/mode edits` lets edits through, `/mode skip` skips permission prompts.
+Replies render as markdown, and every edit shows its diff.
 
 Native subagents finish within the current chat turn. Claude subagents run
 in the foreground; Codex can run workers concurrently, and chat waits for

@@ -218,6 +218,16 @@ entry containing the text, Ctrl-R again steps to an older one (wrapping
 round), Enter or Tab puts the match in the composer to edit or send, Esc
 brings back what you were typing.
 
+Replies are rendered as markdown — headings, emphasis, lists, tables and
+fenced code — a paragraph or code block at a time as the model finishes
+it, so text arrives in blocks rather than word by word (the activity line
+shows the turn is still running). `markdown = false` streams the raw text
+as it comes. Every file edit shows its diff under the tool row, `+` and `-`
+coloured, capped to `diff_lines` (`0` for none): codex's is the patch it
+applied; claude's is built from the edit's old and new text and labelled
+`@@ edit @@` (`@@ new file @@` for a write), so it has no line numbers;
+opencode's is what its edit tool reports.
+
 Routes are only ever spelled with `/`: `@` belongs to file mentions, so
 `@codex:astra` is sent as ordinary text. Model names after the `:` may be
 shorthand. Codex shorthand is matched against its local model
