@@ -102,13 +102,17 @@ def _turns(path: Path) -> list[tuple[str, str, bool]]:
     per turn it ran; a turn is a review when a user record after it (before
     the next turn_context) starts, untagged, with the review prompt. Synced
     records are tagged (`[via …]`, `[tandem]`) and never match; a user record
-    before any turn_context attaches to nothing. Unparsable lines are
-    skipped; an unreadable file has none."""
+    before any turn_context attaches to nothing. A turn_context with no
+    `task_started` since the previous one is a mid-turn compaction
+    continuation and keeps the previous turn's review mark. Unparsable lines
+    are skipped; an unreadable file has none."""
     found: list[tuple[str, str, bool]] = []
+    started = False
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 if '"turn_context"' not in line and '"user_message"' not in line \
+                        and '"task_started"' not in line \
                         and '"role": "user"' not in line and '"role":"user"' not in line:
                     continue
                 try:
@@ -117,15 +121,22 @@ def _turns(path: Path) -> list[tuple[str, str, bool]]:
                     continue
                 if not isinstance(rec, dict):
                     continue
+                payload = rec.get("payload")
+                if rec.get("type") == "event_msg" and isinstance(payload, dict) \
+                        and payload.get("type") == "task_started":
+                    started = True
+                    continue
                 if rec.get("type") == "turn_context":
-                    payload = rec.get("payload")
                     if not isinstance(payload, dict):
                         continue
                     sandbox = payload.get("sandbox_policy")
                     sandbox = sandbox.get("type") if isinstance(sandbox, dict) else sandbox
                     approval = payload.get("approval_policy")
                     if isinstance(approval, str) and isinstance(sandbox, str):
-                        found.append((approval, sandbox, False))
+                        # a continuation (no task_started) is the same turn
+                        found.append((approval, sandbox,
+                                      False if started or not found else found[-1][2]))
+                        started = False
                     continue
                 if not found:
                     continue

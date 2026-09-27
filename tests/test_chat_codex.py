@@ -794,7 +794,7 @@ def _user_record(text, legacy=False):
         "type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}})
 
 
-def write_rollout(path, turns, legacy=False, torn=False, trailing=()):
+def write_rollout(path, turns, legacy=False, torn=False, trailing=(), compacted=()):
     """Each turn is `(approval, sandbox, prompt)`: a turn_context record, then
     the prompt as a user record. Paginated rollouts carry injected user-role
     context before the first turn_context; `trailing` user records follow
@@ -803,6 +803,7 @@ def write_rollout(path, turns, legacy=False, torn=False, trailing=()):
              _user_record("<recommended_plugins>\nnone</recommended_plugins>"),
              _user_record(REVIEW)]          # a stray prompt before any turn_context attaches to nothing
     for approval, sandbox, prompt in turns:
+        lines.append(json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t"}}))
         lines.append(json.dumps({"type": "turn_context", "payload": {
             "approval_policy": approval, "sandbox_policy": {"type": sandbox, "network_access": False},
             "cwd": "/p", "model": "gpt-5.5"}}))
@@ -810,6 +811,13 @@ def write_rollout(path, turns, legacy=False, torn=False, trailing=()):
             lines.append('{"type": "turn_context", "payload": {"approval_pol')
         lines.append(_user_record(prompt, legacy))
         lines.append(json.dumps({"type": "event_msg", "payload": {"type": "agent_message", "message": "ok"}}))
+    for approval, sandbox in compacted:
+        # codex compacting mid-turn: a second turn_context for the same turn,
+        # no task_started and no prompt
+        lines.append(json.dumps({"type": "compacted", "payload": {"message": ""}}))
+        lines.append(json.dumps({"type": "world_state", "payload": {}}))
+        lines.append(json.dumps({"type": "turn_context", "payload": {
+            "approval_policy": approval, "sandbox_policy": {"type": sandbox}}}))
     lines += [_user_record(t, legacy=True) for t in trailing]
     path.write_text("\n".join(lines) + "\n")
     return path
@@ -870,6 +878,20 @@ def test_turns_synced_in_after_a_review_do_not_unmark_it(tmp_path, no_codex_home
                                              ("never", "read-only", REVIEW)],
                       trailing=["[via claude-code] address the review", "[via claude-code] done"])
     assert codex_mod.policy_after_review(p) == {"approvalPolicy": "on-request", "sandbox": "workspace-write"}
+
+
+def test_a_review_that_compacts_mid_turn_stays_a_review(tmp_path, no_codex_home):
+    p = write_rollout(tmp_path / "a.jsonl", [("on-request", "workspace-write", "fix it"),
+                                             ("never", "read-only", REVIEW)],
+                      compacted=[("never", "read-only")])
+    assert codex_mod.policy_after_review(p) == {"approvalPolicy": "on-request", "sandbox": "workspace-write"}
+
+
+def test_an_ordinary_turn_that_compacts_after_a_review_restores_nothing(tmp_path, no_codex_home):
+    p = write_rollout(tmp_path / "a.jsonl", [("on-request", "workspace-write", "fix it"),
+                                             ("never", "read-only", REVIEW), ("on-request", "read-only", "next")],
+                      compacted=[("on-request", "read-only")])
+    assert codex_mod.policy_after_review(p) is None
 
 
 def test_policy_after_review_with_only_review_turns_uses_codex_default(tmp_path, no_codex_home):
