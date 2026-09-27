@@ -24,6 +24,7 @@ import textwrap
 from typing import Callable
 from unicodedata import east_asian_width
 
+from ..constants import ATTRIBUTION
 from ..events import AssistantMessage, ToolCall, ToolResult, UserMessage
 from .events import (ApprovalRequest, Failure, FileDiff, QuestionRequest, ReviewFinished, TextDelta,
                      ThinkingDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished, TurnStarted,
@@ -32,8 +33,12 @@ from .activity import elapsed_text
 from .markdown import open_fence, ready_blocks, render_markdown
 from .runtime import first_line, summarize_args
 
-# how the review prompt a turn-mode round syncs into a transcript begins
-_REVIEW_PROMPT = "[tandem navigator] You are reviewing"
+# how the review prompt a turn-mode round syncs into a transcript begins:
+# bare in the reviewer's own file, behind the converter's `[via …] ` tag
+# in every other (the tag names the reviewer)
+_VIA_HARNESS = {tag: h for h, tag in ATTRIBUTION.items() if tag.startswith("[via ")}
+_REVIEW_PROMPT = re.compile(
+    r"(?:(" + "|".join(re.escape(t) for t in _VIA_HARNESS) + r") )?\[tandem navigator\] You are reviewing")
 
 _CSI = "\x1b["
 _CSI_RE = re.compile(r"\x1b\[[0-9:;<=>?]*[ -/]*[@-~]")
@@ -455,11 +460,13 @@ class Screen:
         self._flush_md(final=True)      # nothing buffered may land after what is painted here
         for ev in events:
             if isinstance(ev, UserMessage):
-                if ev.text.startswith(_REVIEW_PROMPT):
+                review = _REVIEW_PROMPT.match(ev.text)
+                if review:
                     # a synced review prompt is tandem's text plus the whole
                     # diff: paint the header a live review paints instead
+                    reviewer = _VIA_HARNESS[review.group(1)] if review.group(1) else source
                     m = re.search(r"which ran on (\w+)\.", ev.text)
-                    self.turn_started(TurnStarted(source, "", "", kind="review",
+                    self.turn_started(TurnStarted(reviewer, "", "", kind="review",
                                                   peer=m.group(1) if m else "the other"))
                 else:
                     self.turn_started(TurnStarted(source, "", ev.text))

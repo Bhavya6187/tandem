@@ -485,6 +485,19 @@ def test_history_paints_a_synced_review_prompt_as_its_header_not_the_diff(screen
     assert "you → codex  [tandem navigator] codex reviewed your previous turn" in t
 
 
+def test_history_paints_a_tagged_review_prompt_synced_into_the_executor_as_its_header(screen):
+    """On resume the window reads the executor's transcript, where the
+    review prompt arrives with the converter's attribution tag."""
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    review = ("[via codex] [tandem navigator] You are reviewing the assistant turn immediately above this "
+              "message, which ran on claude. It touched: s.py.\n\ndiff --git a/s.py b/s.py\n+SECRET_DIFF_LINE")
+    s.history([UserMessage(source="claude", text=review)], source="claude")
+    t = out.text()
+    assert "codex reviewing claude's turn" in t
+    assert "SECRET_DIFF_LINE" not in t and "You are reviewing" not in t and "you → claude" not in t
+
+
 # -- the activity line and the closing row -------------------------------------
 
 
