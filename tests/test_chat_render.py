@@ -132,6 +132,31 @@ def test_turn_and_tool_rows(screen):
     assert not re.search(r"(?<!\r)\n", t)   # raw tty: never a bare LF
 
 
+def test_a_review_turn_header_names_both_harnesses_and_echoes_no_prompt(screen):
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.turn_started(TurnStarted("codex", "gpt-5.5", "[tandem navigator] You are reviewing…",
+                               kind="review", peer="claude"))
+    s.tool_started(ToolStarted("c1", "Read", "s.py"))
+    s.tool_finished(ToolFinished("c1", True, ""))
+    s.turn_finished(TurnFinished("completed", ""))
+    t = out.text()
+    assert "codex reviewing claude's turn\r\n" in t
+    assert "You are reviewing" not in t and "you →" not in t
+    assert "  ▸ Read s.py\r\n" in t
+
+
+def test_a_followup_turn_header_is_peer_to_harness_plus_the_note(screen):
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    s.turn_started(TurnStarted("claude", "opus", "[tandem navigator] codex reviewed your previous turn…",
+                               carried="bad loop", kind="followup", peer="codex"))
+    t = out.text()
+    assert "codex → claude · opus\r\n" in t
+    assert "  + navigator note: bad loop\r\n" in t
+    assert "[tandem navigator]" not in t and "you →" not in t
+
+
 def test_failed_tool_flushes_the_held_output_past_the_cap(screen):
     s, out = screen
     s.enter(); out.text(clear=True)

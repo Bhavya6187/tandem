@@ -258,10 +258,17 @@ class Screen:
         self._speaker_shown = False
         self._tool_lines.clear(); self._tool_held.clear(); self._tool_dropped.clear()
         self._tool_partial.clear()
-        label = f"you → {ev.harness}" + (f" · {ev.model}" if ev.model else "")
-        prompt = _safe(ev.prompt)
         self.line()
-        if "\n" in prompt:
+        if ev.kind == "review":
+            # the prompt is tandem's own text and the diff; nothing to echo
+            self.line(self._bold(f"{ev.harness} reviewing {ev.peer}'s turn"))
+            return
+        who = f"{ev.peer} → {ev.harness}" if ev.kind == "followup" else f"you → {ev.harness}"
+        label = who + (f" · {ev.model}" if ev.model else "")
+        prompt = _safe(ev.prompt)
+        if ev.kind == "followup":
+            self.line(self._bold(label))       # the note it carries was painted as the verdict row
+        elif "\n" in prompt:
             self.line(self._bold(label))
             self.print(prompt + "\n")
         else:

@@ -84,6 +84,8 @@ class TurnStarted:
     model: str
     prompt: str
     carried: str = ""   # a navigator note's summary when one rode this prompt; "" otherwise
+    kind: str = ""      # "" for a prompt; "review" | "followup": the two turns of a review round
+    peer: str = ""      # the round's other harness: whose turn a review reads, who asked for a follow-up
 
 
 @dataclass(frozen=True)
