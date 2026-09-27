@@ -1097,7 +1097,7 @@ def test_model_with_a_spaced_name_is_an_error_not_a_turn(env_factory):
 
 from types import SimpleNamespace
 
-from tandem.chat.events import ReviewFinished
+from tandem.chat.events import FileDiff, ReviewFinished, ToolFinished, ToolOutput
 from tandem.chat.navigator import SCHEMA, DenyAll, TurnFacts
 from tandem.config import ChatConfig
 
@@ -1477,5 +1477,37 @@ def test_a_runtime_that_raises_on_the_review_is_settled_as_an_error(env_factory)
         assert "boom" in nav.settled[0].error
         assert len(rts["claude"].calls) == 1
         assert not d.busy
+    finally:
+        d.close()
+
+
+class StructuredOutputRuntime(FakeRuntime):
+    """A reviewer whose verdict arrives the way claude's `--json-schema`
+    delivers it: as a StructuredOutput tool call, beside a real Read."""
+
+    def run_turn(self, session, native_id, prompt, model, emit, answers, command="", review=None):
+        if review is not None:
+            emit(ToolStarted("r1", "Read", "s.py"))
+            emit(ToolStarted("s1", "StructuredOutput", SPEAK))
+            emit(ToolOutput("s1", "Structured output provided successfully"))
+            emit(ToolFinished("s1", True, ""))
+            emit(FileDiff("s1", "s.py", "@@"))
+            emit(ToolFinished("r1", True, ""))
+        return super().run_turn(session, native_id, prompt, model, emit, answers, command, review)
+
+
+def test_a_structured_output_tool_call_is_the_verdict_and_never_painted(env_factory):
+    env = env_factory(active="claude")
+    nav = RoundNavigator()
+    rts = {"claude": FakeRuntime("claude", env),
+           "codex": StructuredOutputRuntime("codex", env, review_reply=SPEAK)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it")
+        wait_idle(events, 3)
+        assert not [e for e in events if getattr(e, "call_id", None) == "s1"]
+        assert [(type(e).__name__, e.call_id) for e in events if getattr(e, "call_id", None) == "r1"] == \
+            [("ToolStarted", "r1"), ("ToolFinished", "r1")]
+        assert [v.verdict for v in nav.settled] == ["speak"]
     finally:
         d.close()

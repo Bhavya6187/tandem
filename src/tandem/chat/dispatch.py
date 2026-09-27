@@ -24,8 +24,8 @@ from ..constants import TURN_ENDED_NOTE
 from ..harness import get_adapter
 from ..promptroute import RouteError, parse_route
 from ..sync import SyncSetupError
-from .events import (Answers, Failure, Idle, LiveEvent, Notice, TextDelta, TurnFinished, TurnOutcome,
-                     TurnStarted, Verdict)
+from .events import (Answers, Failure, FileDiff, Idle, LiveEvent, Notice, TextDelta, ToolFinished,
+                     ToolOutput, ToolStarted, TurnFinished, TurnOutcome, TurnStarted, Verdict)
 from .navigator import SCHEMA, DenyAll, FactsCollector, build_prompt, compute_diff, parse_verdict
 
 
@@ -64,12 +64,20 @@ def _close_note(harness: str, outcome: TurnOutcome) -> str | None:
     return f"{note}: {outcome.error}" if outcome.error else note
 
 
-def _mute_text(forward: Callable[[LiveEvent], None], sink: list[str]) -> Callable[[LiveEvent], None]:
+def _mute_review(forward: Callable[[LiveEvent], None], sink: list[str]) -> Callable[[LiveEvent], None]:
     """A review turn's emit: its reply is the JSON verdict, collected for
-    the parser and never painted; every other event goes through."""
+    the parser and never painted; every other event goes through — except
+    claude's StructuredOutput call and everything under it."""
+    verdict_calls: set[str] = set()
+
     def emit(ev: LiveEvent) -> None:
         if isinstance(ev, TextDelta):
             sink.append(ev.text)
+        elif isinstance(ev, ToolStarted) and ev.tool == "StructuredOutput":
+            # claude's --json-schema reply is a tool call: the verdict, not a tool
+            verdict_calls.add(ev.call_id)
+        elif isinstance(ev, (ToolOutput, ToolFinished, FileDiff)) and ev.call_id in verdict_calls:
+            pass
         else:
             forward(ev)
     return emit
@@ -355,7 +363,7 @@ class Dispatcher:
                                        first, self.emit)
                 emit = facts.emit
             elif review:
-                emit = _mute_text(self.emit, text)
+                emit = _mute_review(self.emit, text)
             problems = self._validate(harness)
             if problems:
                 err = f"{harness} transcript: " + "; ".join(problems)
