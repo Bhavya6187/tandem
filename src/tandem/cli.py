@@ -157,9 +157,9 @@ _skip_permissions_option = click.option(
 
 _review_option = click.option(
     "--review/--no-review", "review", default=None,
-    help="Review mode for this launch: the harness not taking the first prompt "
-         "follows along and comments on the other's turns (the chat navigator) "
-         "[default: the [chat] navigator config key].")
+    help="Review mode: the harness not taking the first prompt reviews each of the other's turns "
+         "as a shared turn, and a concern starts one follow-up turn (the chat navigator, "
+         "deliver = turn) [default: the [chat] navigator config keys].")
 
 
 def _reviewer(executing: str, participants: list[str], cfg) -> str:
@@ -184,7 +184,8 @@ def _review_config(cfg, review: bool | None, executing: str, participants: list[
     from dataclasses import replace
 
     if review is True:
-        return replace(cfg, navigator=_reviewer(executing, participants, cfg), navigator_invalid="")
+        return replace(cfg, navigator=_reviewer(executing, participants, cfg),
+                       navigator_deliver="turn", navigator_invalid="")
     if review is False:
         return replace(cfg, navigator="", navigator_invalid="")
     return cfg

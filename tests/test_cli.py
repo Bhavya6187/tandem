@@ -1275,3 +1275,23 @@ def test_navigator_log_limit_and_all(homes, ok_versions):
 def test_navigator_log_without_a_session_or_records(homes, ok_versions):
     r = click.testing.CliRunner().invoke(cli.main, ["navigator", "log"])
     assert r.exit_code == 0 and "no navigator log" in r.output
+
+
+def test_review_flag_selects_turn_delivery(homes, ok_versions, chat_cfgs):
+    result = click.testing.CliRunner().invoke(cli.main, ["--review"])
+    assert result.exit_code == 0, result.output
+    assert [(c.navigator, c.navigator_deliver) for c in chat_cfgs] == [("codex", "turn")]
+
+
+def test_review_flag_selects_turn_delivery_over_a_configured_mode(homes, ok_versions, chat_cfgs):
+    _config('[chat]\nnavigator = "codex"\nnavigator_deliver = "prompt"\n')
+    result = click.testing.CliRunner().invoke(cli.main, ["--review"])
+    assert result.exit_code == 0, result.output
+    assert [c.navigator_deliver for c in chat_cfgs] == ["turn"]
+
+
+def test_no_review_flag_leaves_the_delivery_mode_alone(homes, ok_versions, chat_cfgs):
+    _config('[chat]\nnavigator = "codex"\nnavigator_deliver = "prompt"\n')
+    result = click.testing.CliRunner().invoke(cli.main, ["--no-review"])
+    assert result.exit_code == 0, result.output
+    assert [(c.navigator, c.navigator_deliver) for c in chat_cfgs] == [("", "prompt")]
