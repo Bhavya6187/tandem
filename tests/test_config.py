@@ -3,6 +3,7 @@
 import pytest
 
 from tandem.config import (
+    MODES,
     ChatConfig,
     FrameConfig,
     SubagentsConfig,
@@ -364,3 +365,62 @@ def test_navigator_bad_values_fall_back(tmp_path, monkeypatch):
     assert cfg.navigator_deliver == "bar"
     assert cfg.navigator_headroom == 0            # clamped, like history_turns
     assert cfg.navigator_interval == 180
+
+
+# -- the chat permission mode ----------------------------------------------------
+
+
+def test_mode_defaults_to_ask(tmp_path, monkeypatch):
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+    cfg = load_chat_config()
+    assert cfg.mode == "ask" and cfg.skip_permissions is False and cfg.effective_mode == "ask"
+
+
+def test_a_chat_mode_key_sets_the_mode(tmp_path, monkeypatch):
+    for mode in MODES:
+        _write_config(tmp_path, monkeypatch, f'[chat]\nmode = "{mode}"\n')
+        cfg = load_chat_config()
+        assert cfg.mode == mode and cfg.skip_permissions is (mode == "skip"), mode
+
+
+def test_an_unknown_mode_is_ignored(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, '[chat]\nmode = "yolo"\n')
+    assert load_chat_config().mode == "ask"
+    _write_config(tmp_path, monkeypatch, 'skip_permissions = true\n[chat]\nmode = 7\n')
+    assert load_chat_config().mode == "skip"                   # the legacy key still counts
+
+
+def test_the_legacy_key_means_skip(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, "skip_permissions = true\n")
+    cfg = load_chat_config()
+    assert cfg.mode == "skip" and cfg.skip_permissions is True
+
+
+def test_an_explicit_chat_mode_beats_the_legacy_key(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, 'skip_permissions = true\n[chat]\nmode = "plan"\n')
+    cfg = load_chat_config()
+    assert cfg.mode == "plan" and cfg.skip_permissions is False
+
+
+def test_the_launch_flag_beats_a_chat_mode(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, '[chat]\nmode = "plan"\n')
+    set_skip_permissions(True)
+    assert load_chat_config().mode == "skip"
+    set_skip_permissions(False)
+    assert load_chat_config().mode == "ask"                    # not plan: the flag says "ask"
+    set_skip_permissions(None)
+    assert load_chat_config().mode == "plan"
+
+
+def test_with_mode_sets_both_fields():
+    cfg = ChatConfig().with_mode("skip")
+    assert (cfg.mode, cfg.skip_permissions) == ("skip", True)
+    cfg = cfg.with_mode("edits")
+    assert (cfg.mode, cfg.skip_permissions) == ("edits", False)
+
+
+def test_effective_mode_honours_a_bare_skip_permissions_flag():
+    # tests and callers that build ChatConfig(skip_permissions=True) directly
+    # must keep meaning "skip" to the runtimes
+    assert ChatConfig(skip_permissions=True).effective_mode == "skip"
+    assert ChatConfig(mode="plan").effective_mode == "plan"
