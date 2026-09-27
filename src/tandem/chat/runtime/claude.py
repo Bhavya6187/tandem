@@ -110,6 +110,14 @@ def _text_of(content) -> str:
     return ""
 
 
+# a review turn: read-only by allowlist, by denylist and by permission mode,
+# and bounded — the diff it would reach for with git is already in its prompt
+REVIEW_ARGS = ["--permission-mode", "default",
+               "--allowedTools", "Read", "Grep", "Glob",
+               "--disallowedTools", "Edit", "Write", "MultiEdit", "NotebookEdit", "Agent", "Task",
+               "--max-turns", "4"]
+
+
 class ClaudeRuntime:
     harness = "claude"
 
@@ -132,8 +140,11 @@ class ClaudeRuntime:
 
     # -- argv ----------------------------------------------------------------
 
-    def argv(self, native_id: str, fresh: bool, model: str, cfg=None) -> list[str]:
+    def argv(self, native_id: str, fresh: bool, model: str, cfg=None,
+             review: dict | None = None) -> list[str]:
         cfg = cfg if cfg is not None else self.cfg
+        if review is not None:
+            cfg = cfg.with_mode("ask")     # a review never bypasses, plans or accepts edits
         argv = [*self.binary, "-p", "--session-id" if fresh else "--resume", native_id,
                 "--input-format", "stream-json", "--output-format", "stream-json",
                 "--verbose", "--include-partial-messages",
@@ -146,6 +157,8 @@ class ClaudeRuntime:
         if model:
             argv += ["--model", model]
         argv += self.extra_args
+        if review is not None:
+            argv += [*REVIEW_ARGS, "--json-schema", json.dumps(review)]
         return argv
 
     # -- protocol ------------------------------------------------------------
@@ -266,7 +279,7 @@ class ClaudeRuntime:
 
     def run_turn(self, session, native_id: str | None, prompt: str, model: str,
                  emit: Callable[[LiveEvent], None], answers: Answers,
-                 command: str = "") -> TurnOutcome:
+                 command: str = "", review: dict | None = None) -> TurnOutcome:
         assert native_id, "claude session ids are minted at pair time"
         cfg = self.cfg                 # the mode this turn runs under, whatever /mode says later
         if command == "compact":
@@ -277,7 +290,7 @@ class ClaudeRuntime:
         self._streamed_text = False
         self._edits.clear()
         proc = subprocess.Popen(
-            self.argv(native_id, fresh, model, cfg), cwd=session.cwd,
+            self.argv(native_id, fresh, model, cfg, review=review), cwd=session.cwd,
             env={**child_env(tandem_id=session.tandem_id),
                  "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"},
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
