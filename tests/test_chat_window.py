@@ -13,7 +13,7 @@ from conftest import claude_assistant, claude_user, write_line
 
 from tandem.chat.commands import Command
 from tandem.chat.composer import Composer
-from tandem.chat.events import (ApprovalRequest, Evidence, Idle, LimitsUpdate, Notice, QuestionRequest,
+from tandem.chat.events import (ApprovalRequest, Evidence, FileDiff, Idle, LimitsUpdate, Notice, QuestionRequest,
                                 ReviewFinished, ReviewStarted, TextDelta, Verdict,
                                 ToolStarted, TurnFinished, TurnOutcome, TurnStarted)
 from tandem.chat.navigator import Note
@@ -158,6 +158,12 @@ class TestWindowCommands:
             "claude": [Command("deep-research", "claude command", "claude")]})
         w.handle_input(b"/help\r")
         assert "claude:" in out.text() and "/deep-research" in out.text()
+
+
+def test_a_file_diff_event_paints_under_the_tool_row(env_factory):
+    env = env_factory(); w, d, out, _ = make_window(env)
+    w.handle_event(FileDiff("c1", "x.py", "+one"))
+    assert "--- x.py" in out.text() and "+one" in out.text()
 
 
 def test_a_notice_paints_each_line_dim(env_factory):

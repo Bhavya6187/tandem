@@ -2,8 +2,9 @@ import re
 
 import pytest
 
-from tandem.chat.events import (ApprovalRequest, Failure, QuestionRequest, TextDelta, ThinkingDelta,
-                                ToolFinished, ToolOutput, ToolStarted, TurnFinished, TurnStarted)
+from tandem.chat.events import (ApprovalRequest, Failure, FileDiff, QuestionRequest, TextDelta,
+                                ThinkingDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished,
+                                TurnStarted)
 from tandem.chat.render import Screen
 from tandem.config import ChatConfig
 from tandem.events import AssistantMessage, ToolCall, ToolResult, UserMessage
@@ -227,6 +228,7 @@ class TestHarnessTextIsSanitized:
 
     def test_a_text_delta_cannot_erase_the_line(self, screen):
         s, out = screen
+        s.cfg = ChatConfig(tool_output_lines=2, markdown=False)   # raw streaming: the delta prints at once
         s.enter(); out.text(clear=True)
         s.text_delta(TextDelta("a\x1b[2Kb"))
         t = out.text()
@@ -502,6 +504,7 @@ def test_every_turn_ends_with_a_closing_row(screen, event, elapsed, want):
     """A completed turn with no usage used to end on nothing at all: a
     finished answer and a model still thinking looked the same."""
     s, out = screen
+    s.cfg = ChatConfig(tool_output_lines=2, markdown=False)       # raw streaming: "ok" is already out
     s.enter(); out.text(clear=True)
     s.turn_started(TurnStarted("claude", "", "go")); s.text_delta(TextDelta("ok"))
     out.text(clear=True)
@@ -607,3 +610,219 @@ def test_a_note_strips_escapes_the_harness_could_have_supplied(screen):
     s.note("gpt-x\x1b[2J  A \x1b]8;;http://x\x07model")
     t = out.text()
     assert "gpt-x  A model" in t and "\x1b[2J" not in t and "\x1b]8" not in t
+
+
+# -- markdown blocks and edit diffs ----------------------------------------------
+
+
+def md(cols=40, color=False, **kw):
+    out = Out()
+    s = Screen(out, 24, cols, ChatConfig(tool_output_lines=2, **kw), color=color)
+    s.enter(); out.text(clear=True)
+    return s, out
+
+
+def test_text_is_held_until_a_paragraph_ends():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("First **para"))
+    s.text_delta(TextDelta("graph** here."))
+    assert "para" not in out.text()                        # nothing until the blank line
+    s.text_delta(TextDelta("\n\nSecond"))
+    assert "para" not in out.text()                        # the line after the blank is still partial
+    s.text_delta(TextDelta(" one\n"))
+    t = out.text()
+    assert "First paragraph here." in t and "Second" not in t
+
+
+def test_the_last_paragraph_flushes_at_turn_end():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("Only paragraph, no trailing blank"))
+    s.turn_finished(TurnFinished("completed", ""))
+    t = out.text()
+    assert "Only paragraph, no trailing blank" in t
+    assert t.index("Only paragraph") < t.index("✓ done")
+
+
+def test_an_unclosed_fence_flushes_at_turn_end():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("```py\nx = 1\n\ny = 2\n"))
+    assert "x = 1" not in out.text()
+    s.turn_finished(TurnFinished("completed", ""))
+    assert "x = 1" in out.text() and "y = 2" in out.text()
+
+
+def test_a_tool_row_flushes_the_text_before_it():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("Let me look"))
+    s.tool_started(ToolStarted("c1", "Read", "x.py"))
+    t = out.text()
+    assert t.index("Let me look") < t.index("▸ Read")
+
+
+def test_a_new_turn_drops_text_left_by_an_interrupted_one():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi"))
+    s.text_delta(TextDelta("half a thou"))
+    s.turn_started(TurnStarted("codex", "", "next")); out.text(clear=True)
+    s.turn_finished(TurnFinished("completed", ""))
+    assert "half a thou" not in out.text()
+
+
+def test_markdown_off_streams_raw_bytes_as_before():
+    s_on, out_on = md(markdown=False)
+    s_on.turn_started(TurnStarted("claude", "", "hi")); out_on.text(clear=True)
+    for chunk in ("**bo", "ld**\n\nmore"):
+        s_on.text_delta(TextDelta(chunk))
+    assert out_on.text() == "claude\r\n**bold**\r\n\r\nmore"        # raw, token by token, as before
+
+
+def test_streamed_paragraphs_keep_a_blank_row_between_them():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("First.\n\nSecond.\n\nThird."))
+    s.turn_finished(TurnFinished("completed", ""))
+    body = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.text()).split("✓ done")[0]
+    assert "First.\r\n\r\nSecond.\r\n\r\nThird." in body
+
+
+def test_a_resize_before_the_flush_renders_at_the_new_width():
+    s, out = md(cols=80)
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("word " * 20))
+    s.resize(24, 30); out.text(clear=True)
+    s.turn_finished(TurnFinished("completed", ""))
+    rows = [r for r in re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.text()).split("\r\n") if "word" in r]
+    assert rows and all(len(r) <= 29 for r in rows)
+
+
+def test_history_renders_assistant_text_as_markdown():
+    s, out = md()
+    s.history([UserMessage(source="claude", text="q"),
+               AssistantMessage(source="claude", text="# Heading\n\ntext")], "claude")
+    t = out.text()
+    assert "Heading" in t and "# Heading" not in t
+
+
+def test_file_diff_colours_lines_and_caps(screen_factory):
+    s, out = screen_factory(cols=60, cfg=ChatConfig(diff_lines=3))
+    s.enter(); out.text(clear=True)
+    s.file_diff(FileDiff("c1", "src/app.py", "@@ edit @@\n-old line\n+new line\n context\n+more"))
+    t = out.text()
+    assert "    --- src/app.py" in t
+    assert "    @@ edit @@" in t and "    -old line" in t and "    +new line" in t
+    assert "context" not in t and "    … +2 lines" in t
+
+
+def test_file_diff_is_silent_at_zero_lines(screen_factory):
+    s, out = screen_factory(cfg=ChatConfig(diff_lines=0))
+    s.enter(); out.text(clear=True)
+    s.file_diff(FileDiff("c1", "a.py", "+x"))
+    assert out.text() == ""
+
+
+def test_file_diff_colours_when_colour_is_on():
+    out = Out()
+    s = Screen(out, 24, 60, ChatConfig(), color=True)
+    s.enter(); out.text(clear=True)
+    s.file_diff(FileDiff("c1", "a.py", "-gone\n+here"))
+    t = out.text()
+    assert "\x1b[31m    -gone" in t and "\x1b[32m    +here" in t
+
+
+def test_a_note_mid_fence_keeps_the_rest_of_the_code_as_code():
+    """A note (a queued prompt, /status, a Notice) flushes the buffer while
+    a fence is open; the code that follows must still be code, and the
+    prose after the closer must be prose — not swallowed into a block."""
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("```py\nprint(0)\n"))
+    s.note("queued → codex")
+    s.text_delta(TextDelta("print(1)\n```\n\nDone *now*.\n"))
+    s.turn_finished(TurnFinished("completed", ""))
+    t = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.text())
+    assert "Done now." in t and "*now*" not in t             # emphasis rendered: prose, not code
+    assert "print(1)" in t
+
+
+def test_a_hidden_thinking_delta_does_not_flush_the_reply():
+    s, out = md()                                            # show_thinking is off
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("half a para"))
+    s.thinking_delta(ThinkingDelta("hmm"))
+    assert "half a para" not in out.text()
+
+
+def test_a_code_block_keeps_a_blank_row_before_the_prose_after_it():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    for ch in "Here:\n\n```py\nx = 1\n```\n\nThat sets x.\n":
+        s.text_delta(TextDelta(ch))
+    s.turn_finished(TurnFinished("completed", ""))
+    body = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.text()).split("✓ done")[0]
+    rows = body.split("\r\n")
+    i = next(k for k, r in enumerate(rows) if "x = 1" in r)
+    j = next(k for k, r in enumerate(rows) if "That sets x." in r)
+    assert j - i >= 2 and all(not r.strip() for r in rows[i + 1:j])    # a blank row between
+
+
+def test_file_diff_counts_lines_the_runtime_already_dropped(screen_factory):
+    s, out = screen_factory(cols=60, cfg=ChatConfig(diff_lines=3))
+    s.enter(); out.text(clear=True)
+    s.file_diff(FileDiff("c1", "n.txt", "@@ new file @@\n+l0\n+l1", omitted=97))
+    assert "    … +97 lines" in out.text()
+
+
+def test_a_trailing_newline_in_a_diff_is_not_a_line(screen_factory):
+    s, out = screen_factory(cols=60, cfg=ChatConfig(diff_lines=1))
+    s.enter(); out.text(clear=True)
+    s.file_diff(FileDiff("c1", "a.py", "+x\n"))
+    assert "+x" in out.text() and "… +" not in out.text()
+
+
+def test_history_flushes_text_buffered_before_it():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi"))
+    s.text_delta(TextDelta("pending"))
+    out.text(clear=True)
+    s.history([AssistantMessage(source="claude", text="older")], "claude")
+    t = out.text()
+    assert t.index("pending") < t.index("older")
+
+
+def test_a_note_during_a_split_closing_fence_keeps_the_prose_as_prose():
+    """The closer arrives as "``" then "`": a flush that rendered the partial
+    "``" would leave the reopened fence without its closer, and everything
+    after it would be code. (Codex review of PR 4.)"""
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("```py\nprint(0)\n``"))
+    s.note("queued → codex")
+    s.text_delta(TextDelta("`\n\nDone *now*.\n"))
+    s.turn_finished(TurnFinished("completed", ""))
+    t = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.text())
+    assert "print(0)" in t and "Done now." in t
+    assert "*now*" not in t and "```" not in t and "``" not in t.split("Done now.")[0].split("codex")[1]
+
+
+def test_a_partial_opener_before_a_note_still_opens_the_fence():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("Look:\n\n``"))
+    s.note("queued → codex")
+    s.text_delta(TextDelta("`py\nx = 1\n```\n\nText *here*.\n"))
+    s.turn_finished(TurnFinished("completed", ""))
+    t = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.text())
+    assert "x = 1" in t and "Text here." in t and "```" not in t
+
+
+def test_a_prose_fragment_still_flushes_before_a_tool_row():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("Let me check the file"))
+    s.tool_started(ToolStarted("c1", "Read", "x.py"))
+    t = out.text()
+    assert t.index("Let me check the file") < t.index("▸ Read")

@@ -216,6 +216,8 @@ class ChatConfig:
     history_turns: int = 50             # turns painted at startup
     show_thinking: bool = False
     bell: bool = True                   # ring when a turn needs an answer, or ends after a long run
+    markdown: bool = True               # render replies as markdown, block by block
+    diff_lines: int = 40                # lines of each edit's diff shown (0 = none)
     claude_setting_sources: tuple[str, ...] = _SETTING_SOURCES
     codex_approval_policy: str = ""     # "" = inherit ~/.codex/config.toml
     codex_sandbox: str = ""             # "" = inherit
@@ -281,6 +283,8 @@ def load_chat_config() -> ChatConfig:
         history_turns=max(0, pick("history_turns", int, d.history_turns)),
         show_thinking=pick("show_thinking", bool, d.show_thinking),
         bell=pick("bell", bool, d.bell),
+        markdown=pick("markdown", bool, d.markdown),
+        diff_lines=max(0, pick("diff_lines", int, d.diff_lines)),
         claude_setting_sources=sources,
         codex_approval_policy=pick("codex_approval_policy", str,
                                    d.codex_approval_policy, _CODEX_APPROVAL_POLICIES),

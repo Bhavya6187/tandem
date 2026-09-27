@@ -29,7 +29,7 @@ from typing import Callable
 from pydantic import ValidationError
 
 from ...ratelimit import Window, format_windows, window_label
-from ..events import (Answers, ApprovalRequest, Failure, LimitsUpdate, LiveEvent,
+from ..events import (Answers, ApprovalRequest, Failure, FileDiff, LimitsUpdate, LiveEvent,
                       QuestionRequest, TextDelta, ThinkingDelta, ToolFinished, ToolOutput,
                       ToolStarted, TurnFinished, TurnOutcome)
 from . import child_env, first_line, terminate
@@ -69,6 +69,21 @@ _REQUEST_MODELS = {
     "item/permissions/requestApproval": cp.PermissionsRequestApprovalParams,
     "item/tool/requestUserInput": cp.ToolRequestUserInputParams,
 }
+
+
+def change_diff(change) -> str:
+    """A fileChange entry as a diff: `update` carries a unified diff, but
+    `add` and `delete` carry the file's content (codex's item builder), so
+    those are written out as all-added or all-removed lines."""
+    diff = getattr(change, "diff", "") or ""
+    kind = getattr(change, "kind", None)
+    kind = getattr(kind, "root", kind)
+    kind = getattr(kind, "type", None) or (kind.get("type") if isinstance(kind, dict) else None)
+    if kind == "add":
+        return "\n".join(["@@ new file @@", *("+" + l for l in diff.splitlines())])
+    if kind == "delete":
+        return "\n".join(["@@ deleted @@", *("-" + l for l in diff.splitlines())])
+    return diff
 
 
 def strip_shell(command: str) -> str:
@@ -336,10 +351,12 @@ class CodexRuntime:
         elif method == "item/reasoning/summaryTextDelta":
             if params.get("delta"):
                 emit(ThinkingDelta(params["delta"]))
-        elif method in ("item/commandExecution/outputDelta", "item/fileChange/outputDelta"):
+        elif method == "item/commandExecution/outputDelta":
             item_id, delta = params.get("itemId", ""), params.get("delta", "")
             self._streamed_output.add(item_id)
             emit(ToolOutput(item_id, delta))
+        elif method == "item/fileChange/outputDelta":
+            return None                          # the structured diff at item/completed is authoritative
         elif method == "item/started":
             n = self._parse(cp.ItemStartedNotification, params, method, emit)
             if n is None:
@@ -372,11 +389,12 @@ class CodexRuntime:
                 summary = f"exit {it.exitCode}" if it.exitCode is not None else str(it.status)
                 emit(ToolFinished(it.id, ok, summary))
             elif kind == "fileChange":
-                if it.id not in self._streamed_output:
-                    diff = "\n".join(c.diff for c in (getattr(it, "changes", None) or []) if getattr(c, "diff", ""))
-                    if diff:
-                        emit(ToolOutput(it.id, diff))
-                emit(ToolFinished(it.id, getattr(it, "status", "completed") == "completed", ""))
+                ok = getattr(it, "status", "completed") == "completed"
+                emit(ToolFinished(it.id, ok, ""))
+                if ok:
+                    for c in getattr(it, "changes", None) or []:
+                        if getattr(c, "diff", ""):
+                            emit(FileDiff(it.id, getattr(c, "path", "") or "", change_diff(c)))
             elif kind in ("mcpToolCall", "webSearch", "contextCompaction"):
                 emit(ToolFinished(it.id, getattr(it, "status", "completed") != "failed", ""))
             elif kind == "agentMessage":

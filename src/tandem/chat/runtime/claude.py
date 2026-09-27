@@ -22,6 +22,7 @@ function of one parsed line so the golden fixture can drive it."""
 
 from __future__ import annotations
 
+import difflib
 import json
 import subprocess
 import threading
@@ -33,8 +34,8 @@ from ... import modelcat
 from ...harness import get_adapter
 from ...ratelimit import format_windows, parse_claude_event
 from ..commands import Command
-from ..events import (Answers, ApprovalRequest, LimitsUpdate, LiveEvent, QuestionRequest, TextDelta,
-                      ThinkingDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished,
+from ..events import (Answers, ApprovalRequest, FileDiff, LimitsUpdate, LiveEvent, QuestionRequest,
+                      TextDelta, ThinkingDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished,
                       TurnOutcome)
 from . import child_env, first_line, summarize_args, terminate
 
@@ -54,6 +55,50 @@ def _tool_paths(name: str, inp) -> tuple[str, ...]:
     if key and isinstance(inp, dict) and isinstance(inp.get(key), str) and inp[key]:
         return (inp[key],)
     return ()
+
+
+_DIFF_TOOLS = ("Edit", "Write", "MultiEdit")   # NotebookEdit has no text to diff
+
+
+def snippet_diff(name: str, inp: dict, cap: int) -> tuple[str, int]:
+    """(diff, lines left out): the diff of an Edit/MultiEdit/Write from its
+    input alone — no file is read. A snippet diff: `@@ edit @@` hunks with
+    no line numbers, `Write` as a new file. Capped to `cap` lines while it
+    is built, counting what it drops; ("", 0) at cap 0 or with nothing to
+    show (an edit whose old and new text are the same)."""
+    if cap <= 0 or not isinstance(inp, dict):
+        return "", 0
+    out: list[str] = []
+    omitted = 0
+
+    def add(line: str) -> None:
+        nonlocal omitted
+        if len(out) < cap:
+            out.append(line)
+        else:
+            omitted += 1
+
+    if name == "Write":
+        add("@@ new file @@")
+        for l in str(inp.get("content", "")).splitlines():
+            add("+" + l)
+    else:
+        edits = inp.get("edits") if name == "MultiEdit" else [inp]
+        for i, e in enumerate(edits or [], 1):
+            if not isinstance(e, dict):
+                continue
+            body = [l for l in list(difflib.unified_diff(
+                str(e.get("old_string", "")).splitlines(), str(e.get("new_string", "")).splitlines(),
+                lineterm="", n=2))[2:] if not l.startswith("@@")]   # no file or numbered hunk headers
+            if not body:
+                continue                             # nothing changed: nothing to show
+            add("@@ edit" + (f" {i}" if name == "MultiEdit" else "")
+                + (" · replace_all" if e.get("replace_all") else "") + " @@")
+            for l in body:
+                add(l)
+    if not any(l[:1] in ("+", "-") for l in out):
+        return "", 0
+    return "\n".join(out), omitted
 
 
 def _text_of(content) -> str:
@@ -82,6 +127,7 @@ class ClaudeRuntime:
         self._lock = threading.Lock()
         self._interrupted = False
         self._streamed_text = False   # did the current message stream text deltas?
+        self._edits: dict[str, tuple[str, dict]] = {}   # tool_use id -> (tool, input) of a pending edit
         self.harness_commands: list[Command] = list(_BUILTINS)
 
     # -- argv ----------------------------------------------------------------
@@ -159,6 +205,8 @@ class ClaudeRuntime:
                     emit(ToolStarted(b.get("id", ""), f"agent/{name}" if child else name,
                                      summarize_args(b.get("name", ""), b.get("input")),
                                      paths=() if child else _tool_paths(name, b.get("input"))))
+                    if not child and name in _DIFF_TOOLS and isinstance(b.get("input"), dict):
+                        self._edits[b.get("id", "")] = (name, b["input"])
                 elif b.get("type") == "text" and not child and not self._streamed_text and b.get("text"):
                     emit(TextDelta(b["text"]))       # partial messages off: paint the block
             return None
@@ -167,8 +215,15 @@ class ClaudeRuntime:
                 if isinstance(b, dict) and b.get("type") == "tool_result":
                     text = _text_of(b.get("content"))
                     err = bool(b.get("is_error"))
-                    emit(ToolOutput(b.get("tool_use_id", ""), text))
-                    emit(ToolFinished(b.get("tool_use_id", ""), not err, first_line(text) if err else ""))
+                    tid = b.get("tool_use_id", "")
+                    edit = self._edits.pop(tid, None)
+                    diff, omitted = snippet_diff(edit[0], edit[1], self.cfg.diff_lines) \
+                        if edit is not None and not err else ("", 0)
+                    if not diff:
+                        emit(ToolOutput(tid, text))      # the diff replaces the edit's cat -n echo
+                    emit(ToolFinished(tid, not err, first_line(text) if err else ""))
+                    if diff:
+                        emit(FileDiff(tid, str(edit[1].get("file_path") or ""), diff, omitted))
             return None
         if t == "control_request":
             req = m.get("request") or {}
@@ -220,6 +275,7 @@ class ClaudeRuntime:
         fresh = get_adapter("claude").reclaim_transcript(session.cwd, native_id) is None
         self._interrupted = False
         self._streamed_text = False
+        self._edits.clear()
         proc = subprocess.Popen(
             self.argv(native_id, fresh, model, cfg), cwd=session.cwd,
             env={**child_env(tandem_id=session.tandem_id),

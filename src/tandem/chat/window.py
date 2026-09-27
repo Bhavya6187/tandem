@@ -30,7 +30,7 @@ from .activity import Activity
 from .commands import Command, catalog, help_lines
 from .composer import Answer, Cancel, Composer, CtrlC, Interrupt, Repaint, Submit
 from .dispatch import Dispatcher
-from .events import (ApprovalRequest, Failure, Idle, LimitsUpdate, LiveEvent, Notice,
+from .events import (ApprovalRequest, Failure, FileDiff, Idle, LimitsUpdate, LiveEvent, Notice,
                      QuestionRequest, ReviewFinished, ReviewStarted, TextDelta, ThinkingDelta,
                      ToolFinished, ToolOutput, ToolStarted, TurnFinished, TurnStarted)
 from .files import list_paths
@@ -334,6 +334,8 @@ class Window:
             s.tool_output(ev)
         elif isinstance(ev, ToolFinished):
             s.tool_finished(ev)
+        elif isinstance(ev, FileDiff):
+            s.file_diff(ev)
         elif isinstance(ev, ApprovalRequest):
             self._flush_input()
             s.approval(ev)

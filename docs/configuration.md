@@ -218,6 +218,17 @@ entry containing the text, Ctrl-R again steps to an older one (wrapping
 round), Enter or Tab puts the match in the composer to edit or send, Esc
 brings back what you were typing.
 
+Replies are rendered as markdown — headings, emphasis, lists, tables and
+fenced code — a paragraph or code block at a time as the model finishes
+it, so text arrives in blocks rather than word by word (the activity line
+shows the turn is still running). `markdown = false` streams the raw text
+as it comes. Every file edit shows its diff under the tool row, `+` and `-`
+coloured, capped to `diff_lines` (`0` for none): codex's is the patch it
+applied; claude's is built from the edit's old and new text and labelled
+`@@ edit @@` (`@@ new file @@` for a write), so it has no line numbers;
+opencode's is what its `edit` and `write` tools report (its `apply_patch`
+tool, used with some models, reports none yet).
+
 Routes are only ever spelled with `/`: `@` belongs to file mentions, so
 `@codex:astra` is sent as ordinary text. Model names after the `:` may be
 shorthand. Codex shorthand is matched against its local model
@@ -247,6 +258,8 @@ tool_output_lines = 8        # lines of tool output shown per call (rest elided)
 history_turns = 50           # turns painted from the transcript at startup
 show_thinking = false        # reasoning summaries, dimmed
 bell = true                  # ring when a turn needs an answer, or ends after 15 s or more
+markdown = true              # render replies as markdown, a paragraph or code block at a time
+diff_lines = 40              # lines of each file edit's diff shown under its tool row (0 = none)
 # mode = "ask"               # ask | edits | plan | skip: the initial /mode; --[no-]skip-permissions
 #                            # and the top-level skip_permissions still count (flag > mode > key)
 claude_setting_sources = ["user", "project", "local"]   # what headless claude loads
