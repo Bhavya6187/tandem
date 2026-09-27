@@ -689,3 +689,39 @@ def test_a_mode_change_during_startup_does_not_reach_the_running_turn(env, monke
     monkeypatch.setattr(rt, "_call", call_and_flip)
     rt.run_turn(env.session, "thread-1", "go", "", Recorder().emit, Recorder())
     assert env.params("thread/resume")["sandbox"] == "read-only"       # plan, not skip
+
+
+# -- FileDiff from a completed fileChange -----------------------------------------
+
+from tandem.chat.events import FileDiff  # noqa: E402
+
+
+def test_a_completed_file_change_emits_a_diff_per_change_after_tool_finished():
+    rt = CodexRuntime(ChatConfig()); rec = Recorder(); rt._thread_id = "t"
+    handle = lambda m: rt.handle(m, lambda _: None, rec.emit, rec)
+    handle({"method": "item/completed", "params": {"threadId": "t", "turnId": "u", "completedAtMs": 2,
+            "item": {"type": "fileChange", "id": "c1", "status": "completed",
+                     "changes": [{"path": "/p/a.py", "kind": {"type": "update"}, "diff": "@@ -1 +1 @@\n-a\n+b"},
+                                 {"path": "/p/b.py", "kind": {"type": "add"}, "diff": "@@ -0,0 +1 @@\n+new"}]}}})
+    kinds = rec.kinds()
+    assert kinds[-3:] == ["ToolFinished", "FileDiff", "FileDiff"]
+    assert [e.path for e in rec.events[-2:]] == ["/p/a.py", "/p/b.py"]
+
+
+def test_a_declined_file_change_emits_no_diff():
+    rt = CodexRuntime(ChatConfig()); rec = Recorder(); rt._thread_id = "t"
+    rt.handle({"method": "item/completed", "params": {"threadId": "t", "turnId": "u", "completedAtMs": 2,
+               "item": {"type": "fileChange", "id": "c1", "status": "declined",
+                        "changes": [{"path": "/p/a.py", "kind": {"type": "update"}, "diff": "-a\n+b"}]}}},
+              lambda _: None, rec.emit, rec)
+    assert "FileDiff" not in rec.kinds() and rec.events[-1] == ToolFinished("c1", False, "")
+
+
+def test_file_change_output_deltas_are_no_longer_painted_as_output():
+    rt = CodexRuntime(ChatConfig()); rec = Recorder(); rt._thread_id = "t"
+    rt.handle({"method": "item/fileChange/outputDelta", "params": {"threadId": "t", "turnId": "u",
+               "itemId": "c1", "delta": "-a\n+b\n"}}, lambda _: None, rec.emit, rec)
+    assert rec.events == []
+    rt.handle({"method": "item/commandExecution/outputDelta", "params": {"threadId": "t", "turnId": "u",
+               "itemId": "c2", "delta": "hi"}}, lambda _: None, rec.emit, rec)
+    assert rec.events == [ToolOutput("c2", "hi")]                 # commands still stream

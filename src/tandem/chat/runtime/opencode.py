@@ -39,7 +39,7 @@ from typing import Callable
 from urllib.parse import urlparse
 
 from ..commands import Command
-from ..events import (Answers, ApprovalRequest, Failure, LiveEvent, QuestionRequest,
+from ..events import (Answers, ApprovalRequest, Failure, FileDiff, LiveEvent, QuestionRequest,
                       TextDelta, ThinkingDelta, ToolFinished, ToolOutput, ToolStarted,
                       TurnFinished, TurnOutcome)
 from . import child_env, first_line, summarize_args, terminate
@@ -97,6 +97,8 @@ class TurnState:
     user_msgs: set = field(default_factory=set)
     part_types: dict = field(default_factory=dict)     # part id -> "text" | "reasoning" | "tool"
     started: set = field(default_factory=set)           # tool call ids already announced
+    paths: dict = field(default_factory=dict)           # call id -> filePath of an edit/write
+    finished: set = field(default_factory=set)          # call ids already finished (updates repeat)
     failed: str = ""
 
 
@@ -336,12 +338,22 @@ class OpencodeRuntime:
                     st.started.add(call_id)
                     inp = state.get("input")
                     fp = inp.get("filePath") if tool in ("edit", "write") and isinstance(inp, dict) else None
+                    if isinstance(fp, str) and fp:
+                        st.paths[call_id] = fp
                     emit(ToolStarted(call_id, tool, summarize_args(tool, inp),
                                      paths=(fp,) if isinstance(fp, str) and fp else ()))
+                if status in ("completed", "error"):
+                    if call_id in st.finished:
+                        return                           # opencode repeats the completed update
+                    st.finished.add(call_id)
                 if status == "completed":
                     if state.get("output"):
                         emit(ToolOutput(call_id, state["output"]))
                     emit(ToolFinished(call_id, True, first_line(state.get("title") or "")))
+                    meta = state.get("metadata") if isinstance(state.get("metadata"), dict) else part.get("metadata")
+                    diff = meta.get("diff") if isinstance(meta, dict) else None
+                    if isinstance(diff, str) and diff and tool in ("edit", "write"):
+                        emit(FileDiff(call_id, st.paths.get(call_id, ""), diff))
                 elif status == "error":
                     emit(ToolFinished(call_id, False, first_line(state.get("error") or "error")))
         elif typ == "message.part.delta":

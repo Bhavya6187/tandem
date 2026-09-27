@@ -431,3 +431,66 @@ def test_argv_takes_the_config_it_is_given():
     rt = ClaudeRuntime(ChatConfig(mode="plan"))
     argv = rt.argv("sid-1", fresh=False, model="", cfg=ChatConfig(mode="skip"))
     assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
+
+
+# -- FileDiff after a successful edit ----------------------------------------------
+
+from tandem.chat.events import FileDiff  # noqa: E402
+from tandem.chat.runtime.claude import snippet_diff  # noqa: E402
+
+
+def test_snippet_diff_for_an_edit_drops_file_headers_and_labels_the_hunk():
+    d = snippet_diff("Edit", {"file_path": "a.py", "old_string": "x = 1\ny = 2", "new_string": "x = 1\ny = 3"}, 40)
+    assert d.splitlines()[0] == "@@ edit @@"
+    assert "-y = 2" in d and "+y = 3" in d and " x = 1" in d
+    assert "---" not in d and "+++" not in d and "@@ -" not in d
+
+
+def test_snippet_diff_marks_replace_all_and_numbers_multiedits():
+    d = snippet_diff("Edit", {"old_string": "a", "new_string": "b", "replace_all": True}, 40)
+    assert d.splitlines()[0] == "@@ edit · replace_all @@"
+    m = snippet_diff("MultiEdit", {"edits": [{"old_string": "a", "new_string": "b"},
+                                             {"old_string": "c", "new_string": "d"}]}, 40)
+    assert "@@ edit 1 @@" in m and "@@ edit 2 @@" in m
+
+
+def test_snippet_diff_for_a_write_is_all_additions_and_capped():
+    d = snippet_diff("Write", {"file_path": "n.txt", "content": "\n".join(f"l{i}" for i in range(100))}, 5)
+    lines = d.splitlines()
+    assert lines[0] == "@@ new file @@" and lines[1] == "+l0"
+    assert len(lines) <= 6                                   # header + cap
+
+
+def test_snippet_diff_is_empty_at_zero_lines():
+    assert snippet_diff("Write", {"content": "x"}, 0) == ""
+
+
+def test_a_successful_edit_emits_a_diff_after_tool_finished():
+    rt = ClaudeRuntime(ChatConfig()); rec = Recorder()
+    rt.handle_line({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Edit",
+                    "input": {"file_path": "a.py", "old_string": "x", "new_string": "y"}}]}},
+                   rec.emit, rec, lambda _: None)
+    rt.handle_line({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1",
+                    "content": "ok", "is_error": False}]}}, rec.emit, rec, lambda _: None)
+    kinds = rec.kinds()
+    assert kinds[-2:] == ["ToolFinished", "FileDiff"]
+    fd = rec.events[-1]
+    assert fd.path == "a.py" and "-x" in fd.diff and "+y" in fd.diff
+
+
+def test_a_failed_edit_produces_no_diff():
+    rt = ClaudeRuntime(ChatConfig()); rec = Recorder()
+    rt.handle_line({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Write",
+                    "input": {"file_path": "a.py", "content": "x"}}]}}, rec.emit, rec, lambda _: None)
+    rt.handle_line({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1",
+                    "content": "EACCES", "is_error": True}]}}, rec.emit, rec, lambda _: None)
+    assert "FileDiff" not in rec.kinds()
+
+
+def test_a_read_tool_produces_no_diff():
+    rt = ClaudeRuntime(ChatConfig()); rec = Recorder()
+    rt.handle_line({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Read",
+                    "input": {"file_path": "a.py"}}]}}, rec.emit, rec, lambda _: None)
+    rt.handle_line({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1",
+                    "content": "text", "is_error": False}]}}, rec.emit, rec, lambda _: None)
+    assert "FileDiff" not in rec.kinds()

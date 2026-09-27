@@ -417,3 +417,42 @@ def test_a_mode_change_during_startup_does_not_reach_the_running_turn(fake, monk
     monkeypatch.setattr(rt, "ensure_server", ensure_and_flip)
     rt.run_turn(SESSION, SID, "hi", "", rec.emit, rec)
     assert f.posts[-1]["agent"] == "plan"
+
+
+# -- FileDiff from an edit's metadata ---------------------------------------------
+
+from tandem.chat.events import FileDiff  # noqa: E402
+
+
+def part_update(**part):
+    return {"type": "message.part.updated", "properties": {"sessionID": SID,
+            "part": {"sessionID": SID, "messageID": "msg_a", "id": "prt_1", "type": "tool", **part}}}
+
+
+def test_a_completed_edit_with_a_metadata_diff_emits_one_file_diff():
+    rt = OpencodeRuntime(ChatConfig(), base_url="http://127.0.0.1:1"); rec = Recorder()
+    st = TurnState(session_id=SID)
+    done = part_update(callID="c1", tool="edit", state={"status": "completed", "input": {"filePath": "/p/a.py"},
+                       "output": "ok", "title": "a.py", "metadata": {"diff": "-a\n+b"}})
+    rt.handle_event(done, st, rec.emit, rec)
+    rt.handle_event(done, st, rec.emit, rec)                     # opencode repeats completed updates
+    kinds = rec.kinds()
+    assert kinds == ["ToolStarted", "ToolOutput", "ToolFinished", "FileDiff"]
+    assert rec.events[-1] == FileDiff("c1", "/p/a.py", "-a\n+b")
+
+
+def test_a_completed_edit_without_a_diff_emits_none():
+    rt = OpencodeRuntime(ChatConfig(), base_url="http://127.0.0.1:1"); rec = Recorder()
+    st = TurnState(session_id=SID)
+    rt.handle_event(part_update(callID="c1", tool="edit", state={"status": "completed",
+                    "input": {"filePath": "/p/a.py"}, "output": "ok"}), st, rec.emit, rec)
+    assert "FileDiff" not in rec.kinds()
+
+
+def test_an_errored_edit_emits_no_diff_and_finishes_once():
+    rt = OpencodeRuntime(ChatConfig(), base_url="http://127.0.0.1:1"); rec = Recorder()
+    st = TurnState(session_id=SID)
+    err = part_update(callID="c1", tool="edit", state={"status": "error", "input": {"filePath": "/p/a.py"},
+                      "error": "denied", "metadata": {"diff": "-a\n+b"}})
+    rt.handle_event(err, st, rec.emit, rec); rt.handle_event(err, st, rec.emit, rec)
+    assert rec.kinds() == ["ToolStarted", "ToolFinished"]
