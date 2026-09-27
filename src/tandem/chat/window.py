@@ -366,8 +366,8 @@ class Window:
         the answers queue, not inside an interruptible turn: interrupting one
         without answering it leaves the worker asleep forever and every later
         prompt queued behind it. Deny first, then interrupt."""
-        if self.composer.mode == "prompt":
-            return False
+        if self.composer.mode not in ("approval", "question"):
+            return False                          # prompt or search: nothing is pending
         self.composer.end_answer()
         self.answers.resolve("deny")
         self.activity.answered()
@@ -406,7 +406,7 @@ class Window:
             # strands a value that silently answers the NEXT request, and the
             # runtime that asked this one is already gone.
             elif isinstance(action, Answer):
-                if self.composer.mode != "prompt":
+                if self.composer.mode in ("approval", "question"):
                     self.composer.end_answer()
                     self.answers.resolve(action.text)
                     self.activity.answered()

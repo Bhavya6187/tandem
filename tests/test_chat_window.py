@@ -511,6 +511,19 @@ def test_a_failed_history_write_is_a_note_not_a_lost_turn(env_factory, monkeypat
     assert "history not saved" in out.text() and "disk full" in out.text()
 
 
+def test_ctrl_c_during_a_search_is_not_a_denial(env_factory):
+    """`search` is a composer mode too: the window must not read it as a
+    pending approval, or Ctrl-C there wipes the draft, prints a false
+    "denied", interrupts the turn and queues a stray deny."""
+    env = env_factory(); w, d, out, answers = make_window(env)
+    w.handle_input(b"my draft")
+    w.handle_input(b"\x12")
+    assert w.handle_input(b"\x03") is True
+    assert d.interrupts == 0 and "denied" not in out.text()
+    assert w.composer.mode == "prompt" and w.composer.text == "my draft"
+    assert answers._q.empty()
+
+
 def test_the_window_opens_with_the_directorys_history(env_factory):
     """Seeded at open: Up recalls a prompt typed in an earlier window here."""
     env = env_factory()

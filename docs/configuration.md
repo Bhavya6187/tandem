@@ -193,7 +193,8 @@ slash command; for opencode a listed command runs through its command
 endpoint, as its TUI would.
 
 Prompts you submit are kept per directory, across windows, in tandem's
-own state store (the newest 500; approval keys and question answers are
+own state store (`~/.tandem/state.db`, in plain text like the CLIs' own
+history files; the newest 500; approval keys and question answers are
 never recorded). Up and Down step through them from the newest, as they
 do within a window; Ctrl-R searches them: type to narrow to the newest
 entry containing the text, Ctrl-R again steps to an older one (wrapping

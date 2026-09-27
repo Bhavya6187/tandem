@@ -819,3 +819,29 @@ def test_an_approval_arriving_mid_search_ends_the_search_first():
     assert feed(c, "y") == [Answer("allow")]          # the key answers; it is not query text
     c.end_answer()
     assert c.text == "" and c.mode == "prompt"       # the answer mode's usual clean slate
+
+
+def test_ctrl_c_while_searching_aborts_the_search_and_emits_nothing():
+    """Ctrl-C is the reflex for leaving a reverse search: it must restore the
+    draft and not reach the window as a CtrlC (which denies, interrupts,
+    and counts toward quitting)."""
+    c = searching()
+    feed(c, "my draft"); feed(c, b"\x12"); feed(c, "dep")
+    assert feed(c, b"\x03") == []
+    assert c.mode == "prompt" and c.text == "my draft"
+    assert feed(c, b"\x03") == [CtrlC()]           # the next one is an ordinary Ctrl-C
+
+
+def test_esc_from_search_restores_the_cursor_position_too():
+    c = searching()
+    feed(c, "abc"); feed(c, b"\x1b[D")               # cursor between b and c
+    feed(c, b"\x12"); feed(c, "dep"); feed(c, b"\x1b")
+    assert c.text == "abc" and c.cur == 2
+
+
+def test_the_search_cursor_column_is_counted_in_cells():
+    c = Composer(history=["修复 the bug"])
+    feed(c, b"\x12"); feed(c, "修复")
+    rows, _, col = c.rows(60, 8)
+    assert rows == ["(search) '修复': 修复 the bug"]
+    assert col == len("(search) '") + 4              # two wide glyphs take four cells

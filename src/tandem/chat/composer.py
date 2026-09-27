@@ -210,7 +210,10 @@ class Composer:
                 continue
             i += 1
             if b == 0x03:
-                actions.append(CtrlC())
+                if self.mode == "search":
+                    self._leave_search(keep=False)     # the reflex for leaving a search: abort it,
+                else:                                  # and nothing reaches the window's Ctrl-C ladder
+                    actions.append(CtrlC())
             elif b == 0x0C:
                 actions.append(Repaint())
             elif b == 0x12:
@@ -509,7 +512,8 @@ class Composer:
             return                                   # an answer row is not a place to search
         if self.candidates:
             self._dismissed = self._locate()[:2]     # the picker closes before the search opens
-        self._search = {"query": "", "pos": None, "saved": self.text, "wrapped": False}
+        self._search = {"query": "", "pos": None, "saved": self.text, "saved_cur": self.cur,
+                        "wrapped": False}
         self._reset_history_cursor()
         self.mode = "search"
         self._find(restart=True)
@@ -546,6 +550,8 @@ class Composer:
         self.mode = "prompt"
         text = self.history[s["pos"]] if keep and s["pos"] is not None else s["saved"]
         self._set(text)
+        if text == s["saved"]:
+            self.cur = min(s["saved_cur"], len(self.buf))   # the draft comes back where it was left
         self._reset_history_cursor()
 
     def _set(self, text: str) -> None:
@@ -636,7 +642,8 @@ class Composer:
             label = ("(search, wrapped) '" if s["wrapped"] else "(search) '") + shown_q + "': "
             cand = self.history[s["pos"]] if s["pos"] is not None else "(no match)"
             row = label + _printable(cand.replace("\n", "⏎"))
-            return [_clip_cells(row, cols)], 0, min(len(label) - 3, cols - 1)
+            after_query = sum(_width(ch) for ch in label[:-3])    # the cursor sits before "': "
+            return [_clip_cells(row, cols)], 0, min(after_query, cols - 1)
         prompt = "? " if self.mode == "question" else "> "
         self._avail = max(1, cols - len(prompt))
         rows, _, (r, col) = self._layout(self._avail)
