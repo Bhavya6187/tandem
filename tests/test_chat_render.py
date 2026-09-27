@@ -791,3 +791,38 @@ def test_history_flushes_text_buffered_before_it():
     s.history([AssistantMessage(source="claude", text="older")], "claude")
     t = out.text()
     assert t.index("pending") < t.index("older")
+
+
+def test_a_note_during_a_split_closing_fence_keeps_the_prose_as_prose():
+    """The closer arrives as "``" then "`": a flush that rendered the partial
+    "``" would leave the reopened fence without its closer, and everything
+    after it would be code. (Codex review of PR 4.)"""
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("```py\nprint(0)\n``"))
+    s.note("queued → codex")
+    s.text_delta(TextDelta("`\n\nDone *now*.\n"))
+    s.turn_finished(TurnFinished("completed", ""))
+    t = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.text())
+    assert "print(0)" in t and "Done now." in t
+    assert "*now*" not in t and "```" not in t and "``" not in t.split("Done now.")[0].split("codex")[1]
+
+
+def test_a_partial_opener_before_a_note_still_opens_the_fence():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("Look:\n\n``"))
+    s.note("queued → codex")
+    s.text_delta(TextDelta("`py\nx = 1\n```\n\nText *here*.\n"))
+    s.turn_finished(TurnFinished("completed", ""))
+    t = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.text())
+    assert "x = 1" in t and "Text here." in t and "```" not in t
+
+
+def test_a_prose_fragment_still_flushes_before_a_tool_row():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("Let me check the file"))
+    s.tool_started(ToolStarted("c1", "Read", "x.py"))
+    t = out.text()
+    assert t.index("Let me check the file") < t.index("▸ Read")

@@ -75,6 +75,7 @@ def _clip(text: str, cells: int) -> str:
 
 
 _CLOSING = {"completed": "✓ done", "interrupted": "■ interrupted", "failed": "✗ failed"}
+_FENCE_START = re.compile(r"^ {0,3}[`~]")        # a partial line that may still become a fence
 
 
 class Screen:
@@ -215,26 +216,42 @@ class Screen:
             if self._md_spaced:
                 self.line()
 
-    def _flush_md(self) -> None:
+    def _flush_md(self, *, final: bool = False) -> None:
         """Whatever is buffered goes out now: something else is about to
-        reach the region, or the turn is over. Idempotent. Inside an open
-        code fence the block is closed for rendering and the fence reopened
-        for what follows, so a note mid-block cannot turn the rest of the
-        reply into code."""
-        text, self._md = self._md, ""
+        reach the region, or (`final`) the turn is over. Idempotent.
+
+        Mid-stream, inside an open code fence the complete lines are closed
+        for rendering and the fence reopened for what follows, so a note
+        mid-block cannot turn the rest of the reply into code — and the
+        unterminated last line stays buffered when it is inside the fence
+        or could be the start of one ("``" arriving before its third
+        backtick), since rendering half a marker would lose the fence. A
+        plain prose fragment goes out at once: it belongs before the tool
+        row that interrupted it."""
+        text = self._md
         if not text:
             return
-        opener = open_fence(text)
+        if final:
+            self._md = ""
+            self._render_md(text)
+            return
+        head, _, tail = text.rpartition("\n")
+        head = head + "\n" if head or text.endswith("\n") else ""
+        opener = open_fence(head)
+        if opener is None and not _FENCE_START.match(tail):
+            head, tail = text, ""                   # prose: the fragment goes out too
+        self._md = tail
         if opener is not None:
             marker = opener.strip()[0]
             run = len(opener.strip()) - len(opener.strip().lstrip(marker))
             closer = " " * (len(opener) - len(opener.lstrip())) + marker * run
-            text = text + ("" if text.endswith("\n") else "\n") + closer + "\n"
-            self._md = opener + "\n"
-        self._render_md(text)
+            head = head + closer + "\n"
+            self._md = opener + "\n" + tail
+        if head:
+            self._render_md(head)
 
     def turn_started(self, ev: TurnStarted) -> None:
-        self._flush_md()
+        self._flush_md(final=True)
         self._md = ""                   # an interrupted turn leaves nothing for the next
         self._md_any, self._md_spaced = False, True
         self._turn_harness = ev.harness
@@ -369,7 +386,7 @@ class Screen:
         """Every turn gets a closing row, a completed one with nothing to
         report included: the region is append-only, and without it a finished
         answer and a model gone quiet look the same."""
-        self._flush_md()
+        self._flush_md(final=True)
         if self._col:
             self.print("\n")
         bits = [_CLOSING.get(ev.status, _safe(ev.status))]
@@ -425,7 +442,7 @@ class Screen:
         """Paint transcript events the adapters already parsed, tagged by the
         harness whose file they came from (translated turns carry their own
         `[via …]` marker in the text)."""
-        self._flush_md()                # nothing buffered may land after what is painted here
+        self._flush_md(final=True)      # nothing buffered may land after what is painted here
         for ev in events:
             if isinstance(ev, UserMessage):
                 self.turn_started(TurnStarted(source, "", ev.text))
@@ -443,7 +460,7 @@ class Screen:
                 text = _safe(first_line(ev.output))
                 if text:
                     self.line(self._dim("    " + text))
-        self._flush_md()
+        self._flush_md(final=True)
 
     # -- bottom block ------------------------------------------------------------
 
