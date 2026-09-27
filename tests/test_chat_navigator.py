@@ -717,6 +717,18 @@ def test_a_post_that_raises_in_settle_round_still_returns_the_note(tmp_path):
     assert note is not None and NavigatorLog.read(log.path)[-1]["verdict"] == "speak"
 
 
+def test_a_failed_round_review_posts_a_notice_but_an_interrupted_one_does_not(tmp_path):
+    from tandem.chat.events import Notice
+    nav, _, posted, _ = make_nav([], tmp_path, cfg=turn_cfg(), dispatch=lambda f: None)
+    facts = facts_with(paths=("a.py",))
+    assert nav.settle_round(facts, Verdict("error", error="boom", navigator="codex")) is None
+    assert [type(e).__name__ for e in posted] == ["Notice", "ReviewFinished"]
+    assert isinstance(posted[0], Notice) and posted[0].text == "codex review failed: boom"
+    posted.clear()
+    assert nav.settle_round(facts, Verdict("error", error="interrupted", navigator="codex")) is None
+    assert [type(e).__name__ for e in posted] == ["ReviewFinished"]
+
+
 def test_followup_prompt_starts_with_the_tandem_marker_and_is_never_reviewed():
     note = Note("r", "codex", "claude", Verdict("speak", severity="block", note="bad loop",
                                                  evidence=(Evidence("s.py", 12, "w"), Evidence("t.py", 3))))

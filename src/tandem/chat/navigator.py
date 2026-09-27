@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .. import paths
-from .events import (ApprovalRequest, Evidence, Failure, LiveEvent, QuestionRequest, ReviewFinished,
+from .events import (ApprovalRequest, Evidence, Failure, LiveEvent, Notice, QuestionRequest, ReviewFinished,
                      ReviewStarted, TextDelta, ToolFinished, ToolStarted, Verdict)
 
 # the command tool as each client names it (tandem's own labels for codex)
@@ -507,6 +507,10 @@ class Navigator:
             with self._lock:
                 self._last_spoken_ref = ref
         try:
+            # the user watched the review run as a turn: say why it ended
+            # with nothing, where the bar and prompt modes stay silent
+            if verdict.verdict == "error" and verdict.error != "interrupted":
+                self.post(Notice(f"{self.harness} review failed: {verdict.error}"))
             self.post(ReviewFinished(self.harness, verdict))
         except Exception:
             pass                                   # the window is gone; the log has it
