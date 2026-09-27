@@ -25,10 +25,11 @@ from typing import Callable
 from unicodedata import east_asian_width
 
 from ..events import AssistantMessage, ToolCall, ToolResult, UserMessage
-from .events import (ApprovalRequest, Failure, QuestionRequest, ReviewFinished, TextDelta,
+from .events import (ApprovalRequest, Failure, FileDiff, QuestionRequest, ReviewFinished, TextDelta,
                      ThinkingDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished, TurnStarted,
                      offered_labels)
 from .activity import elapsed_text
+from .markdown import ready_blocks, render_markdown
 from .runtime import first_line, summarize_args
 
 _CSI = "\x1b["
@@ -93,6 +94,7 @@ class Screen:
         self._tool_held: dict[str, list[str]] = {}
         self._tool_dropped: dict[str, int] = {}
         self._tool_partial: dict[str, str] = {}      # the unterminated tail of a call's output
+        self._md = ""                   # the streaming reply not yet rendered (markdown on)
 
     @property
     def region_rows(self) -> int:
@@ -188,7 +190,33 @@ class Screen:
             self.line(self._bold(self._turn_harness))
             self._speaker_shown = True
 
+    # -- markdown ----------------------------------------------------------------
+
+    def _render_md(self, text: str) -> None:
+        """One finished block. A block that ended on a blank line gets a
+        blank row after it: rich only spaces blocks it renders together, and
+        the streamed reply must read like the whole would."""
+        if not text.strip():
+            return
+        self._ensure_speaker()
+        if self._col:
+            self.print("\n")
+        rows = render_markdown(text, self.cols, self.color)
+        if rows:
+            self.print("\n".join(rows) + "\n")
+            if text.endswith("\n\n"):
+                self.line()
+
+    def _flush_md(self) -> None:
+        """Whatever is buffered goes out now: something else is about to
+        reach the region, or the turn is over. Idempotent."""
+        text, self._md = self._md, ""
+        if text:
+            self._render_md(text)
+
     def turn_started(self, ev: TurnStarted) -> None:
+        self._flush_md()
+        self._md = ""                   # an interrupted turn leaves nothing for the next
         self._turn_harness = ev.harness
         self._speaker_shown = False
         self._tool_lines.clear(); self._tool_held.clear(); self._tool_dropped.clear()
@@ -205,15 +233,23 @@ class Screen:
             self.line(self._dim(f"  + navigator note: {_safe(ev.carried)}"))
 
     def text_delta(self, ev: TextDelta) -> None:
-        self._ensure_speaker()
-        self.print(_safe(ev.text))
+        if not self.cfg.markdown:
+            self._ensure_speaker()
+            self.print(_safe(ev.text))
+            return
+        self._md += _safe(ev.text)
+        ready, self._md = ready_blocks(self._md)
+        if ready:
+            self._render_md(ready)
 
     def thinking_delta(self, ev: ThinkingDelta) -> None:
+        self._flush_md()
         if self.cfg.show_thinking:
             self._ensure_speaker()
             self.print(self._dim(_safe(ev.text)))
 
     def tool_started(self, ev: ToolStarted) -> None:
+        self._flush_md()
         self._ensure_speaker()
         self._tool_lines[ev.call_id] = 0
         self._tool_held[ev.call_id] = []
@@ -230,6 +266,7 @@ class Screen:
         Output streams in arbitrary chunks, so a line counts when its newline
         arrives; the unterminated tail waits for the next chunk, or for
         tool_finished."""
+        self._flush_md()
         buf = self._tool_partial.get(ev.call_id, "") + ev.text
         *lines, self._tool_partial[ev.call_id] = buf.split("\n")
         for line in lines:
@@ -248,6 +285,7 @@ class Screen:
                 self._tool_dropped[call_id] = self._tool_dropped.get(call_id, 0) + 1
 
     def tool_finished(self, ev: ToolFinished) -> None:
+        self._flush_md()
         tail = self._tool_partial.pop(ev.call_id, "")
         if tail:
             self._tool_line(ev.call_id, tail)
@@ -265,11 +303,41 @@ class Screen:
         summary = _safe(ev.summary)
         self.line(self._dim(f"    {status}" + (f" · {summary}" if summary else "")))
 
+    def file_diff(self, ev: FileDiff) -> None:
+        """An edit's diff under its tool row: `---` path dim, `+` green,
+        `-` red, `@@` dim, the rest plain; four cells in, clipped, capped."""
+        self._flush_md()
+        cap = self.cfg.diff_lines
+        if cap <= 0:
+            return
+        self.line(self._dim(f"    --- {_safe(ev.path)}"))
+        lines = _safe(ev.diff).split("\n")
+        for raw in lines[:cap]:
+            row = _clip(raw, max(1, self.cols - 5))
+            if raw.startswith("+"):
+                self.line(self._green("    " + row))
+            elif raw.startswith("-"):
+                self.line(self._red("    " + row))
+            elif raw.startswith("@@"):
+                self.line(self._dim("    " + row))
+            else:
+                self.line("    " + row)
+        if len(lines) > cap:
+            self.line(self._dim(f"    … +{len(lines) - cap} lines"))
+
+    def _green(self, s: str) -> str:
+        return f"{_CSI}32m{s}{_CSI}0m" if self.color else s
+
+    def _red(self, s: str) -> str:
+        return f"{_CSI}31m{s}{_CSI}0m" if self.color else s
+
     def approval(self, ev: ApprovalRequest) -> None:
+        self._flush_md()
         self.line(self._bold(f"  ▸ Allow {_safe(ev.kind)}: {_safe(ev.detail)}")
                   + "   " + offered_labels(ev.choices))
 
     def question(self, ev: QuestionRequest) -> None:
+        self._flush_md()
         self.line(self._bold(f"  ? {_safe(ev.prompt)}"))
         for i, option in enumerate(ev.options, 1):
             self.line(f"    {i}. {_safe(option)}")
@@ -280,6 +348,7 @@ class Screen:
         """Every turn gets a closing row, a completed one with nothing to
         report included: the region is append-only, and without it a finished
         answer and a model gone quiet look the same."""
+        self._flush_md()
         if self._col:
             self.print("\n")
         bits = [_CLOSING.get(ev.status, _safe(ev.status))]
@@ -292,6 +361,7 @@ class Screen:
     def failure(self, ev: Failure) -> None:
         # a failure message is usually the harness's own: a stderr tail, a
         # provider error, a protocol line tandem could not read
+        self._flush_md()
         self.line(self._bold("error: ") + _safe(ev.message))
 
     def review(self, ev: ReviewFinished) -> None:
@@ -299,6 +369,7 @@ class Screen:
         empty read as clean — nothing to act on), the note in full when
         spoken, one line when the navigator switched itself off, nothing
         for a failed review (it is in the log)."""
+        self._flush_md()
         v = ev.verdict
         if v.verdict == "error":
             return
@@ -323,6 +394,7 @@ class Screen:
     def note(self, text: str) -> None:
         """A dim line outside any turn. Sanitized like every other painter:
         a `/model` row or a `/help` description is the harness's text."""
+        self._flush_md()
         self.line(self._dim(_safe(text)))
 
     def bell(self) -> None:
@@ -337,8 +409,11 @@ class Screen:
                 self.turn_started(TurnStarted(source, "", ev.text))
             elif isinstance(ev, AssistantMessage):
                 self._turn_harness = source
-                self._ensure_speaker()
-                self.line(_safe(ev.text))
+                if self.cfg.markdown:
+                    self._render_md(_safe(ev.text) + "\n")
+                else:
+                    self._ensure_speaker()
+                    self.line(_safe(ev.text))
             elif isinstance(ev, ToolCall):
                 summary = summarize_args(ev.tool, ev.arguments)
                 self.line(self._dim(f"  ▸ {_safe(ev.tool)} {_safe(summary)}".rstrip()))
@@ -346,6 +421,7 @@ class Screen:
                 text = _safe(first_line(ev.output))
                 if text:
                     self.line(self._dim("    " + text))
+        self._flush_md()
 
     # -- bottom block ------------------------------------------------------------
 

@@ -45,6 +45,14 @@ class ToolFinished:
 
 
 @dataclass(frozen=True)
+class FileDiff:
+    """One edit's diff, painted under its tool row after ToolFinished."""
+    call_id: str
+    path: str
+    diff: str        # unified diff text, hunks included, no file header needed
+
+
+@dataclass(frozen=True)
 class ApprovalRequest:
     kind: str           # "command" | "file_change" | "permission"
     detail: str
@@ -144,7 +152,7 @@ class Idle:
     """The dispatcher finished its post-turn work; the window may pump."""
 
 
-LiveEvent = Union[TextDelta, ThinkingDelta, ToolStarted, ToolOutput, ToolFinished,
+LiveEvent = Union[TextDelta, ThinkingDelta, ToolStarted, ToolOutput, ToolFinished, FileDiff,
                   ApprovalRequest, QuestionRequest, TurnStarted, TurnFinished,
                   Failure, Notice, LimitsUpdate, ReviewStarted, ReviewFinished, Idle]
 
