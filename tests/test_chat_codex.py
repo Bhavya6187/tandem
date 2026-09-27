@@ -549,6 +549,22 @@ def test_an_output_schema_rides_turn_start(env):
     assert "outputSchema" not in env.params("turn/start")
 
 
+def test_a_review_turn_is_read_only_never_approves_and_carries_the_schema(env):
+    rt = CodexRuntime(ChatConfig(skip_permissions=True, codex_sandbox="workspace-write"),
+                      binary=[sys.executable, str(FAKE)])
+    rec = Recorder("allow")
+    rt.run_turn(env.session, "thread-1", "review", "gpt-5.5", rec.emit, rec, review={"type": "object"})
+    assert env.params("thread/resume") == {"threadId": "thread-1", "cwd": env.session.cwd,
+                                           "approvalPolicy": "never", "sandbox": "read-only"}
+    assert env.params("turn/start")["outputSchema"] == {"type": "object"}
+    assert env.params("turn/start")["model"] == "gpt-5.5"
+    # the same runtime, next turn, is the window's again
+    (env.tmp / "params.jsonl").unlink()
+    rt.run_turn(env.session, "thread-1", "go", "", rec.emit, rec)
+    assert env.params("thread/resume")["sandbox"] == "workspace-write"
+    assert "outputSchema" not in env.params("turn/start")
+
+
 def test_rate_limits_updated_carries_windows():
     rt = CodexRuntime(ChatConfig())
     rec = Recorder()

@@ -516,7 +516,7 @@ class CodexRuntime:
 
     def run_turn(self, session, native_id: str | None, prompt: str, model: str,
                  emit: Callable[[LiveEvent], None], answers: Answers,
-                 command: str = "") -> TurnOutcome:
+                 command: str = "", review: dict | None = None) -> TurnOutcome:
         cfg = self.cfg                 # the mode this turn runs under, whatever /mode says later
         self._interrupted = False
         self._compacting = command == "compact"
@@ -557,6 +557,9 @@ class CodexRuntime:
                 overrides["approvalPolicy"] = cfg.codex_approval_policy
             if cfg.codex_sandbox:
                 overrides["sandbox"] = cfg.codex_sandbox
+            if review is not None:
+                # a review never inherits the window's mode or its codex_* keys
+                overrides = {"approvalPolicy": "never", "sandbox": "read-only"}
             if native_id:
                 params = cp.ThreadResumeParams(threadId=native_id, cwd=session.cwd, **overrides)
                 r = self._call(proc, q, "thread/resume", params.model_dump(by_alias=True, exclude_none=True), emit, answers)
@@ -585,7 +588,8 @@ class CodexRuntime:
                     return fail(str(r["error"].get("message", r["error"])))
             else:
                 turn = cp.TurnStartParams(threadId=thread_id, input=[{"type": "text", "text": prompt}],
-                                          model=model or None, outputSchema=self.output_schema)
+                                          model=model or None,
+                                          outputSchema=review if review is not None else self.output_schema)
                 r = self._call(proc, q, "turn/start", turn.model_dump(by_alias=True, exclude_none=True), emit, answers)
                 if "error" in r:
                     return fail(str(r["error"].get("message", r["error"])))
