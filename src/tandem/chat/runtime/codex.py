@@ -128,6 +128,7 @@ class CodexRuntime:
         self._lock = threading.Lock()
         self._n = 0
         self._interrupted = False
+        self._interrupt_pending = False     # Ctrl-C before turn/start returned a turn id
         self._thread_id: str | None = None
         self._turn_id: str | None = None
         self._usage = ""
@@ -518,7 +519,8 @@ class CodexRuntime:
                  emit: Callable[[LiveEvent], None], answers: Answers,
                  command: str = "", review: dict | None = None) -> TurnOutcome:
         cfg = self.cfg                 # the mode this turn runs under, whatever /mode says later
-        self._interrupted = False
+        with self._lock:
+            self._interrupted = self._interrupt_pending = False
         self._compacting = command == "compact"
         self._usage = ""
         self._thread_id = self._turn_id = None
@@ -593,16 +595,31 @@ class CodexRuntime:
                 r = self._call(proc, q, "turn/start", turn.model_dump(by_alias=True, exclude_none=True), emit, answers)
                 if "error" in r:
                     return fail(str(r["error"].get("message", r["error"])))
+                drift = None
                 try:
-                    self._turn_id = cp.TurnStartResponse.model_validate(r.get("result")).turn.id
+                    turn_id = cp.TurnStartResponse.model_validate(r.get("result")).turn.id
                 except ValidationError as exc:
                     # only turn.id is load-bearing here (interrupt needs it), so a
                     # response that drifts elsewhere still starts a usable turn
-                    self._turn_id = ((r.get("result") or {}).get("turn") or {}).get("id")
-                    if not self._turn_id:
-                        return fail("turn/start returned no turn id")
+                    turn_id = ((r.get("result") or {}).get("turn") or {}).get("id")
+                    drift = exc
+                # the id and the pending flag change hands under one lock: an
+                # interrupt() between the two would otherwise see no turn id,
+                # park itself as pending, and never be read again
+                with self._lock:
+                    self._turn_id = turn_id
+                    pending, self._interrupt_pending = self._interrupt_pending, False
+                if not turn_id:
+                    return fail("turn/start returned no turn id")
+                if drift is not None:
                     emit(Failure(f"codex sent a response tandem cannot parse: "
-                                 f"turn/start: {first_line(str(exc))}"))
+                                 f"turn/start: {first_line(str(drift))}"))
+                if pending:
+                    # _interrupted is already set, so a turn that completes
+                    # before this lands still reports interrupted
+                    self._request(proc, "turn/interrupt",
+                                  cp.TurnInterruptParams(threadId=thread_id, turnId=turn_id)
+                                  .model_dump(by_alias=True, exclude_none=True))
             # one deadline for the whole compact, not a wait per message: a
             # server that keeps sending usage updates but never completes
             # must still end
@@ -631,6 +648,14 @@ class CodexRuntime:
         with self._lock:
             proc = self._proc
             thread_id, turn_id = self._thread_id, self._turn_id
+            if proc is not None and proc.poll() is None and not (thread_id and turn_id) \
+                    and not self._compacting:
+                # the turn has not been acknowledged yet (spawn, initialize,
+                # thread/resume): run_turn sends the interrupt the moment
+                # turn/start returns a turn id. Set under the lock run_turn
+                # reads it under, so the two cannot pass each other.
+                self._interrupted = self._interrupt_pending = True
+                return
         if proc is None or proc.poll() is not None:
             return
         if not (thread_id and turn_id):

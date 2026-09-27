@@ -240,6 +240,26 @@ def test_interrupt(env, monkeypatch):
     assert env.params("turn/interrupt") == {"threadId": "t", "turnId": "turn-1"}
 
 
+def test_an_interrupt_before_turn_start_is_sent_once_the_turn_id_arrives(env, monkeypatch):
+    """Ctrl-C while the app-server is still starting (spawn, initialize,
+    thread/resume) has no turn id to send: it must wait for one, not vanish."""
+    monkeypatch.setenv("FAKE_CODEX_SCENARIO", "interrupt")
+    rec = Recorder(); rt = env.runtime
+    real_call = rt._call
+
+    def interrupt_during_resume(proc, q, method, params, emit, answers, timeout=60.0):
+        if method == "thread/resume":
+            rt.interrupt()
+        return real_call(proc, q, method, params, emit, answers, timeout)
+
+    monkeypatch.setattr(rt, "_call", interrupt_during_resume)
+    out = rt.run_turn(env.session, "t", "go", "", rec.emit, rec)
+    assert out.status == "interrupted"
+    assert env.params("turn/interrupt") == {"threadId": "t", "turnId": "turn-1"}
+    methods = [json.loads(l)["method"] for l in (env.tmp / "params.jsonl").read_text().splitlines()]
+    assert methods.index("turn/interrupt") > methods.index("turn/start")
+
+
 def test_question_round_trip(env, monkeypatch):
     monkeypatch.setenv("FAKE_CODEX_SCENARIO", "question")
     rec = Recorder(answer="blue")
