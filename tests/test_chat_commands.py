@@ -9,7 +9,7 @@ def test_window_commands_come_first_with_descriptions():
     names = [c.name for c in got[: len(WINDOW)]]
     assert names == [c.name for c in WINDOW]
     assert all(c.description and c.origin == "tandem" for c in got[: len(WINDOW)])
-    assert {"help", "status", "compact", "model", "skip-permissions", "note", "quit"} <= set(names)
+    assert {"help", "status", "mode", "compact", "model", "skip-permissions", "note", "quit"} <= set(names)
 
 
 def test_routes_follow_one_per_participant():

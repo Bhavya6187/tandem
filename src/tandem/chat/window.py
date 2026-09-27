@@ -19,7 +19,7 @@ import time
 import tty
 from typing import Callable
 
-from ..config import load_frame_config
+from ..config import MODES, load_frame_config
 from ..events import SessionContext, UserMessage
 from ..frame import StatusBar
 from ..harness import get_adapter
@@ -38,9 +38,11 @@ from .files import list_paths
 from .navigator import Navigator, NavigatorLog, headroom_ok, log_path
 from .render import Screen
 from .reviewers import make_reviewer
+from .runtime.claude import CLAUDE_MODES
+from .runtime.codex import CODEX_MODES
 from .runtime.factory import make_runtimes
 
-WINDOW_COMMANDS = ("/quit", "/status", "/skip-permissions", "/note", "/help")
+WINDOW_COMMANDS = ("/quit", "/status", "/skip-permissions", "/note", "/help", "/mode")
 _BUSY_TICK = 0.12            # the spinner's frame is 0.1 s; slower and it visibly skips
 _LONG_TURN_SECONDS = 15.0    # a turn this long ends with the bell
 
@@ -133,7 +135,7 @@ class Window:
         default = self.dispatcher.default
         self.bar.active = default
         self.bar.others = [h for h in self.session.participants if h != default]
-        marks = {h: "skip-perms" for h in self._skipping()}
+        marks = self.mode_marks()
         nav = self.navigator
         if nav is not None:
             word = nav.mark()
@@ -144,27 +146,63 @@ class Window:
         usage = meter.state.get("text", "") if meter is not None else ""
         return self.bar.line(False, usage, self.usage_state.get("limits") or {})
 
-    def _skipping(self) -> list[str]:
-        """The harnesses whose next turn asks nothing. opencode never: the
-        setting does not reach it. codex only while no explicit
-        `[chat] codex_approval_policy` overrules the default it sets."""
-        if not self.cfg.skip_permissions:
-            return []
-        skipping = ["claude"]
-        if self.cfg.codex_approval_policy in ("", "never"):
-            skipping.append("codex")
-        return skipping
+    def mode_marks(self) -> dict[str, str]:
+        """The bar's word per harness: the mode for every mode but ask; `?`
+        when the harness cannot honor it and runs as ask (opencode has no
+        edits or skip); `cfg` when an explicit `[chat] codex_*` key decides
+        codex's column instead of the mode."""
+        mode = self.cfg.effective_mode
+        if mode == "ask":
+            return {}
+        marks = {}
+        for h in self.session.participants:
+            if h == "codex" and (self.cfg.codex_approval_policy or self.cfg.codex_sandbox):
+                marks[h] = "cfg"
+            elif h == "opencode" and mode != "plan":
+                marks[h] = f"{mode}?"
+            else:
+                marks[h] = mode
+        return marks
+
+    def _harness_words(self) -> list[str]:
+        """`claude default · codex inherit · opencode build`: what each
+        harness is actually sent for the current mode."""
+        mode = self.cfg.effective_mode
+        claude = CLAUDE_MODES.get(mode, "default")
+        policy, sandbox = CODEX_MODES.get(mode, ("", ""))
+        policy = self.cfg.codex_approval_policy or policy
+        sandbox = self.cfg.codex_sandbox or sandbox
+        codex = f"{policy or 'inherit'}/{sandbox}" if sandbox else (policy or "inherit")
+        opencode = "plan" if mode == "plan" else ("build" if mode == "ask" else f"{mode}?")
+        return [f"claude {claude}", f"codex {codex}", f"opencode {opencode}"]
+
+    def mode_line(self) -> str:
+        return " · ".join([f"mode {self.cfg.effective_mode}", *self._harness_words()])
+
+    def set_mode(self, mode: str) -> None:
+        """`/mode WORD` and the `/skip-permissions` alias. This window only,
+        like the launch flag: nothing is written to the config. A turn
+        already running keeps the mode it started under."""
+        self.cfg = self.cfg.with_mode(mode)
+        self.dispatcher.set_cfg(self.cfg)
+        self.screen.note(f"mode {mode} from the next turn · " + " · ".join(self._harness_words()))
+
+    def mode_command(self, arg: str) -> None:
+        if arg == "":
+            self.screen.note(self.mode_line())
+        elif arg in MODES:
+            self.set_mode(arg)
+        else:
+            self.screen.note("usage: /mode [ask|edits|plan|skip]")
 
     def set_skip_permissions(self, arg: str) -> None:
-        """`/skip-permissions [on|off]`, bare = the other way. This window
-        only, like the launch flag: nothing is written to the config."""
+        """The alias: `on` is `/mode skip`, `off` is `/mode ask`, bare flips
+        skip-ness — from any mode that is not skip, to skip."""
         if arg not in ("", "on", "off"):
             self.screen.note("usage: /skip-permissions [on|off]")
             return
-        skip = arg == "on" if arg else not self.cfg.skip_permissions
-        self.cfg = dataclasses.replace(self.cfg, skip_permissions=skip)
-        self.dispatcher.set_cfg(self.cfg)
-        self.screen.note(f"permissions {'skipped' if skip else 'asked'} from the next turn")
+        skip = arg == "on" if arg else self.cfg.effective_mode != "skip"
+        self.set_mode("skip" if skip else "ask")
 
     def note_command(self, arg: str) -> None:
         """`/note` shows the pending note in full; `dismiss` drops it; `good`
@@ -215,8 +253,8 @@ class Window:
                 if self.dispatcher.pin(h)]
         if pins:
             parts.append("pins: " + ", ".join(pins))
-        if self.cfg.skip_permissions:
-            parts.append("permissions skipped")
+        if self.cfg.effective_mode != "ask":
+            parts.append(self.mode_line())
         if self.navigator is not None:
             parts.append(f"navigator {self.navigator.harness} · {self.cfg.navigator_deliver}")
         return " · ".join(parts)
@@ -389,6 +427,9 @@ class Window:
                     continue
                 if command == "/skip-permissions":
                     self.set_skip_permissions(action.text.strip()[len(command):].strip())
+                    continue
+                if command == "/mode":
+                    self.mode_command(action.text.strip()[len(command):].strip())
                     continue
                 if command == "/note":
                     self.note_command(action.text.strip()[len(command):].strip())
