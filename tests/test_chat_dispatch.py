@@ -10,7 +10,8 @@ import pytest
 
 from tandem.chat import dispatch
 from tandem.chat.dispatch import Dispatcher
-from tandem.chat.events import Failure, Idle, Notice, TextDelta, TurnFinished, TurnOutcome, TurnStarted
+from tandem.chat.events import (Failure, Idle, Notice, TextDelta, ToolStarted, TurnFinished, TurnOutcome,
+                               TurnStarted)
 from tandem.harness import get_adapter
 from tandem.sync import SyncSetupError
 from tandem.util import read_jsonl
@@ -39,7 +40,8 @@ class FakeRuntime:
     a model call that errors out (a 401, say) leaves in the transcript: the
     prompt is there, no reply ever follows it."""
 
-    def __init__(self, harness, env, *, block=None, fresh_id=None, half_turn=False, fail_models=False):
+    def __init__(self, harness, env, *, block=None, fresh_id=None, half_turn=False, fail_models=False,
+                 review_reply='{"verdict": "clean"}', paths=()):
         self.harness = harness
         self.env = env
         self.calls = []
@@ -49,29 +51,38 @@ class FakeRuntime:
         self.interrupts = 0
         self.models = None if fail_models else [f"{harness}-a  first", f"{harness}-b  second"]
         self.harness_commands = []
+        self.review_reply = review_reply
+        self.last_answers = None
+        self.paths = paths      # files a non-review turn reports editing (what a review is told about)
 
     def list_models(self, session):
         if self.models is None:
             raise RuntimeError("no catalog")
         return list(self.models)
 
-    def run_turn(self, session, native_id, prompt, model, emit, answers, command=""):
-        self.calls.append((native_id, prompt, model) if not command else (native_id, prompt, model, command))
+    def run_turn(self, session, native_id, prompt, model, emit, answers, command="", review=None):
+        call = (native_id, prompt, model)
+        if command:
+            call += (command,)
+        if review is not None:
+            call += (review,)
+        self.calls.append(call)
+        self.last_answers = answers
         if self.block is not None:
             self.block.wait(5)
-        emit(TextDelta(f"{self.harness} says hi"))
+        reply = self.review_reply if review is not None else f"{self.harness} did {prompt}"
+        if self.paths and review is None:
+            emit(ToolStarted(f"t-{len(self.calls)}", "Edit", ", ".join(self.paths), paths=tuple(self.paths)))
+        emit(TextDelta(reply if review is not None else f"{self.harness} says hi"))
         if self.harness == "claude":
             write_line(self.env.claude_shadow, claude_user(prompt, uuid=f"u-{len(self.calls)}"))
             if not self.half_turn:
                 write_line(
                     self.env.claude_shadow,
-                    claude_assistant(
-                        [{"type": "text", "text": f"claude did {prompt}"}],
-                        uuid=f"a-{len(self.calls)}",
-                    ),
+                    claude_assistant([{"type": "text", "text": reply}], uuid=f"a-{len(self.calls)}"),
                 )
         elif self.harness == "codex" and native_id:
-            entries = codex_turn(prompt, f"codex did {prompt}")
+            entries = codex_turn(prompt, reply)
             for obj in entries[:2] if self.half_turn else entries:
                 write_line(self.env.codex_shadow, obj)
         if self.half_turn:
@@ -1080,3 +1091,277 @@ def test_model_with_a_spaced_name_is_an_error_not_a_turn(env_factory):
     got = d.submit("/model gpt 5.5")
     assert got.startswith("error:") and "one model name" in got
     assert d.pin("claude") == "" and runtimes["claude"].calls == []
+
+
+# -- turn mode: the review round ---------------------------------------------------
+
+from types import SimpleNamespace
+
+from tandem.chat.events import ReviewFinished
+from tandem.chat.navigator import SCHEMA, DenyAll, TurnFacts
+from tandem.config import ChatConfig
+
+SPEAK = json.dumps({"verdict": "speak", "severity": "block", "note": "bad loop",
+                    "evidence": [{"file": "s.py", "line": 12, "why": "w"}]})
+
+
+def facts_for(harness="claude", prompt="fix it"):
+    return TurnFacts(harness, prompt, False, False, "completed", ("s.py",), 0, 0, "", 0.0, 1.0)
+
+
+class RoundNavigator:
+    """A turn-mode navigator with no gate of its own: the first `rounds`
+    completed non-tandem turns go to the dispatcher's queue (the real gate
+    would skip the quiet ones), and a settled verdict comes back as the
+    note to act on. Records everything; posts nothing."""
+
+    def __init__(self, harness="codex", rounds=1):
+        self.harness = harness
+        self.cfg = ChatConfig(navigator=harness, navigator_deliver="turn", navigator_model="rev-model")
+        self.shadow_lock = threading.Lock()
+        self.dispatch = None
+        self.rounds = rounds
+        self.ended, self.settled, self.rides, self.closed = [], [], [], 0
+        self.log = SimpleNamespace(ridden=lambda ref, to: self.rides.append((ref, to)))
+
+    def take(self, harness):
+        return None
+
+    def give_back(self, note):
+        pass
+
+    def turn_ended(self, facts, session):
+        self.ended.append(facts)
+        if facts.status == "completed" and not facts.prompt.startswith("[tandem") and self.rounds > 0:
+            self.rounds -= 1
+            self.dispatch(facts)
+
+    def settle_round(self, facts, verdict):
+        self.settled.append(verdict)
+        return Note("ref-9", self.harness, facts.harness, verdict) if verdict.spoken else None
+
+    def close(self):
+        self.closed += 1
+
+
+def round_setup(env, nav, runtimes):
+    """A dispatcher wired the way run_chat wires it, whose emit pumps on
+    Idle as the window does. Returns (dispatcher, events)."""
+    events, holder = [], {}
+
+    def emit(ev):
+        events.append(ev)
+        if isinstance(ev, Idle):
+            holder["d"].pump()
+
+    d = holder["d"] = Dispatcher(env.store, env.session, runtimes, emit, Answers(), navigator=nav)
+    nav.dispatch = d.start_round
+    return d, events
+
+
+def starts(events):
+    return [(e.harness, e.kind, e.peer, e.carried) for e in events if isinstance(e, TurnStarted)]
+
+
+def test_a_round_runs_review_then_followup_ahead_of_what_was_typed(env_factory):
+    env = env_factory(active="claude")
+    env.store.set_pin(env.session.tandem_id, "claude", "opus")
+    nav = RoundNavigator()
+    gate = threading.Event()
+    rts = {"claude": FakeRuntime("claude", env, block=gate, review_reply=SPEAK, paths=("s.py",)),
+           "codex": FakeRuntime("codex", env, review_reply=SPEAK)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        assert d.submit("fix it") == ""
+        assert d.submit("next") == "queued → claude"
+        gate.set()
+        wait_idle(events, 4)
+        # order: the prompt, its review, the follow-up, then what was typed
+        assert starts(events) == [("claude", "", "", ""), ("codex", "review", "claude", ""),
+                                  ("claude", "followup", "codex", "bad loop"), ("claude", "", "", "")]
+        review = rts["codex"].calls[0]
+        assert review[1].startswith("[tandem navigator] You are reviewing") and "s.py" in review[1]
+        assert review[2] == "rev-model" and review[3] == SCHEMA
+        assert isinstance(rts["codex"].last_answers, DenyAll)
+        assert isinstance(rts["claude"].last_answers, Answers)
+        prompts = [c[1] for c in rts["claude"].calls]
+        assert prompts[0] == "fix it" and prompts[2] == "next"
+        assert prompts[1].startswith("[tandem navigator] codex reviewed your previous turn and flagged (block): bad loop")
+        assert prompts[1].endswith("disagree with and why.") and "s.py:12 — w" in prompts[1]
+        assert rts["claude"].calls[1][2] == "opus"            # the executor's pin
+        assert nav.rides == [("ref-9", "claude")]
+        assert [v.verdict for v in nav.settled] == ["speak"]
+        # the review's JSON was collected, not painted
+        assert not any(isinstance(e, TextDelta) and "verdict" in e.text for e in events)
+        # the follow-up was handed to the gate (and would be skipped there), the review was not
+        assert [f.prompt[:18] for f in nav.ended] == ["fix it", "[tandem navigator]", "next"]
+        assert nav.ended[1].carried_note is True
+        # the review never became the default
+        assert env.store.get_session(env.session.tandem_id).active == "claude"
+        # both transcripts hold the round
+        codex = json.dumps(list(read_jsonl(env.codex_shadow)))
+        assert "[tandem navigator] You are reviewing" in codex and "bad loop" in codex
+        claude = "\n".join(claude_texts(env.claude_shadow))
+        assert "bad loop" in claude and "[tandem navigator] codex reviewed your previous turn" in claude
+    finally:
+        d.close()
+
+
+def test_a_clean_review_ends_the_round_without_a_followup(env_factory):
+    env = env_factory()
+    nav = RoundNavigator()
+    rts = {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it"); d.submit("next")
+        wait_idle(events, 3)
+        assert starts(events) == [("claude", "", "", ""), ("codex", "review", "claude", ""), ("claude", "", "", "")]
+        assert [v.verdict for v in nav.settled] == ["clean"] and nav.rides == []
+        assert [c[1] for c in rts["claude"].calls] == ["fix it", "next"]
+    finally:
+        d.close()
+
+
+def test_a_failed_review_is_an_error_verdict_and_no_followup(env_factory):
+    env = env_factory()
+    nav = RoundNavigator()
+    rts = {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env, half_turn=True)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it")
+        wait_idle(events, 2)
+        assert [(v.verdict, v.error) for v in nav.settled] == [("error", "boom")]
+        assert nav.rides == [] and len(rts["claude"].calls) == 1
+        assert isinstance(events[-1], Idle)
+    finally:
+        d.close()
+
+
+class InterruptedReview(FakeRuntime):
+    def run_turn(self, session, native_id, prompt, model, emit, answers, command="", review=None):
+        if review is None:
+            return super().run_turn(session, native_id, prompt, model, emit, answers, command=command)
+        self.calls.append((native_id, prompt, model, review))
+        emit(TurnFinished("interrupted", ""))
+        return TurnOutcome("interrupted")
+
+
+def test_an_interrupted_review_ends_the_round_without_a_strike(env_factory):
+    env = env_factory()
+    nav = RoundNavigator()
+    rts = {"claude": FakeRuntime("claude", env), "codex": InterruptedReview("codex", env)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it")
+        wait_idle(events, 2)
+        assert [(v.verdict, v.error) for v in nav.settled] == [("error", "interrupted")]
+        assert nav.rides == [] and len(rts["claude"].calls) == 1
+    finally:
+        d.close()
+
+
+def test_an_unparsable_review_reply_is_an_error_and_no_followup(env_factory):
+    env = env_factory()
+    nav = RoundNavigator()
+    rts = {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env, review_reply="no json here")}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it")
+        wait_idle(events, 2)
+        assert nav.settled[0].verdict == "error" and "unparsable" in nav.settled[0].error
+        assert nav.rides == [] and len(rts["claude"].calls) == 1
+    finally:
+        d.close()
+
+
+def test_a_review_whose_sync_fails_is_settled_as_an_error(env_factory, monkeypatch):
+    env = env_factory()
+    nav = RoundNavigator()
+    real = dispatch.ops.sync_after_turn
+
+    def flaky(store, session, target, **kw):
+        if target == "codex":
+            raise dispatch.SyncSetupError("codex boom")
+        return real(store, session, target, **kw)
+
+    monkeypatch.setattr(dispatch.ops, "sync_after_turn", flaky)
+    rts = {"claude": FakeRuntime("claude", env, review_reply=SPEAK), "codex": FakeRuntime("codex", env, review_reply=SPEAK)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it")
+        wait_idle(events, 2)
+        assert nav.settled[0].verdict == "error" and nav.settled[0].error == "sync: codex boom"
+        assert nav.rides == [] and any(isinstance(e, Failure) and e.message.startswith("sync:") for e in events)
+        assert isinstance(events[-1], Idle)
+    finally:
+        d.close()
+
+
+def test_start_round_after_close_queues_nothing(env_factory):
+    env = env_factory()
+    nav = RoundNavigator()
+    rts = {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env)}
+    d = Dispatcher(env.store, env.session, rts, lambda ev: None, Answers(), navigator=nav)
+    d.close()
+    d.start_round(facts_for())
+    assert not d.queue
+
+
+def test_start_round_puts_the_review_ahead_of_the_queue(env_factory):
+    env = env_factory()
+    nav = RoundNavigator()
+    rts = {"claude": FakeRuntime("claude", env), "codex": FakeRuntime("codex", env)}
+    d = Dispatcher(env.store, env.session, rts, lambda ev: None, Answers(), navigator=nav)
+    try:
+        d.queue.append(dispatch.Pending("claude", "", "typed"))
+        d.start_round(facts_for())
+        first = d.queue[0]
+        assert first.kind == "review" and first.harness == "codex" and first.peer == "claude"
+        assert first.model == "rev-model" and first.facts.prompt == "fix it"
+        assert d.queue[1].prompt == "typed"
+    finally:
+        d.close()
+
+
+def test_a_route_typed_during_the_review_outlives_the_followup(env_factory):
+    """`/codex` sent while codex reviews claude moves the default at once.
+    The follow-up that runs next was queued by tandem, not typed, so it
+    must not move the default back — even though it starts after that
+    route and so carries a fresh spoken snapshot."""
+    env = env_factory(active="claude")
+    nav = RoundNavigator()
+    gate = threading.Event()
+    rts = {"claude": FakeRuntime("claude", env, review_reply=SPEAK),
+           "codex": FakeRuntime("codex", env, block=gate, review_reply=SPEAK)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it")
+        wait_idle(events, 1)                            # claude ran; the review is now blocked in codex
+        deadline = time.monotonic() + 5
+        while not rts["codex"].calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert rts["codex"].calls, "the review turn never started"
+        assert d.submit("/codex").startswith("default → codex")
+        gate.set()
+        wait_idle(events, 3)
+        assert starts(events)[1:] == [("codex", "review", "claude", ""), ("claude", "followup", "codex", "bad loop")]
+        assert env.store.get_session(env.session.tandem_id).active == "codex"
+    finally:
+        d.close()
+
+
+def test_the_mirror_round_reviews_on_claude_and_follows_up_on_codex(env_factory):
+    env = env_factory(active="codex")
+    nav = RoundNavigator(harness="claude")
+    rts = {"claude": FakeRuntime("claude", env, review_reply=SPEAK), "codex": FakeRuntime("codex", env, review_reply=SPEAK)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it")
+        wait_idle(events, 3)
+        assert starts(events) == [("codex", "", "", ""), ("claude", "review", "codex", ""),
+                                  ("codex", "followup", "claude", "bad loop")]
+        assert rts["claude"].calls[0][3] == SCHEMA and isinstance(rts["claude"].last_answers, DenyAll)
+        assert rts["codex"].calls[1][1].startswith("[tandem navigator] claude reviewed your previous turn")
+        assert env.store.get_session(env.session.tandem_id).active == "codex"
+    finally:
+        d.close()
