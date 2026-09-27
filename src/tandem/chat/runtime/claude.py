@@ -57,42 +57,48 @@ def _tool_paths(name: str, inp) -> tuple[str, ...]:
     return ()
 
 
-def snippet_diff(name: str, inp: dict, cap: int) -> str:
-    """The diff of an Edit/MultiEdit/Write from its input alone — no file
-    is read. A snippet diff: `@@ edit @@` hunks with no line numbers, `Write`
-    as a new file. Capped to `cap` lines while it is built; "" at cap 0."""
-    if cap <= 0 or not isinstance(inp, dict):
-        return ""
-    out: list[str] = []
+_DIFF_TOOLS = ("Edit", "Write", "MultiEdit")   # NotebookEdit has no text to diff
 
-    def add(line: str) -> bool:
-        if len(out) >= cap:
-            return False
-        out.append(line)
-        return True
+
+def snippet_diff(name: str, inp: dict, cap: int) -> tuple[str, int]:
+    """(diff, lines left out): the diff of an Edit/MultiEdit/Write from its
+    input alone — no file is read. A snippet diff: `@@ edit @@` hunks with
+    no line numbers, `Write` as a new file. Capped to `cap` lines while it
+    is built, counting what it drops; ("", 0) at cap 0 or with nothing to
+    show (an edit whose old and new text are the same)."""
+    if cap <= 0 or not isinstance(inp, dict):
+        return "", 0
+    out: list[str] = []
+    omitted = 0
+
+    def add(line: str) -> None:
+        nonlocal omitted
+        if len(out) < cap:
+            out.append(line)
+        else:
+            omitted += 1
 
     if name == "Write":
         add("@@ new file @@")
         for l in str(inp.get("content", "")).splitlines():
-            if not add("+" + l):
-                break
-        return "\n".join(out)
-    edits = inp.get("edits") if name == "MultiEdit" else [inp]
-    for i, e in enumerate(edits or [], 1):
-        if not isinstance(e, dict):
-            continue
-        head = "@@ edit" + (f" {i}" if name == "MultiEdit" else "") \
-               + (" · replace_all" if e.get("replace_all") else "") + " @@"
-        if not add(head):
-            break
-        body = difflib.unified_diff(str(e.get("old_string", "")).splitlines(),
-                                    str(e.get("new_string", "")).splitlines(), lineterm="", n=2)
-        for l in list(body)[2:]:                 # drop difflib's ---/+++ file headers
-            if l.startswith("@@"):
-                continue                         # and its numbered hunk headers
-            if not add(l):
-                return "\n".join(out)
-    return "\n".join(out)
+            add("+" + l)
+    else:
+        edits = inp.get("edits") if name == "MultiEdit" else [inp]
+        for i, e in enumerate(edits or [], 1):
+            if not isinstance(e, dict):
+                continue
+            body = [l for l in list(difflib.unified_diff(
+                str(e.get("old_string", "")).splitlines(), str(e.get("new_string", "")).splitlines(),
+                lineterm="", n=2))[2:] if not l.startswith("@@")]   # no file or numbered hunk headers
+            if not body:
+                continue                             # nothing changed: nothing to show
+            add("@@ edit" + (f" {i}" if name == "MultiEdit" else "")
+                + (" · replace_all" if e.get("replace_all") else "") + " @@")
+            for l in body:
+                add(l)
+    if not any(l[:1] in ("+", "-") for l in out):
+        return "", 0
+    return "\n".join(out), omitted
 
 
 def _text_of(content) -> str:
@@ -199,7 +205,7 @@ class ClaudeRuntime:
                     emit(ToolStarted(b.get("id", ""), f"agent/{name}" if child else name,
                                      summarize_args(b.get("name", ""), b.get("input")),
                                      paths=() if child else _tool_paths(name, b.get("input"))))
-                    if not child and name in _FILE_TOOLS and isinstance(b.get("input"), dict):
+                    if not child and name in _DIFF_TOOLS and isinstance(b.get("input"), dict):
                         self._edits[b.get("id", "")] = (name, b["input"])
                 elif b.get("type") == "text" and not child and not self._streamed_text and b.get("text"):
                     emit(TextDelta(b["text"]))       # partial messages off: paint the block
@@ -210,13 +216,14 @@ class ClaudeRuntime:
                     text = _text_of(b.get("content"))
                     err = bool(b.get("is_error"))
                     tid = b.get("tool_use_id", "")
-                    emit(ToolOutput(tid, text))
-                    emit(ToolFinished(tid, not err, first_line(text) if err else ""))
                     edit = self._edits.pop(tid, None)
-                    if edit is not None and not err:
-                        diff = snippet_diff(edit[0], edit[1], self.cfg.diff_lines)
-                        if diff:
-                            emit(FileDiff(tid, str(edit[1].get("file_path") or ""), diff))
+                    diff, omitted = snippet_diff(edit[0], edit[1], self.cfg.diff_lines) \
+                        if edit is not None and not err else ("", 0)
+                    if not diff:
+                        emit(ToolOutput(tid, text))      # the diff replaces the edit's cat -n echo
+                    emit(ToolFinished(tid, not err, first_line(text) if err else ""))
+                    if diff:
+                        emit(FileDiff(tid, str(edit[1].get("file_path") or ""), diff, omitted))
             return None
         if t == "control_request":
             req = m.get("request") or {}

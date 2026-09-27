@@ -725,3 +725,17 @@ def test_file_change_output_deltas_are_no_longer_painted_as_output():
     rt.handle({"method": "item/commandExecution/outputDelta", "params": {"threadId": "t", "turnId": "u",
                "itemId": "c2", "delta": "hi"}}, lambda _: None, rec.emit, rec)
     assert rec.events == [ToolOutput("c2", "hi")]                 # commands still stream
+
+
+def test_an_added_or_deleted_file_is_shown_as_a_diff_not_raw_content():
+    """codex's changes[].diff for `add`/`delete` is the file's content, not
+    a patch; painted as-is a `- bullet` line would come out red."""
+    rt = CodexRuntime(ChatConfig()); rec = Recorder(); rt._thread_id = "t"
+    rt.handle({"method": "item/completed", "params": {"threadId": "t", "turnId": "u", "completedAtMs": 2,
+               "item": {"type": "fileChange", "id": "c1", "status": "completed",
+                        "changes": [{"path": "/p/new.md", "kind": {"type": "add"}, "diff": "# T\n- bullet\n"},
+                                    {"path": "/p/old.md", "kind": {"type": "delete"}, "diff": "gone\n"}]}}},
+              lambda _: None, rec.emit, rec)
+    added, deleted = rec.events[-2], rec.events[-1]
+    assert added.diff.splitlines() == ["@@ new file @@", "+# T", "+- bullet"]
+    assert deleted.diff.splitlines() == ["@@ deleted @@", "-gone"]

@@ -334,12 +334,12 @@ class OpencodeRuntime:
                 call_id, tool = part.get("callID", ""), part.get("tool", "")
                 state = part.get("state") or {}
                 status = state.get("status")
+                inp = state.get("input")
+                fp = inp.get("filePath") if tool in ("edit", "write") and isinstance(inp, dict) else None
+                if isinstance(fp, str) and fp:
+                    st.paths[call_id] = fp               # on every update: the first may not carry it
                 if status in ("running", "completed", "error") and call_id not in st.started:
                     st.started.add(call_id)
-                    inp = state.get("input")
-                    fp = inp.get("filePath") if tool in ("edit", "write") and isinstance(inp, dict) else None
-                    if isinstance(fp, str) and fp:
-                        st.paths[call_id] = fp
                     emit(ToolStarted(call_id, tool, summarize_args(tool, inp),
                                      paths=(fp,) if isinstance(fp, str) and fp else ()))
                 if status in ("completed", "error"):
@@ -350,10 +350,13 @@ class OpencodeRuntime:
                     if state.get("output"):
                         emit(ToolOutput(call_id, state["output"]))
                     emit(ToolFinished(call_id, True, first_line(state.get("title") or "")))
-                    meta = state.get("metadata") if isinstance(state.get("metadata"), dict) else part.get("metadata")
-                    diff = meta.get("diff") if isinstance(meta, dict) else None
+                    diff = next((m.get("diff") for m in (state.get("metadata"), part.get("metadata"))
+                                 if isinstance(m, dict) and isinstance(m.get("diff"), str) and m.get("diff")), None)
                     if isinstance(diff, str) and diff and tool in ("edit", "write"):
-                        emit(FileDiff(call_id, st.paths.get(call_id, ""), diff))
+                        # opencode's diff carries its own Index/===/---/+++ header, which the
+                        # painter's `--- path` row already says: keep it from the first hunk
+                        hunk = diff.find("@@")
+                        emit(FileDiff(call_id, st.paths.get(call_id, ""), diff[hunk:] if hunk > 0 else diff))
                 elif status == "error":
                     emit(ToolFinished(call_id, False, first_line(state.get("error") or "error")))
         elif typ == "message.part.delta":

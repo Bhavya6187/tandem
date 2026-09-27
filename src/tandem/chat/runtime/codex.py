@@ -71,6 +71,21 @@ _REQUEST_MODELS = {
 }
 
 
+def change_diff(change) -> str:
+    """A fileChange entry as a diff: `update` carries a unified diff, but
+    `add` and `delete` carry the file's content (codex's item builder), so
+    those are written out as all-added or all-removed lines."""
+    diff = getattr(change, "diff", "") or ""
+    kind = getattr(change, "kind", None)
+    kind = getattr(kind, "root", kind)
+    kind = getattr(kind, "type", None) or (kind.get("type") if isinstance(kind, dict) else None)
+    if kind == "add":
+        return "\n".join(["@@ new file @@", *("+" + l for l in diff.splitlines())])
+    if kind == "delete":
+        return "\n".join(["@@ deleted @@", *("-" + l for l in diff.splitlines())])
+    return diff
+
+
 def strip_shell(command: str) -> str:
     """`/bin/zsh -lc 'echo hi'` -> `echo hi`: the TUI shows the inner command."""
     m = _SHELL_RE.match(command or "")
@@ -379,7 +394,7 @@ class CodexRuntime:
                 if ok:
                     for c in getattr(it, "changes", None) or []:
                         if getattr(c, "diff", ""):
-                            emit(FileDiff(it.id, getattr(c, "path", "") or "", c.diff))
+                            emit(FileDiff(it.id, getattr(c, "path", "") or "", change_diff(c)))
             elif kind in ("mcpToolCall", "webSearch", "contextCompaction"):
                 emit(ToolFinished(it.id, getattr(it, "status", "completed") != "failed", ""))
             elif kind == "agentMessage":

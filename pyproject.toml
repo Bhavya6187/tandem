@@ -25,7 +25,7 @@ dependencies = [
     "pydantic>=2.7",
     "watchdog>=4.0",
     "pexpect>=4.9",
-    "rich>=13",
+    "rich>=13.2",
 ]
 
 [project.urls]

@@ -226,7 +226,8 @@ as it comes. Every file edit shows its diff under the tool row, `+` and `-`
 coloured, capped to `diff_lines` (`0` for none): codex's is the patch it
 applied; claude's is built from the edit's old and new text and labelled
 `@@ edit @@` (`@@ new file @@` for a write), so it has no line numbers;
-opencode's is what its edit tool reports.
+opencode's is what its `edit` and `write` tools report (its `apply_patch`
+tool, used with some models, reports none yet).
 
 Routes are only ever spelled with `/`: `@` belongs to file mentions, so
 `@codex:astra` is sent as ordinary text. Model names after the `:` may be

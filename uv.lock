@@ -591,7 +591,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "pexpect", specifier = ">=4.9" },
     { name = "pydantic", specifier = ">=2.7" },
-    { name = "rich", specifier = ">=13" },
+    { name = "rich", specifier = ">=13.2" },
     { name = "watchdog", specifier = ">=4.0" },
 ]
 

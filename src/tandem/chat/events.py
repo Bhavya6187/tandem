@@ -50,6 +50,7 @@ class FileDiff:
     call_id: str
     path: str
     diff: str        # unified diff text, hunks included, no file header needed
+    omitted: int = 0  # lines the runtime already left out (a capped write): shown in the trailer
 
 
 @dataclass(frozen=True)

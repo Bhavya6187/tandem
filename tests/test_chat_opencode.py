@@ -456,3 +456,32 @@ def test_an_errored_edit_emits_no_diff_and_finishes_once():
                       "error": "denied", "metadata": {"diff": "-a\n+b"}})
     rt.handle_event(err, st, rec.emit, rec); rt.handle_event(err, st, rec.emit, rec)
     assert rec.kinds() == ["ToolStarted", "ToolFinished"]
+
+
+def test_opencodes_file_header_is_dropped_from_its_diff():
+    rt = OpencodeRuntime(ChatConfig(), base_url="http://127.0.0.1:1"); rec = Recorder()
+    st = TurnState(session_id=SID)
+    raw = "Index: /p/a.py\n===================================================================\n--- /p/a.py\n+++ /p/a.py\n@@ -1 +1 @@\n-a\n+b"
+    rt.handle_event(part_update(callID="c1", tool="edit", state={"status": "completed",
+                    "input": {"filePath": "/p/a.py"}, "output": "ok", "metadata": {"diff": raw}}), st, rec.emit, rec)
+    assert rec.events[-1] == FileDiff("c1", "/p/a.py", "@@ -1 +1 @@\n-a\n+b")
+
+
+def test_a_diff_on_the_part_is_found_when_the_state_has_other_metadata():
+    rt = OpencodeRuntime(ChatConfig(), base_url="http://127.0.0.1:1"); rec = Recorder()
+    st = TurnState(session_id=SID)
+    ev = part_update(callID="c1", tool="edit", metadata={"diff": "-a\n+b"},
+                     state={"status": "completed", "input": {"filePath": "/p/a.py"}, "output": "ok",
+                            "metadata": {"other": 1}})
+    rt.handle_event(ev, st, rec.emit, rec)
+    assert rec.events[-1] == FileDiff("c1", "/p/a.py", "-a\n+b")
+
+
+def test_a_path_that_arrives_on_a_later_update_is_used():
+    rt = OpencodeRuntime(ChatConfig(), base_url="http://127.0.0.1:1"); rec = Recorder()
+    st = TurnState(session_id=SID)
+    rt.handle_event(part_update(callID="c1", tool="edit", state={"status": "running", "input": {}}), st, rec.emit, rec)
+    rt.handle_event(part_update(callID="c1", tool="edit", state={"status": "completed",
+                    "input": {"filePath": "/p/late.py"}, "output": "ok", "metadata": {"diff": "-a\n+b"}}),
+                    st, rec.emit, rec)
+    assert rec.events[-1] == FileDiff("c1", "/p/late.py", "-a\n+b")

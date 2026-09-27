@@ -26,9 +26,26 @@ from rich.markdown import Heading, Markdown
 
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _LIST_ITEM = re.compile(r"^ {0,3}(?:[-*+]|\d{1,9}[.)])\s")
-_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
+_OSC = re.compile(r"\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)?")   # never across a row break
 _SGR = re.compile(r"\x1b\[[0-9;]*m")
 _TRAILING_PAD = re.compile(r"[ \t]+((?:\x1b\[[0-9;]*m)*)$")
+
+
+def open_fence(buffer: str) -> str | None:
+    """The opener line of a fence still open at the end of `buffer`'s
+    complete lines, or None. What a flush inside a block needs to close
+    the block and reopen it for the rest."""
+    fence: tuple[str, int] | None = None
+    opener = None
+    for line in buffer.split("\n")[:-1]:
+        m = _FENCE.match(line)
+        if fence is None:
+            if m:
+                fence, opener = (m.group(1)[0], len(m.group(1))), line
+        elif (m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]
+              and not m.group(2).strip()):
+            fence, opener = None, None
+    return opener
 
 
 def _continues(prev: str, nxt: str) -> bool:

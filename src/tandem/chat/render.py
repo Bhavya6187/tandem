@@ -29,7 +29,7 @@ from .events import (ApprovalRequest, Failure, FileDiff, QuestionRequest, Review
                      ThinkingDelta, ToolFinished, ToolOutput, ToolStarted, TurnFinished, TurnStarted,
                      offered_labels)
 from .activity import elapsed_text
-from .markdown import ready_blocks, render_markdown
+from .markdown import open_fence, ready_blocks, render_markdown
 from .runtime import first_line, summarize_args
 
 _CSI = "\x1b["
@@ -95,6 +95,8 @@ class Screen:
         self._tool_dropped: dict[str, int] = {}
         self._tool_partial: dict[str, str] = {}      # the unterminated tail of a call's output
         self._md = ""                   # the streaming reply not yet rendered (markdown on)
+        self._md_any = False            # a block has been rendered this turn
+        self._md_spaced = True          # and the last one ended on a blank row
 
     @property
     def region_rows(self) -> int:
@@ -194,9 +196,13 @@ class Screen:
 
     def _render_md(self, text: str) -> None:
         """One finished block. A block that ended on a blank line gets a
-        blank row after it: rich only spaces blocks it renders together, and
-        the streamed reply must read like the whole would."""
+        blank row after it, and a blank-only block (the blank line after a
+        code fence) is that row: rich only spaces blocks it renders
+        together, and the streamed reply must read like the whole would."""
         if not text.strip():
+            if self._md_any and not self._md_spaced:
+                self.line()
+                self._md_spaced = True
             return
         self._ensure_speaker()
         if self._col:
@@ -204,19 +210,33 @@ class Screen:
         rows = render_markdown(text, self.cols, self.color)
         if rows:
             self.print("\n".join(rows) + "\n")
-            if text.endswith("\n\n"):
+            self._md_any = True
+            self._md_spaced = text.endswith("\n\n")
+            if self._md_spaced:
                 self.line()
 
     def _flush_md(self) -> None:
         """Whatever is buffered goes out now: something else is about to
-        reach the region, or the turn is over. Idempotent."""
+        reach the region, or the turn is over. Idempotent. Inside an open
+        code fence the block is closed for rendering and the fence reopened
+        for what follows, so a note mid-block cannot turn the rest of the
+        reply into code."""
         text, self._md = self._md, ""
-        if text:
-            self._render_md(text)
+        if not text:
+            return
+        opener = open_fence(text)
+        if opener is not None:
+            marker = opener.strip()[0]
+            run = len(opener.strip()) - len(opener.strip().lstrip(marker))
+            closer = " " * (len(opener) - len(opener.lstrip())) + marker * run
+            text = text + ("" if text.endswith("\n") else "\n") + closer + "\n"
+            self._md = opener + "\n"
+        self._render_md(text)
 
     def turn_started(self, ev: TurnStarted) -> None:
         self._flush_md()
         self._md = ""                   # an interrupted turn leaves nothing for the next
+        self._md_any, self._md_spaced = False, True
         self._turn_harness = ev.harness
         self._speaker_shown = False
         self._tool_lines.clear(); self._tool_held.clear(); self._tool_dropped.clear()
@@ -243,8 +263,8 @@ class Screen:
             self._render_md(ready)
 
     def thinking_delta(self, ev: ThinkingDelta) -> None:
-        self._flush_md()
         if self.cfg.show_thinking:
+            self._flush_md()            # only when it paints: a hidden delta must not split a block
             self._ensure_speaker()
             self.print(self._dim(_safe(ev.text)))
 
@@ -311,7 +331,7 @@ class Screen:
         if cap <= 0:
             return
         self.line(self._dim(f"    --- {_safe(ev.path)}"))
-        lines = _safe(ev.diff).split("\n")
+        lines = _safe(ev.diff).rstrip("\n").split("\n")     # a trailing newline is not a line
         for raw in lines[:cap]:
             row = _clip(raw, max(1, self.cols - 5))
             if raw.startswith("+"):
@@ -322,8 +342,9 @@ class Screen:
                 self.line(self._dim("    " + row))
             else:
                 self.line("    " + row)
-        if len(lines) > cap:
-            self.line(self._dim(f"    … +{len(lines) - cap} lines"))
+        hidden = max(0, len(lines) - cap) + ev.omitted
+        if hidden:
+            self.line(self._dim(f"    … +{hidden} lines"))
 
     def _green(self, s: str) -> str:
         return f"{_CSI}32m{s}{_CSI}0m" if self.color else s
@@ -404,6 +425,7 @@ class Screen:
         """Paint transcript events the adapters already parsed, tagged by the
         harness whose file they came from (translated turns carry their own
         `[via …]` marker in the text)."""
+        self._flush_md()                # nothing buffered may land after what is painted here
         for ev in events:
             if isinstance(ev, UserMessage):
                 self.turn_started(TurnStarted(source, "", ev.text))

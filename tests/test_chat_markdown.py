@@ -122,3 +122,16 @@ def test_rendered_rows_fit_in_cells_with_wide_glyphs():
 def test_render_drops_the_trailing_empty_row():
     rows = render_markdown("just a line\n", 40, False)
     assert rows and rows[-1] != ""
+
+
+def test_open_fence_names_the_opener_line():
+    from tandem.chat.markdown import open_fence
+    assert open_fence("intro\n\n```py\nx = 1\n") == "```py"
+    assert open_fence("  ~~~~\ncode\n") == "  ~~~~"
+    assert open_fence("```\ncode\n```\nafter\n") is None
+    assert open_fence("plain\n") is None
+
+
+def test_osc_stripping_never_eats_a_row_break():
+    from tandem.chat.markdown import _OSC
+    assert "\n" in _OSC.sub("", "a\x1b]8;;http://x\nb\x07c")     # an unterminated OSC stops at the row

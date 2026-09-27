@@ -731,3 +731,63 @@ def test_file_diff_colours_when_colour_is_on():
     s.file_diff(FileDiff("c1", "a.py", "-gone\n+here"))
     t = out.text()
     assert "\x1b[31m    -gone" in t and "\x1b[32m    +here" in t
+
+
+def test_a_note_mid_fence_keeps_the_rest_of_the_code_as_code():
+    """A note (a queued prompt, /status, a Notice) flushes the buffer while
+    a fence is open; the code that follows must still be code, and the
+    prose after the closer must be prose — not swallowed into a block."""
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("```py\nprint(0)\n"))
+    s.note("queued → codex")
+    s.text_delta(TextDelta("print(1)\n```\n\nDone *now*.\n"))
+    s.turn_finished(TurnFinished("completed", ""))
+    t = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.text())
+    assert "Done now." in t and "*now*" not in t             # emphasis rendered: prose, not code
+    assert "print(1)" in t
+
+
+def test_a_hidden_thinking_delta_does_not_flush_the_reply():
+    s, out = md()                                            # show_thinking is off
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    s.text_delta(TextDelta("half a para"))
+    s.thinking_delta(ThinkingDelta("hmm"))
+    assert "half a para" not in out.text()
+
+
+def test_a_code_block_keeps_a_blank_row_before_the_prose_after_it():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi")); out.text(clear=True)
+    for ch in "Here:\n\n```py\nx = 1\n```\n\nThat sets x.\n":
+        s.text_delta(TextDelta(ch))
+    s.turn_finished(TurnFinished("completed", ""))
+    body = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out.text()).split("✓ done")[0]
+    rows = body.split("\r\n")
+    i = next(k for k, r in enumerate(rows) if "x = 1" in r)
+    j = next(k for k, r in enumerate(rows) if "That sets x." in r)
+    assert j - i >= 2 and all(not r.strip() for r in rows[i + 1:j])    # a blank row between
+
+
+def test_file_diff_counts_lines_the_runtime_already_dropped(screen_factory):
+    s, out = screen_factory(cols=60, cfg=ChatConfig(diff_lines=3))
+    s.enter(); out.text(clear=True)
+    s.file_diff(FileDiff("c1", "n.txt", "@@ new file @@\n+l0\n+l1", omitted=97))
+    assert "    … +97 lines" in out.text()
+
+
+def test_a_trailing_newline_in_a_diff_is_not_a_line(screen_factory):
+    s, out = screen_factory(cols=60, cfg=ChatConfig(diff_lines=1))
+    s.enter(); out.text(clear=True)
+    s.file_diff(FileDiff("c1", "a.py", "+x\n"))
+    assert "+x" in out.text() and "… +" not in out.text()
+
+
+def test_history_flushes_text_buffered_before_it():
+    s, out = md()
+    s.turn_started(TurnStarted("claude", "", "hi"))
+    s.text_delta(TextDelta("pending"))
+    out.text(clear=True)
+    s.history([AssistantMessage(source="claude", text="older")], "claude")
+    t = out.text()
+    assert t.index("pending") < t.index("older")
