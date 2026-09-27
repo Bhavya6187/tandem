@@ -57,6 +57,12 @@ class _Declining:
 
 _DECLINE = _Declining()
 
+# `/mode` → codex's /approvals presets: edits = "auto", plan = "read-only",
+# skip = "full access". `ask` sends nothing and inherits ~/.codex/config.toml.
+CODEX_MODES = {"edits": ("on-request", "workspace-write"),
+               "plan": ("on-request", "read-only"),
+               "skip": ("never", "danger-full-access")}
+
 _REQUEST_MODELS = {
     "item/commandExecution/requestApproval": cp.CommandExecutionRequestApprovalParams,
     "item/fileChange/requestApproval": cp.FileChangeRequestApprovalParams,
@@ -493,6 +499,7 @@ class CodexRuntime:
     def run_turn(self, session, native_id: str | None, prompt: str, model: str,
                  emit: Callable[[LiveEvent], None], answers: Answers,
                  command: str = "") -> TurnOutcome:
+        cfg = self.cfg                 # the mode this turn runs under, whatever /mode says later
         self._interrupted = False
         self._compacting = command == "compact"
         self._usage = ""
@@ -524,13 +531,14 @@ class CodexRuntime:
                 return fail(f"initialize failed: {r['error'].get('message', r['error'])}")
             self._write(proc, {"jsonrpc": "2.0", "method": "initialized"})
             overrides: dict = {}
-            if self.cfg.skip_permissions:
+            preset = CODEX_MODES.get(cfg.effective_mode)
+            if preset:
                 # a default only — an explicit codex_* key below still wins
-                overrides = {"approvalPolicy": "never", "sandbox": "danger-full-access"}
-            if self.cfg.codex_approval_policy:
-                overrides["approvalPolicy"] = self.cfg.codex_approval_policy
-            if self.cfg.codex_sandbox:
-                overrides["sandbox"] = self.cfg.codex_sandbox
+                overrides = {"approvalPolicy": preset[0], "sandbox": preset[1]}
+            if cfg.codex_approval_policy:
+                overrides["approvalPolicy"] = cfg.codex_approval_policy
+            if cfg.codex_sandbox:
+                overrides["sandbox"] = cfg.codex_sandbox
             if native_id:
                 params = cp.ThreadResumeParams(threadId=native_id, cwd=session.cwd, **overrides)
                 r = self._call(proc, q, "thread/resume", params.model_dump(by_alias=True, exclude_none=True), emit, answers)
