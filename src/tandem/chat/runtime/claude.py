@@ -114,7 +114,7 @@ def _text_of(content) -> str:
 # and bounded — the diff it would reach for with git is already in its prompt
 REVIEW_ARGS = ["--permission-mode", "default",
                "--allowedTools", "Read", "Grep", "Glob",
-               "--disallowedTools", "Edit", "Write", "MultiEdit", "NotebookEdit", "Agent", "Task",
+               "--disallowedTools", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "Agent", "Task",
                "--max-turns", "4"]
 
 

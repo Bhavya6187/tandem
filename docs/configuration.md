@@ -293,7 +293,9 @@ land in both transcripts, and when it flags something the reviewed harness
 takes one more turn, with the verdict as its prompt, before you type again.
 One round per reviewed turn; the follow-up is not reviewed. It costs one
 navigator turn per reviewed turn, plus one executor turn when the navigator
-speaks, and the window is busy for the length of the review.
+speaks, and the window is busy for the length of the review. The claude
+review turn denies Bash and every editing tool; MCP tools your settings
+allow are not blocked.
 
 For a single launch, pass `--review` instead: the harness not taking the
 first prompt becomes the navigator (the configured one when it is not the

@@ -537,7 +537,7 @@ def test_argv_for_a_review_turn_is_read_only_with_the_schema_and_no_fork():
     assert argv.count("--permission-mode") == 1
     assert argv[argv.index("--permission-mode") + 1] == "default"
     i = argv.index("--allowedTools"); assert argv[i + 1:i + 4] == ["Read", "Grep", "Glob"]
-    j = argv.index("--disallowedTools"); assert argv[j + 1:j + 7] == ["Edit", "Write", "MultiEdit", "NotebookEdit", "Agent", "Task"]
+    j = argv.index("--disallowedTools"); assert argv[j + 1:j + 8] == ["Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "Agent", "Task"]
     assert argv[argv.index("--max-turns") + 1] == "4"
     assert argv[argv.index("--json-schema") + 1] == '{"type": "object"}'
 
