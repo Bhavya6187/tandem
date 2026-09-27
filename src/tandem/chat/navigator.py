@@ -416,9 +416,9 @@ class Navigator:
     note — in bar and prompt mode. In turn mode the review is a dispatcher
     turn: `turn_ended` hands the facts to `dispatch` and `settle_round`
     takes the verdict back. `turn_ended` is called on the dispatcher's
-    worker after sync and returns at once; the review runs on this object's
-    own thread and posts ReviewStarted / ReviewFinished through the window's
-    queue."""
+    worker after sync and returns at once. In bar and prompt mode the review
+    runs on this object's own thread and posts ReviewStarted / ReviewFinished
+    through the window's queue; in turn mode see `settle_round`."""
 
     def __init__(self, harness: str, cfg, reviewer: Reviewer, post: Callable[[LiveEvent], None],
                  log: NavigatorLog, *, headroom: Callable[[], bool] = lambda: True,

@@ -306,8 +306,8 @@ configured navigator off for one launch. Both apply to `tandem` and
 `tandem resume` only; the native frame has no navigator.
 
 ```bash
-tandem --review                 # claude executes, codex follows and comments
-tandem --on codex --review      # codex executes, claude follows and comments
+tandem --review                 # claude executes; codex reviews each turn as a shared turn and claude acts on a concern
+tandem --on codex --review      # codex executes; claude reviews each turn as a shared turn and codex acts on a concern
 tandem resume <id> --no-review  # this launch without the configured navigator
 ```
 

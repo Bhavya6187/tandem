@@ -163,7 +163,7 @@ _review_option = click.option(
 
 
 def _reviewer(executing: str, participants: list[str], cfg) -> str:
-    """Who follows and comments under `--review`: the configured navigator
+    """Who reviews under `--review`: the configured navigator
     when it is not the harness taking the first prompt, else the first of
     claude and codex that is a participant and not that harness. A navigator
     never reviews its own turns, so the executing harness is passed over."""
