@@ -268,7 +268,10 @@ claude_setting_sources = ["user", "project", "local"]   # what headless claude l
 # navigator = "codex"          # default "": off. A second harness reviews each substantive turn
 # navigator_model = ""         # model pin for the review turn; "" = that harness's default
 # navigator_deliver = "bar"    # "bar": the note is shown to you and rides only prompts you route to
-#                              # the navigator; "prompt": it also rides your next prompt to any harness
+#                              # the navigator; "prompt": it also rides your next prompt to any harness;
+#                              # "turn": the review runs as a turn on the navigator's shared session,
+#                              # synced into the other transcript, and a concern starts one follow-up
+#                              # turn on the harness it reviewed (what `tandem --review` uses)
 # navigator_headroom = 20      # no reviews when the navigator's 5h window has under this % left
 # navigator_interval = 180     # seconds between spoken notes
 ```
@@ -282,6 +285,15 @@ reviewed turn's conversation and diff to the navigator's vendor after every
 turn, on that account's quota.** It is off unless you set it. `/note` shows
 the pending note, `/note dismiss` drops it, `/note good` and `/note bad`
 record whether it helped (see `tandem navigator log`).
+
+With `navigator_deliver = "turn"` (what `tandem --review` selects for one
+launch) the review is not a private aside: it runs as a real turn on the
+navigator's own session, so its prompt, the files it read and its verdict
+land in both transcripts, and when it flags something the reviewed harness
+takes one more turn, with the verdict as its prompt, before you type again.
+One round per reviewed turn; the follow-up is not reviewed. It costs one
+navigator turn per reviewed turn, plus one executor turn when the navigator
+speaks, and the window is busy for the length of the review.
 
 For a single launch, pass `--review` instead: the harness not taking the
 first prompt becomes the navigator (the configured one when it is not the
