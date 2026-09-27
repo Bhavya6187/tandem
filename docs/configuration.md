@@ -247,6 +247,8 @@ tool_output_lines = 8        # lines of tool output shown per call (rest elided)
 history_turns = 50           # turns painted from the transcript at startup
 show_thinking = false        # reasoning summaries, dimmed
 bell = true                  # ring when a turn needs an answer, or ends after 15 s or more
+markdown = true              # render replies as markdown, a paragraph or code block at a time
+diff_lines = 40              # lines of each file edit's diff shown under its tool row (0 = none)
 # mode = "ask"               # ask | edits | plan | skip: the initial /mode; --[no-]skip-permissions
 #                            # and the top-level skip_permissions still count (flag > mode > key)
 claude_setting_sources = ["user", "project", "local"]   # what headless claude loads

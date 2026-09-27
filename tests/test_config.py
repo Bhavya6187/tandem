@@ -424,3 +424,21 @@ def test_effective_mode_honours_a_bare_skip_permissions_flag():
     # must keep meaning "skip" to the runtimes
     assert ChatConfig(skip_permissions=True).effective_mode == "skip"
     assert ChatConfig(mode="plan").effective_mode == "plan"
+
+
+# -- markdown and diff_lines -------------------------------------------------------
+
+
+def test_markdown_and_diff_lines_default_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("TANDEM_HOME", str(tmp_path / ".tandem"))
+    cfg = load_chat_config()
+    assert cfg.markdown is True and cfg.diff_lines == 40
+
+
+def test_markdown_and_diff_lines_from_the_chat_table(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch, "[chat]\nmarkdown = false\ndiff_lines = 12\n")
+    cfg = load_chat_config()
+    assert cfg.markdown is False and cfg.diff_lines == 12
+    _write_config(tmp_path, monkeypatch, '[chat]\nmarkdown = "no"\ndiff_lines = -3\n')
+    cfg = load_chat_config()
+    assert cfg.markdown is True and cfg.diff_lines == 0          # forgiving: bad type → default, clamp at 0
