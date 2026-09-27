@@ -469,6 +469,22 @@ def test_history_paints_normalized_events(screen):
     assert "  ▸ Bash pytest\r\n    12 passed\r\n" in t
 
 
+def test_history_paints_a_synced_review_prompt_as_its_header_not_the_diff(screen):
+    s, out = screen
+    s.enter(); out.text(clear=True)
+    review = ("[tandem navigator] You are reviewing the assistant turn immediately above this "
+              "message, which ran on claude. It touched: s.py.\n\ndiff --git a/s.py b/s.py\n+SECRET_DIFF_LINE")
+    s.history([
+        UserMessage(source="codex", text=review),
+        AssistantMessage(source="codex", text='{"verdict": "clean"}'),
+        UserMessage(source="codex", text="[tandem navigator] codex reviewed your previous turn and flagged"),
+    ], source="codex")
+    t = out.text()
+    assert "codex reviewing claude's turn" in t
+    assert "SECRET_DIFF_LINE" not in t and "You are reviewing" not in t
+    assert "you → codex  [tandem navigator] codex reviewed your previous turn" in t
+
+
 # -- the activity line and the closing row -------------------------------------
 
 

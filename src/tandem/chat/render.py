@@ -32,6 +32,9 @@ from .activity import elapsed_text
 from .markdown import open_fence, ready_blocks, render_markdown
 from .runtime import first_line, summarize_args
 
+# how the review prompt a turn-mode round syncs into a transcript begins
+_REVIEW_PROMPT = "[tandem navigator] You are reviewing"
+
 _CSI = "\x1b["
 _CSI_RE = re.compile(r"\x1b\[[0-9:;<=>?]*[ -/]*[@-~]")
 # Every styled painter hands `print` a pre-wrapped string, so the column has
@@ -452,7 +455,14 @@ class Screen:
         self._flush_md(final=True)      # nothing buffered may land after what is painted here
         for ev in events:
             if isinstance(ev, UserMessage):
-                self.turn_started(TurnStarted(source, "", ev.text))
+                if ev.text.startswith(_REVIEW_PROMPT):
+                    # a synced review prompt is tandem's text plus the whole
+                    # diff: paint the header a live review paints instead
+                    m = re.search(r"which ran on (\w+)\.", ev.text)
+                    self.turn_started(TurnStarted(source, "", "", kind="review",
+                                                  peer=m.group(1) if m else "the other"))
+                else:
+                    self.turn_started(TurnStarted(source, "", ev.text))
             elif isinstance(ev, AssistantMessage):
                 self._turn_harness = source
                 if self.cfg.markdown:
