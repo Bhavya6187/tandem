@@ -115,7 +115,7 @@ class Dispatcher:
         return self.store.get_pin(self.session.tandem_id, harness)
 
     def set_cfg(self, cfg) -> None:
-        """The window's `/skip-permissions`. A runtime reads its cfg as a turn
+        """The window's `/mode` (and its `/skip-permissions` alias). A runtime reads its cfg as a turn
         starts, so a turn already running keeps the one it started under."""
         for rt in self.runtimes.values():
             rt.cfg = cfg

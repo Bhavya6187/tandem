@@ -46,9 +46,12 @@ skip_permissions = true
 
 This removes the harnesses' own safety rails: commands run and files
 change without asking, and codex runs unsandboxed. Set it only if that
-is what you want. In the chat window the bar marks each slot it applies
-to with `skip-perms` (once, after the slots, when that is every slot) and
-`/status` reads `permissions skipped` while it is on, claude's questions to you (`AskUserQuestion`) still appear, and an
+is what you want. In the chat window the bar marks claude's and codex's
+slots with `skip` (opencode's with `skip?`, since the setting does not
+reach it; codex's with `cfg` when an explicit `[chat] codex_*` key decides
+instead; once, after the slots, when every slot has the same word) and
+`/status` reads `mode skip …` while it is on — it is one of the window's
+four permission modes, see `/mode` under `[chat]` below — claude's questions to you (`AskUserQuestion`) still appear, and an
 explicit `[chat] codex_approval_policy` / `codex_sandbox` still wins over
 the switch for codex. opencode is
 untouched — it has no such flag, and its permissions live in its own
@@ -72,7 +75,8 @@ tandem native resume --skip-permissions
 ```
 
 Inside a chat window, `/skip-permissions` flips it for that window —
-`/skip-permissions on` / `off` to say which way. It takes effect from the
+`/skip-permissions on` / `off` to say which way (they are `/mode skip` and
+`/mode ask`). It takes effect from the
 next turn (a turn already running keeps the mode it started under) and,
 like the flag, is never written to the config or saved with the session.
 `tandem native` has no such switch: there the harness was launched with
@@ -183,8 +187,21 @@ prompts off or on from the next turn — see
 [`skip_permissions`](#skip_permissions--no-permission-prompts-in-claude-and-codex)),
 `/compact` (compact the default harness's conversation: claude runs its
 built-in, codex `thread/compact/start`, opencode `summarize` with the
-pinned model or the last reply's) and `/model` (list the default
-harness's models; `/model NAME` is `/harness:NAME`). Typing `/` opens a
+pinned model or the last reply's), `/model` (list the default
+harness's models; `/model NAME` is `/harness:NAME`) and `/mode
+[ask|edits|plan|skip]` (the permission mode from the next turn; `/mode`
+alone prints it, `/skip-permissions on|off` is `/mode skip|ask`). `ask` is
+each harness's own default; `edits` lets edits apply without asking
+(claude `acceptEdits`; codex `on-request` in a `workspace-write` sandbox;
+opencode has no such mode and shows `edits?`); `plan` plans without
+changing files (claude `plan`: it writes its plan and then asks, through
+the usual approval row, to leave plan mode — `n` keeps the turn read-only,
+`y` lets it carry on in the same turn asking for each edit; codex
+`on-request` in a `read-only` sandbox, so every write asks; opencode's
+`plan` agent, per message, so `/mode ask` on the next prompt writes again);
+`skip` is `skip_permissions`. The bar shows the mode word per slot, `?` where a
+harness runs as ask instead, and `cfg` on codex when an explicit
+`codex_approval_policy` / `codex_sandbox` decides instead. Typing `/` opens a
 picker under the draft listing these, the routes, and the default
 harness's own commands — claude's from its session, opencode's from its
 server, none for codex — narrowing by prefix; Tab or Enter completes, Esc
@@ -230,6 +247,8 @@ tool_output_lines = 8        # lines of tool output shown per call (rest elided)
 history_turns = 50           # turns painted from the transcript at startup
 show_thinking = false        # reasoning summaries, dimmed
 bell = true                  # ring when a turn needs an answer, or ends after 15 s or more
+# mode = "ask"               # ask | edits | plan | skip: the initial /mode; --[no-]skip-permissions
+#                            # and the top-level skip_permissions still count (flag > mode > key)
 claude_setting_sources = ["user", "project", "local"]   # what headless claude loads
 # codex_approval_policy = "on-request"   # default: inherit ~/.codex/config.toml
 # codex_sandbox = "workspace-write"      # default: inherit

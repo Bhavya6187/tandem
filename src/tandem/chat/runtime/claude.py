@@ -39,6 +39,8 @@ from ..events import (Answers, ApprovalRequest, LimitsUpdate, LiveEvent, Questio
 from . import child_env, first_line, summarize_args, terminate
 
 _COMMAND_TOOLS = ("Bash",)
+# `/mode` → `--permission-mode`. `ask` sends nothing: claude's own default.
+CLAUDE_MODES = {"edits": "acceptEdits", "plan": "plan", "skip": "bypassPermissions"}
 # the built-ins headless claude is verified to run from prompt text
 # (2026-09-26, 2.1.283): listed before the session has reported anything
 _BUILTINS = (Command("compact", "claude built-in: compact the conversation", "claude"),
@@ -84,15 +86,17 @@ class ClaudeRuntime:
 
     # -- argv ----------------------------------------------------------------
 
-    def argv(self, native_id: str, fresh: bool, model: str) -> list[str]:
+    def argv(self, native_id: str, fresh: bool, model: str, cfg=None) -> list[str]:
+        cfg = cfg if cfg is not None else self.cfg
         argv = [*self.binary, "-p", "--session-id" if fresh else "--resume", native_id,
                 "--input-format", "stream-json", "--output-format", "stream-json",
                 "--verbose", "--include-partial-messages",
                 "--permission-prompt-tool", "stdio",
-                "--setting-sources", ",".join(self.cfg.claude_setting_sources)]
-        if self.cfg.skip_permissions:
+                "--setting-sources", ",".join(cfg.claude_setting_sources)]
+        flag = CLAUDE_MODES.get(cfg.effective_mode)
+        if flag:
             # the prompt tool stays: AskUserQuestion still has to reach the window
-            argv += ["--permission-mode", "bypassPermissions"]
+            argv += ["--permission-mode", flag]
         if model:
             argv += ["--model", model]
         argv += self.extra_args
@@ -209,6 +213,7 @@ class ClaudeRuntime:
                  emit: Callable[[LiveEvent], None], answers: Answers,
                  command: str = "") -> TurnOutcome:
         assert native_id, "claude session ids are minted at pair time"
+        cfg = self.cfg                 # the mode this turn runs under, whatever /mode says later
         if command == "compact":
             prompt = "/compact"        # verified 2026-09-26: headless claude runs the built-in from text
         # no claude child outlives its turn, so nothing is appending to a moved file
@@ -216,7 +221,7 @@ class ClaudeRuntime:
         self._interrupted = False
         self._streamed_text = False
         proc = subprocess.Popen(
-            self.argv(native_id, fresh, model), cwd=session.cwd,
+            self.argv(native_id, fresh, model, cfg), cwd=session.cwd,
             env={**child_env(tandem_id=session.tandem_id),
                  "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"},
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -67,7 +67,9 @@ class CodexReviewer:
                 fork_id, fork_path = ops.fork_shadow(self.store, session)
         except SyncSetupError as exc:
             raise ReviewError(f"codex fork: {exc}") from exc
-        cfg = dataclasses.replace(self.cfg, skip_permissions=False,
+        # a review never inherits the window's mode: ask, with codex's own
+        # keys pinned to a read-only, never-approve sandbox
+        cfg = dataclasses.replace(self.cfg.with_mode("ask"),
                                   codex_approval_policy="never", codex_sandbox="read-only")
         rt = CodexRuntime(cfg, binary=self.binary, output_schema=schema)
         col = Collector()
@@ -116,7 +118,7 @@ class ClaudeReviewer:
         adapter = get_adapter("claude")
         if not sid or adapter.transcript_path(session.cwd, sid) is None:
             raise ReviewError("claude shadow transcript missing")
-        cfg = dataclasses.replace(self.cfg, skip_permissions=False)
+        cfg = self.cfg.with_mode("ask")            # never bypass, plan or accept-edits on a review
         extra = ["--fork-session", "--json-schema", json.dumps(schema),
                  "--permission-mode", "default",
                  "--allowedTools", *_CLAUDE_REVIEW_TOOLS,

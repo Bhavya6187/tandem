@@ -411,3 +411,23 @@ def test_compact_command_sends_the_slash_text(env):
 def test_list_models_is_the_family_aliases():
     rows = ClaudeRuntime(ChatConfig()).list_models(None)
     assert [r.split()[0] for r in rows] == ["fable", "opus", "sonnet", "haiku"]
+
+
+# -- /mode -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode, flag", [("edits", "acceptEdits"), ("plan", "plan"), ("skip", "bypassPermissions")])
+def test_argv_permission_mode_per_mode(mode, flag):
+    argv = ClaudeRuntime(ChatConfig(mode=mode)).argv("sid-1", fresh=False, model="")
+    assert argv[argv.index("--permission-mode") + 1] == flag
+    assert argv[argv.index("--permission-prompt-tool") + 1] == "stdio"   # questions still reach the window
+
+
+def test_argv_ask_mode_has_no_permission_mode():
+    assert "--permission-mode" not in ClaudeRuntime(ChatConfig(mode="ask")).argv("sid-1", fresh=False, model="")
+
+
+def test_argv_takes_the_config_it_is_given():
+    rt = ClaudeRuntime(ChatConfig(mode="plan"))
+    argv = rt.argv("sid-1", fresh=False, model="", cfg=ChatConfig(mode="skip"))
+    assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"

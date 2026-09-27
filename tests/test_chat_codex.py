@@ -643,3 +643,49 @@ def test_a_server_request_during_model_list_is_declined_not_crashed():
         "cwd": "/p", "commandActions": [], "availableDecisions": ["accept", "decline"]}},
               sent.append, rec.emit, None)
     assert sent[-1]["result"]["decision"] == "decline"
+
+
+# -- /mode -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode, policy, sandbox", [
+    ("edits", "on-request", "workspace-write"),
+    ("plan", "on-request", "read-only"),
+    ("skip", "never", "danger-full-access"),
+])
+def test_mode_sets_policy_and_sandbox(env, mode, policy, sandbox):
+    rt = CodexRuntime(ChatConfig(mode=mode), binary=[sys.executable, str(FAKE)])
+    rt.run_turn(env.session, "thread-1", "go", "", Recorder().emit, Recorder())
+    assert env.params("thread/resume") == {"threadId": "thread-1", "cwd": env.session.cwd,
+                                           "approvalPolicy": policy, "sandbox": sandbox}
+
+
+def test_ask_mode_inherits_the_codex_config(env):
+    rt = CodexRuntime(ChatConfig(mode="ask"), binary=[sys.executable, str(FAKE)])
+    rt.run_turn(env.session, "thread-1", "go", "", Recorder().emit, Recorder())
+    assert env.params("thread/resume") == {"threadId": "thread-1", "cwd": env.session.cwd}
+
+
+def test_an_explicit_codex_key_wins_over_the_mode(env):
+    rt = CodexRuntime(ChatConfig(mode="edits", codex_sandbox="read-only"), binary=[sys.executable, str(FAKE)])
+    rt.run_turn(env.session, "thread-1", "go", "", Recorder().emit, Recorder())
+    assert env.params("thread/resume") == {"threadId": "thread-1", "cwd": env.session.cwd,
+                                           "approvalPolicy": "on-request", "sandbox": "read-only"}
+
+
+def test_a_mode_change_during_startup_does_not_reach_the_running_turn(env, monkeypatch):
+    """`/mode` replaces rt.cfg from the main thread while the worker is
+    blocked in `initialize`; the overrides that follow must come from the
+    config the turn started with."""
+    rt = CodexRuntime(ChatConfig(mode="plan"), binary=[sys.executable, str(FAKE)])
+    real_call = rt._call
+
+    def call_and_flip(proc, q, method, params, emit, answers, timeout=60.0):
+        r = real_call(proc, q, method, params, emit, answers, timeout)
+        if method == "initialize":
+            rt.cfg = ChatConfig(mode="skip")           # what set_cfg does mid-startup
+        return r
+
+    monkeypatch.setattr(rt, "_call", call_and_flip)
+    rt.run_turn(env.session, "thread-1", "go", "", Recorder().emit, Recorder())
+    assert env.params("thread/resume")["sandbox"] == "read-only"       # plan, not skip

@@ -777,38 +777,53 @@ def test_the_active_harness_gets_its_meter_once_its_first_turn_wrote_the_file(en
     assert "claude" in built
 
 
-def test_status_says_when_permissions_are_skipped(env_factory):
+def test_status_always_says_the_mode(env_factory):
     env = env_factory()
-    w, *_ = make_window(env, cfg=ChatConfig(skip_permissions=True))
-    assert "permissions skipped" in w.status_line()
+    w, *_ = make_window(env, cfg=ChatConfig(mode="skip"))
+    assert "mode skip" in w.status_line() and "claude bypassPermissions" in w.status_line()
     w, *_ = make_window(env)
-    assert "permissions" not in w.status_line()
+    assert "mode ask · claude default" in w.status_line()      # the spec: /status prints the mode
 
 
-def test_the_bar_marks_the_slots_that_skip_permissions(env_factory):
-    """`/status` has to be asked; the bar is always there. opencode is never
-    marked: the setting does not reach it."""
+def test_the_bar_marks_the_mode_per_harness(env_factory):
+    """The mark is the mode word; `?` where the harness cannot honor it."""
     env = env_factory()
     env.session.participants.append("opencode")
-    w, *_ = make_window(env, cfg=ChatConfig(skip_permissions=True))
+    w, *_ = make_window(env, cfg=ChatConfig(mode="skip"))
     w.bar.cols = 100
     line = w.bar_line()
-    assert "claude ● skip-perms" in line and "codex ○ skip-perms" in line
-    assert "opencode ○ " in line and "opencode ○ skip-perms" not in line
+    assert "claude ● skip" in line and "codex ○ skip" in line and "opencode ○ skip?" in line
+    w, *_ = make_window(env, cfg=ChatConfig(mode="plan"))
+    w.bar.cols = 100
+    # every slot honours plan, so the bar says the shared word once, after the slots
+    assert "opencode ○   plan   " in w.bar_line() and "?" not in w.bar_line()
+    w, *_ = make_window(env, cfg=ChatConfig(mode="edits"))
+    w.bar.cols = 100
+    assert "claude ● edits" in w.bar_line() and "opencode ○ edits?" in w.bar_line()
     w, *_ = make_window(env)
-    assert "skip-perms" not in w.bar_line()
+    assert all(word not in w.bar_line() for word in ("ask", "skip", "plan", "edits"))
 
 
-def test_an_explicit_codex_approval_policy_keeps_codex_unmarked(env_factory):
-    """`[chat] codex_approval_policy` wins over skip_permissions in the
-    runtime, so a codex that still asks must not read as one that does not."""
+def test_the_bar_says_cfg_when_a_codex_key_overrides_the_mode(env_factory):
+    env = env_factory()
+    w, *_ = make_window(env, cfg=ChatConfig(mode="edits", codex_sandbox="read-only"))
+    w.bar.cols = 100
+    line = w.bar_line()
+    assert "claude ● edits" in line and "codex ○ cfg" in line
+
+
+def test_an_explicit_codex_approval_policy_marks_codex_cfg(env_factory):
+    """`[chat] codex_approval_policy` wins over the mode in the runtime, so
+    codex's slot says the config decides rather than claiming the mode."""
     env = env_factory()
     w, *_ = make_window(env, cfg=ChatConfig(skip_permissions=True, codex_approval_policy="on-request"))
     line = w.bar_line()
-    assert "claude ● skip-perms" in line and "codex ○ skip-perms" not in line
-    # with codex skipping too the word covers the window and is said once
+    assert "claude ● skip" in line and "codex ○ cfg" in line
     w, *_ = make_window(env, cfg=ChatConfig(skip_permissions=True, codex_approval_policy="never"))
-    assert "claude ● │ codex ○   skip-perms   " in w.bar_line()
+    assert "codex ○ cfg" in w.bar_line()                # explicit is explicit, even when it agrees
+    # with no explicit key the word covers the window and is said once
+    w, *_ = make_window(env, cfg=ChatConfig(skip_permissions=True))
+    assert "claude ● │ codex ○   skip   " in w.bar_line()
 
 
 class TestSkipPermissionsCommand:
@@ -820,12 +835,12 @@ class TestSkipPermissionsCommand:
         assert w.handle_input(b"/skip-permissions\r") is True
         assert d.submitted == []
         assert w.cfg.skip_permissions is True and d.cfgs == [w.cfg]
-        assert "permissions skipped from the next turn" in out.text()
-        assert "codex ○   skip-perms   " in out.text()          # the bar is repainted with it
+        assert "mode skip from the next turn" in out.text()
+        assert "codex ○   skip   " in out.text()                # the bar is repainted with it
         w.handle_input(b"/skip-permissions\r")
         assert w.cfg.skip_permissions is False and d.cfgs[-1] is w.cfg
-        assert "permissions asked from the next turn" in out.text()
-        assert "skip-perms" not in w.bar_line()
+        assert "mode ask from the next turn" in out.text()
+        assert "skip" not in w.bar_line()
 
     def test_on_and_off_say_which_way(self, env_factory):
         env = env_factory(); w, d, out, _ = make_window(env)
@@ -833,20 +848,69 @@ class TestSkipPermissionsCommand:
         assert w.cfg.skip_permissions is False
         w.handle_input(b"/skip-permissions on\r"); w.handle_input(b"/skip-permissions on\r")
         assert w.cfg.skip_permissions is True
-        assert "permissions skipped" in w.status_line()
+        assert "mode skip" in w.status_line()
 
     def test_the_rest_of_the_config_rides_along(self, env_factory):
         env = env_factory()
         w, d, *_ = make_window(env, cfg=ChatConfig(tool_output_lines=3, codex_sandbox="read-only"))
         w.handle_input(b"/skip-permissions on\r")
         assert d.cfgs[-1] == ChatConfig(tool_output_lines=3, codex_sandbox="read-only",
-                                        skip_permissions=True)
+                                        skip_permissions=True, mode="skip")
 
     def test_anything_else_is_a_usage_note_and_changes_nothing(self, env_factory):
         env = env_factory(); w, d, out, _ = make_window(env)
         assert w.handle_input(b"/skip-permissions maybe\r") is True
         assert "usage: /skip-permissions [on|off]" in out.text()
         assert w.cfg.skip_permissions is False and d.cfgs == [] and d.submitted == []
+
+    def test_skip_permissions_off_from_plan_lands_on_ask(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env, cfg=ChatConfig(mode="plan"))
+        w.handle_input(b"/skip-permissions off\r")
+        assert w.cfg.mode == "ask"
+
+    def test_a_bare_skip_permissions_toggles_skip_ness(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env, cfg=ChatConfig(mode="edits"))
+        w.handle_input(b"/skip-permissions\r")
+        assert w.cfg.mode == "skip"                       # edits is not skip, so the toggle goes to skip
+        w.handle_input(b"/skip-permissions\r")
+        assert w.cfg.mode == "ask"
+
+
+class TestModeCommand:
+    """`/mode [ask|edits|plan|skip]`: the window's permission mode from the
+    next turn, mapped per harness; `/skip-permissions` is its alias."""
+
+    def test_mode_alone_prints_the_mode_line(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        assert w.handle_input(b"/mode\r") is True
+        assert d.submitted == []
+        assert "mode ask · claude default · codex inherit · opencode build" in out.text()
+
+    def test_mode_sets_the_mode_from_the_next_turn(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        w.handle_input(b"/mode plan\r")
+        assert w.cfg.mode == "plan" and w.cfg.skip_permissions is False
+        assert d.cfgs[-1].mode == "plan"
+        assert "mode plan from the next turn" in out.text()
+        assert "claude plan · codex on-request/read-only · opencode plan" in out.text()
+
+    def test_mode_skip_is_the_old_skip_permissions(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        w.handle_input(b"/mode skip\r")
+        assert w.cfg.mode == "skip" and w.cfg.skip_permissions is True
+        assert "claude bypassPermissions · codex never/danger-full-access · opencode skip?" in out.text()
+
+    def test_mode_rejects_an_unknown_word(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        w.handle_input(b"/mode yolo\r")
+        assert "usage: /mode [ask|edits|plan|skip]" in out.text() and w.cfg.mode == "ask"
+
+    def test_skip_permissions_on_and_off_are_mode_skip_and_ask(self, env_factory):
+        env = env_factory(); w, d, out, _ = make_window(env)
+        w.handle_input(b"/skip-permissions on\r")
+        assert w.cfg.mode == "skip"
+        w.handle_input(b"/skip-permissions off\r")
+        assert w.cfg.mode == "ask"
 
 
 # -- the activity line, the closing row, the bell ---------------------------------
@@ -996,12 +1060,12 @@ def test_the_bar_marks_the_navigator_slot(env_factory):
     assert "codex ○ note" in w.bar_line()
 
 
-def test_the_navigator_mark_sits_beside_skip_perms(env_factory):
+def test_the_navigator_mark_sits_beside_the_mode(env_factory):
     env = env_factory()
     w, d, out, _ = make_nav_window(env, cfg=ChatConfig(skip_permissions=True))
     w.bar.cols = 120; w.navigator.running = True
     line = w.bar_line()
-    assert "codex ○ skip-perms · reviewing" in line and "claude ● skip-perms" in line
+    assert "codex ○ skip · reviewing" in line and "claude ● skip" in line
 
 
 def test_a_review_landing_while_idle_paints_at_once(env_factory):

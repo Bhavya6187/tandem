@@ -392,6 +392,7 @@ class OpencodeRuntime:
                  emit: Callable[[LiveEvent], None], answers: Answers,
                  command: str = "") -> TurnOutcome:
         assert native_id, "opencode sessions are created at pair time"
+        cfg = self.cfg                 # the mode this turn runs under, whatever /mode says later
         if model and "/" not in model:
             msg = f"opencode models are spelled provider/model, got {model!r}"
             emit(Failure(msg)); emit(TurnFinished("failed", ""))
@@ -431,6 +432,10 @@ class OpencodeRuntime:
                 if model:
                     provider, model_id = model.split("/", 1)
                     body["model"] = {"providerID": provider, "modelID": model_id}
+            if cfg.effective_mode == "plan":
+                # opencode's read-only agent; per message, never posted to
+                # /session/{id}/agent, so it cannot stick to the session
+                body["agent"] = "plan"
         self._interrupted = False
         self._session_id = native_id
         st = TurnState(session_id=native_id)

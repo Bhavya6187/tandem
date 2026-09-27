@@ -14,6 +14,7 @@ hook's failure mode is 'dispatch natively', and this module upholds it)."""
 from __future__ import annotations
 
 import tomllib
+import dataclasses
 from dataclasses import dataclass
 
 from . import paths
@@ -200,6 +201,7 @@ _CODEX_APPROVAL_POLICIES = ("untrusted", "on-request", "never")
 _CODEX_SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
 _NAVIGATORS = ("", "claude", "codex")
 _NAVIGATOR_DELIVERY = ("bar", "prompt")
+MODES = ("ask", "edits", "plan", "skip")   # the chat window's permission modes, see /mode
 
 
 def navigator_choices() -> tuple[str, ...]:
@@ -218,6 +220,7 @@ class ChatConfig:
     codex_approval_policy: str = ""     # "" = inherit ~/.codex/config.toml
     codex_sandbox: str = ""             # "" = inherit
     skip_permissions: bool = False      # the top-level key, carried to the runtimes
+    mode: str = "ask"                   # ask | edits | plan | skip; skip_permissions is mode == "skip"
     navigator: str = ""                 # "claude" | "codex"; "" = off (the default, kept off)
     navigator_model: str = ""           # model pin for the review turn; "" = the harness default
     navigator_deliver: str = "bar"      # "bar": you see it; "prompt": it also rides your next prompt
@@ -225,13 +228,35 @@ class ChatConfig:
     navigator_interval: int = 180       # seconds between spoken notes
     navigator_invalid: str = ""         # the raw `navigator` string when it was rejected (the window says so)
 
+    @property
+    def effective_mode(self) -> str:
+        """What the runtimes act on. A config built with only the legacy
+        bool (`ChatConfig(skip_permissions=True)`) still means skip."""
+        return "skip" if self.skip_permissions else self.mode
+
+    def with_mode(self, mode: str) -> "ChatConfig":
+        return dataclasses.replace(self, mode=mode, skip_permissions=mode == "skip")
+
+
+def _resolve_mode(config: dict, raw) -> str:
+    """The window's initial permission mode: the launch flag, else an
+    explicit `[chat] mode`, else the legacy top-level `skip_permissions`,
+    else ask. The flag is a bool, so it can only say skip or ask."""
+    if _skip_permissions_override is not None:
+        return "skip" if _skip_permissions_override else "ask"
+    chat_mode = raw.get("mode") if isinstance(raw, dict) else None
+    if isinstance(chat_mode, str) and chat_mode in MODES:
+        return chat_mode
+    return "skip" if config.get("skip_permissions") is True else "ask"
+
 
 def load_chat_config() -> ChatConfig:
     config = _read_config()
-    skip = _skip_permissions(config)
     raw = config.get("chat")
+    mode = _resolve_mode(config, raw)
+    skip = mode == "skip"
     if not isinstance(raw, dict):
-        return ChatConfig(skip_permissions=skip)
+        return ChatConfig(skip_permissions=skip, mode=mode)
     d = ChatConfig()
 
     def pick(key: str, kind: type, default, allowed=None):
@@ -261,6 +286,7 @@ def load_chat_config() -> ChatConfig:
                                    d.codex_approval_policy, _CODEX_APPROVAL_POLICIES),
         codex_sandbox=pick("codex_sandbox", str, d.codex_sandbox, _CODEX_SANDBOXES),
         skip_permissions=skip,
+        mode=mode,
         navigator=pick("navigator", str, d.navigator, _NAVIGATORS),
         navigator_model=pick("navigator_model", str, d.navigator_model),
         navigator_deliver=pick("navigator_deliver", str, d.navigator_deliver, _NAVIGATOR_DELIVERY),

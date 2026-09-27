@@ -19,6 +19,7 @@ class Command:
 WINDOW: tuple[Command, ...] = (
     Command("help", "list what a leading / can be", "tandem"),
     Command("status", "session id, default harness, participants, model pins", "tandem"),
+    Command("mode", "[ask|edits|plan|skip] permission mode from the next turn", "tandem"),
     Command("compact", "compact the default harness's conversation", "tandem"),
     Command("model", "list the default harness's models; /model NAME pins one", "tandem"),
     Command("skip-permissions", "[on|off] skip claude's and codex's permission prompts", "tandem"),

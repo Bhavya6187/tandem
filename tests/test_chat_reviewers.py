@@ -225,3 +225,20 @@ def test_claude_review_crash_is_a_review_error_and_releases_the_lock(claude_env,
     with pytest.raises(ReviewError):
         r.review(env.session, "", "p", {}, lock)
     assert not lock.locked()
+
+
+def test_a_claude_review_never_inherits_the_windows_mode(claude_env):
+    """The window in skip (or plan, or edits) mode must not leak into the
+    review fork: clearing the legacy bool alone would leave effective_mode
+    at the window's, and the argv would carry two --permission-mode flags."""
+    env = claude_env
+    fork_file = paths.claude_transcript_path(env.session.cwd, "fake-claude-fork")
+    fork_file.parent.mkdir(parents=True, exist_ok=True)
+    fork_file.write_text("{}\n")
+    for cfg in (ChatConfig(navigator="claude", mode="skip", skip_permissions=True),
+                ChatConfig(navigator="claude", mode="plan")):
+        r = ClaudeReviewer(cfg, binary=[sys.executable, str(FAKE_CLAUDE)])
+        r.review(env.session, "claude-x", "review please", {"type": "object"}, threading.Lock())
+        argv = env.argv()
+        assert argv.count("--permission-mode") == 1, cfg.mode
+        assert argv[argv.index("--permission-mode") + 1] == "default", cfg.mode

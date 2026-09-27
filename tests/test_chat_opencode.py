@@ -378,3 +378,42 @@ def test_a_listed_command_carries_file_mentions_as_parts(fake, proj):
     body = f.commands[-1]
     assert body["arguments"] == "@src/app.py"
     assert [p["type"] for p in body["parts"]] == ["file"] and body["parts"][0]["filename"] == "src/app.py"
+
+
+# -- /mode plan → the plan agent ---------------------------------------------------
+
+
+def test_plan_mode_sends_the_plan_agent_on_every_message(fake):
+    f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(mode="plan"), base_url=f.base_url)
+    rt.run_turn(SESSION, SID, "hi", "", rec.emit, rec)
+    rt.run_turn(SESSION, SID, "again", "", rec.emit, rec)
+    assert [p.get("agent") for p in f.posts] == ["plan", "plan"]
+
+
+def test_other_modes_send_no_agent(fake):
+    for mode in ("ask", "edits", "skip"):
+        f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(mode=mode), base_url=f.base_url)
+        rt.run_turn(SESSION, SID, "hi", "", rec.emit, rec)
+        assert "agent" not in f.posts[-1], mode
+
+
+def test_plan_mode_rides_the_command_endpoint_too(fake):
+    f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(mode="plan"), base_url=f.base_url)
+    rt.run_turn(SESSION, SID, "hi", "", rec.emit, rec)              # loads the command list
+    rt.run_turn(SESSION, SID, "/review branch main", "", rec.emit, rec)
+    assert f.commands[-1]["agent"] == "plan"
+
+
+def test_a_mode_change_during_startup_does_not_reach_the_running_turn(fake, monkeypatch):
+    """`/mode` replaces rt.cfg while the worker is inside ensure_server; the
+    body built afterwards must come from the config the turn started with."""
+    f = fake(); rec = Recorder(); rt = OpencodeRuntime(ChatConfig(mode="plan"), base_url=f.base_url)
+    real_ensure = rt.ensure_server
+
+    def ensure_and_flip(*a, **k):
+        rt.cfg = ChatConfig(mode="ask")
+        return real_ensure(*a, **k)
+
+    monkeypatch.setattr(rt, "ensure_server", ensure_and_flip)
+    rt.run_turn(SESSION, SID, "hi", "", rec.emit, rec)
+    assert f.posts[-1]["agent"] == "plan"
