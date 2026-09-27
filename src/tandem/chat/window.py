@@ -555,6 +555,8 @@ def run_chat(session, store, cfg, *, stdin_fd: int | None = None, out_fd: int | 
                         f"({', '.join(session.participants)}); off")
     dispatcher = Dispatcher(store, session, runtimes, post, answers, meters=meters,
                             add_meters=add_meters, first_turn=first_turn, navigator=navigator)
+    if navigator is not None:
+        navigator.dispatch = dispatcher.start_round   # turn mode: the round runs on the dispatcher
     bar = StatusBar(rows, cols, session.active, session.targets_for(session.active),
                     hint=route_hint(session.participants))
     win = Window(session, store, cfg, screen, composer, dispatcher, answers, bar, usage_state,

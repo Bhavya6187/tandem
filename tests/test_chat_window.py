@@ -1157,6 +1157,43 @@ def test_status_names_the_navigator(env_factory):
     assert "navigator" not in out.text()
 
 
+def test_status_names_turn_delivery(env_factory):
+    env = env_factory()
+    w, d, out, _ = make_nav_window(env, cfg=ChatConfig(navigator="codex", navigator_deliver="turn"))
+    w.handle_input(b"/status\r")
+    assert "navigator codex · turn" in out.text()
+
+
+def test_run_chat_wires_the_navigator_to_the_dispatcher(env_factory, monkeypatch):
+    """A Navigator built by run_chat can hand a round to the dispatcher: its
+    dispatch hook is the dispatcher's start_round."""
+    from tandem.chat import window as window_mod
+    built = []
+    real = window_mod.Navigator
+
+    class Spy(real):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k); built.append(self)
+
+    class StubReviewer:
+        def __init__(self, harness): self.harness = harness
+        def review(self, *a, **k): return None
+        def close(self): pass
+
+    monkeypatch.setattr(window_mod, "Navigator", Spy)
+    monkeypatch.setattr(window_mod, "make_reviewer", lambda h, cfg, store, **k: StubReviewer(h))
+    env = env_factory()
+    hermetic_frame()
+
+    def launch(**kwargs):
+        return run_chat(env.session, env.store, ChatConfig(navigator="codex", navigator_deliver="turn"), **kwargs)
+
+    code, text = drive_chat(env, launch=launch, ping=False)
+    assert code == 0 and len(built) == 1
+    assert built[0].turn_mode and built[0].dispatch is not None
+    assert built[0].dispatch.__name__ == "start_round"
+
+
 def test_run_chat_builds_a_navigator_only_for_a_participant(env_factory, monkeypatch):
     """The real loop over a pty (drive_chat): a config naming a participant
     builds one Navigator for it; one naming a harness outside the session
