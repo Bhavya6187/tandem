@@ -315,3 +315,57 @@ def test_delete_session_takes_its_cursors_and_pins(tmp_path):
         assert [r[0] for r in rows] == [kept.tandem_id]
         assert store.get_session(kept.tandem_id) is not None
         assert store.get_pin(kept.tandem_id, "claude") == "haiku"
+
+
+def test_prompts_round_trip_oldest_first_with_a_limit(tmp_path):
+    with make_store(tmp_path) as store:
+        assert store.recent_prompts("/proj", 10) == []
+        for text in ("one", "two", "three"):
+            store.add_prompt("/proj", text)
+        assert store.recent_prompts("/proj", 10) == ["one", "two", "three"]
+        assert store.recent_prompts("/proj", 2) == ["two", "three"]      # the newest two
+
+
+def test_prompts_skip_a_consecutive_duplicate_only(tmp_path):
+    with make_store(tmp_path) as store:
+        for text in ("a", "a", "b", "a"):
+            store.add_prompt("/proj", text)
+        assert store.recent_prompts("/proj", 10) == ["a", "b", "a"]
+
+
+def test_prompts_are_capped_at_500_per_cwd(tmp_path):
+    with make_store(tmp_path) as store:
+        for i in range(503):
+            store.add_prompt("/proj", f"p{i}")
+        got = store.recent_prompts("/proj", 1000)
+        assert len(got) == 500 and got[0] == "p3" and got[-1] == "p502"
+
+
+def test_prompts_are_per_cwd(tmp_path):
+    with make_store(tmp_path) as store:
+        store.add_prompt("/a", "from a")
+        store.add_prompt("/b", "from b")
+        assert store.recent_prompts("/a", 10) == ["from a"]
+        assert store.recent_prompts("/b", 10) == ["from b"]
+
+
+def test_chat_history_table_added_to_existing_db(tmp_path):
+    """An older state.db without chat_history is extended in place, not moved aside."""
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE sessions (tandem_id TEXT PRIMARY KEY, cwd TEXT NOT NULL,"
+        " active TEXT NOT NULL, participants TEXT NOT NULL,"
+        " native_session_ids TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,"
+        " last_sync_at TEXT, last_used_at TEXT);"
+    )
+    conn.execute(
+        "INSERT INTO sessions VALUES"
+        " ('abc', '/p', 'claude', '[\"claude\"]', '{}', 'now', NULL, NULL)"
+    )
+    conn.commit()
+    conn.close()
+    with StateStore(db_path=db) as store:
+        assert store.get_session("abc") is not None          # not moved aside
+        store.add_prompt("/p", "hello")
+        assert store.recent_prompts("/p", 5) == ["hello"]

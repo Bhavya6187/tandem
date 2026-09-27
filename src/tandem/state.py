@@ -49,6 +49,13 @@ CREATE TABLE IF NOT EXISTS chat_pins (
     model TEXT NOT NULL,
     PRIMARY KEY (tandem_id, harness)
 );
+CREATE TABLE IF NOT EXISTS chat_history (
+    id INTEGER PRIMARY KEY,
+    cwd TEXT NOT NULL,
+    text TEXT NOT NULL,
+    ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_history_cwd ON chat_history (cwd, id);
 """
 
 
@@ -314,3 +321,33 @@ class StateStore:
                     "DELETE FROM chat_pins WHERE tandem_id = ? AND harness = ?",
                     (tandem_id, harness),
                 )
+
+    # -- chat history ---------------------------------------------------------
+
+    _HISTORY_CAP = 500
+
+    def recent_prompts(self, cwd: str, limit: int) -> list[str]:
+        """The newest `limit` prompts typed in chat windows opened in `cwd`,
+        oldest first — the order the composer's Up walks backwards through."""
+        rows = self._conn.execute(
+            "SELECT text FROM chat_history WHERE cwd = ? ORDER BY id DESC LIMIT ?",
+            (cwd, max(0, limit)),
+        ).fetchall()
+        return [r["text"] for r in reversed(rows)]
+
+    def add_prompt(self, cwd: str, text: str) -> None:
+        """Record a prompt for `cwd`. A repeat of the newest one is skipped,
+        matching the composer's own consecutive-duplicate rule, so a seeded
+        list steps like a live one; rows beyond the cap go, oldest first."""
+        with self._tx():
+            last = self._conn.execute(
+                "SELECT text FROM chat_history WHERE cwd = ? ORDER BY id DESC LIMIT 1", (cwd,)
+            ).fetchone()
+            if last is not None and last["text"] == text:
+                return
+            self._conn.execute(
+                "INSERT INTO chat_history (cwd, text, ts) VALUES (?, ?, ?)", (cwd, text, _now()))
+            self._conn.execute(
+                "DELETE FROM chat_history WHERE cwd = ? AND id NOT IN"
+                " (SELECT id FROM chat_history WHERE cwd = ? ORDER BY id DESC LIMIT ?)",
+                (cwd, cwd, self._HISTORY_CAP))

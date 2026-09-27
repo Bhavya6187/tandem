@@ -593,3 +593,255 @@ def test_dismissing_a_mention_at_the_start_does_not_close_a_later_command():
     feed(c, b"@ren\x1b")                              # a lone Esc ends the read: dismiss the @
     feed(c, b"\x7f\x7f\x7f\x7f/he")                    # then replace the word with a command
     assert [x.name for x in c.candidates] == ["help"]
+
+
+# -- seeded history and the reset rules ---------------------------------------
+
+
+def test_a_seed_is_the_initial_history():
+    c = Composer(history=["older", "newer"])
+    feed(c, b"\x1b[A"); assert c.text == "newer"
+    feed(c, b"\x1b[A"); assert c.text == "older"
+    feed(c, "\r")                                    # submitting a recalled entry
+    assert c.history == ["older", "newer", "older"]
+
+
+def test_the_seed_is_copied_not_shared():
+    seed = ["one"]
+    c = Composer(history=seed)
+    feed(c, "two\r")
+    assert seed == ["one"]
+
+
+def test_answering_a_question_resets_the_history_cursor():
+    c = Composer(history=["one", "two", "three"])
+    feed(c, b"\x1b[A"); feed(c, b"\x1b[A")           # at "two"
+    c.begin_question(QuestionRequest("Which?", ("a", "b")))
+    feed(c, "1")
+    c.end_answer()
+    feed(c, b"\x1b[A")
+    assert c.text == "three"                         # fresh from the newest, not resumed at "one"
+
+
+def test_an_approval_resets_the_history_cursor_and_the_draft():
+    c = Composer(history=["one", "two"])
+    feed(c, "dra"); feed(c, b"\x1b[A")               # draft parked, at "two"
+    c.begin_approval(ApprovalRequest("command", "ls"))
+    c.end_answer()
+    feed(c, b"\x1b[A")
+    assert c.text == "two"
+    feed(c, b"\x1b[B")
+    assert c.text == ""                              # the parked draft was dropped with the mode
+
+
+def test_recalling_a_multiline_entry_forgets_the_old_column_goal():
+    """The goal only bites when its cursor index equals the current cursor,
+    so the recalled entry is 19 chars long and the vertical move leaves the
+    goal at index 19, column 19."""
+    c = Composer(history=["abcdefghijkl\ncdefgh"])          # 19 chars
+    feed(c, "a" * 25 + "\n" + "z" * 19)                     # cursor on row 2, column 19
+    feed(c, b"\x1b[A")                                       # up: cursor index 19, goal (19, 19)
+    feed(c, b"\x01"); feed(c, b"\x1b[A")                    # line start, then Up recalls the entry
+    assert c.text == "abcdefghijkl\ncdefgh" and c.cur == 19
+    feed(c, b"\x1b[A")                                       # up inside the recalled entry, from column 6
+    assert c.cur == 6                                        # column 6 — a stale goal of 19 would give 12
+
+
+def test_a_step_through_history_keeps_the_cursor_and_the_draft():
+    """_set must not reset _hidx/_draft: repeated Up walks older, Down returns the draft."""
+    c = Composer(history=["one", "two", "three"])
+    feed(c, "dra")
+    feed(c, b"\x1b[A"); feed(c, b"\x1b[A"); feed(c, b"\x1b[A")
+    assert c.text == "one"
+    feed(c, b"\x1b[B"); feed(c, b"\x1b[B"); feed(c, b"\x1b[B")
+    assert c.text == "dra"
+
+
+# -- Ctrl-R search -------------------------------------------------------------
+
+H = ["git status", "run the tests", "fix the Tests in ci", "deploy"]
+
+
+def searching(history=H):
+    return Composer(history=list(history))
+
+
+def test_ctrl_r_enters_search_showing_the_newest_entry():
+    c = searching()
+    feed(c, "dra")
+    assert feed(c, b"\x12") == [] and c.mode == "search"
+    rows, r, col = c.rows(60, 8)
+    assert rows == ["(search) '': deploy"] and (r, col) == (0, len("(search) '"))
+
+
+def test_typing_narrows_to_the_newest_match_case_insensitively():
+    c = searching()
+    feed(c, b"\x12"); feed(c, "test")
+    rows, _, col = c.rows(60, 8)
+    assert rows == ["(search) 'test': fix the Tests in ci"]
+    assert col == len("(search) 'test")
+
+
+def test_ctrl_r_again_steps_older_and_wraps_with_a_marker():
+    c = searching()
+    feed(c, b"\x12"); feed(c, "test")
+    feed(c, b"\x12")
+    assert c.rows(60, 8)[0] == ["(search) 'test': run the tests"]
+    feed(c, b"\x12")
+    assert c.rows(60, 8)[0] == ["(search, wrapped) 'test': fix the Tests in ci"]
+
+
+def test_backspace_widens_the_query():
+    c = searching()
+    feed(c, b"\x12"); feed(c, "testx")
+    assert c.rows(60, 8)[0] == ["(search) 'testx': (no match)"]
+    feed(c, b"\x7f")
+    assert c.rows(60, 8)[0] == ["(search) 'test': fix the Tests in ci"]
+
+
+def test_enter_accepts_into_the_draft_without_submitting():
+    c = searching()
+    feed(c, b"\x12"); feed(c, "sta")
+    assert feed(c, "\r") == []
+    assert c.mode == "prompt" and c.text == "git status" and c.cur == len(c.text)
+    assert feed(c, "\r") == [Submit("git status")]
+
+
+def test_tab_accepts_like_enter():
+    c = searching()
+    feed(c, b"\x12"); feed(c, "dep"); feed(c, "\t")
+    assert c.mode == "prompt" and c.text == "deploy"
+
+
+def test_esc_cancels_and_restores_the_draft():
+    c = searching()
+    feed(c, "my draft"); feed(c, b"\x12"); feed(c, "dep")
+    assert feed(c, b"\x1b") == []                    # not an Interrupt
+    assert c.mode == "prompt" and c.text == "my draft" and c.cur == 8
+
+
+def test_no_match_then_enter_restores_the_draft():
+    c = searching()
+    feed(c, "my draft"); feed(c, b"\x12"); feed(c, "zzz")
+    assert c.rows(60, 8)[0] == ["(search) 'zzz': (no match)"]
+    feed(c, "\r")
+    assert c.text == "my draft"
+
+
+def test_an_arrow_leaves_search_keeping_the_candidate_then_moves():
+    c = searching()
+    feed(c, b"\x12"); feed(c, "dep")
+    feed(c, b"\x1b[D")                               # left
+    assert c.mode == "prompt" and c.text == "deploy" and c.cur == len("deploy") - 1
+
+
+def test_search_starts_a_fresh_history_walk_afterwards():
+    c = searching()
+    feed(c, b"\x1b[A"); feed(c, b"\x1b[A")           # at "fix the Tests in ci"
+    feed(c, b"\x12"); feed(c, b"\x1b")               # in and out of search
+    feed(c, b"\x1b[A")
+    assert c.text == "deploy"                        # newest, not resumed
+
+
+def test_ctrl_r_is_ignored_in_approval_and_question_mode():
+    c = searching()
+    c.begin_approval(ApprovalRequest("command", "ls"))
+    assert feed(c, b"\x12") == [] and c.mode == "approval"
+    c.end_answer()
+    c.begin_question(QuestionRequest("Which?", ()))
+    assert feed(c, b"\x12") == [] and c.mode == "question" and c.text == ""
+
+
+def test_ctrl_r_with_a_picker_open_closes_it_first():
+    c = Composer(history=["look at @README.md"], paths=lambda: ["README.md", "docs/"])
+    feed(c, "see @RE")
+    assert c.candidates == ["README.md"]
+    feed(c, b"\x12")
+    assert c.mode == "search" and c.candidates == []
+    feed(c, b"\x1b")
+    assert c.text == "see @RE" and c.candidates == []          # the dismissal holds
+
+
+def test_a_pasted_ctrl_r_is_literal_text():
+    c = searching()
+    feed(c, b"\x1b[200~a\x12b\x1b[201~")
+    assert c.mode == "prompt" and c.text == "a\x12b"
+
+
+def test_a_paste_while_searching_extends_the_query():
+    """Bracketed paste bypasses `_typed`; while searching it must still feed
+    the query, or Enter would replace the pasted text with the unfiltered
+    newest entry."""
+    c = searching()
+    feed(c, b"\x12")
+    feed(c, b"\x1b[200~sta\x1b[201~")
+    assert c.mode == "search" and c.rows(60, 8)[0] == ["(search) 'sta': git status"]
+    feed(c, "\r")
+    assert c.mode == "prompt" and c.text == "git status"
+
+
+def test_a_pasted_newline_in_a_search_query_is_literal():
+    c = Composer(history=["two\nlines", "one line"])
+    feed(c, b"\x12")
+    feed(c, b"\x1b[200~o\r\nl\x1b[201~")          # the terminal pastes CRLF; the draft holds LF
+    assert c.rows(60, 8)[0] == ["(search) 'o⏎l': two⏎lines"]
+
+
+def test_a_multiline_candidate_is_shown_on_one_row():
+    c = Composer(history=["first line\nsecond line"])
+    feed(c, b"\x12")
+    rows, _, _ = c.rows(60, 8)
+    assert rows == ["(search) '': first line⏎second line"]
+    feed(c, "\r")
+    assert c.text == "first line\nsecond line"
+
+
+def test_search_with_no_history_at_all():
+    c = Composer()
+    feed(c, "keep me"); feed(c, b"\x12")
+    assert c.rows(60, 8)[0] == ["(search) '': (no match)"]
+    feed(c, "\r")
+    assert c.mode == "prompt" and c.text == "keep me"
+
+
+def test_the_search_row_is_clipped_to_the_width():
+    c = Composer(history=["x" * 100])
+    feed(c, b"\x12")
+    rows, _, col = c.rows(30, 8)
+    assert len(rows[0]) == 30 and col == len("(search) '")
+
+
+def test_an_approval_arriving_mid_search_ends_the_search_first():
+    c = searching()
+    feed(c, "my draft"); feed(c, b"\x12"); feed(c, "dep")
+    c.begin_approval(ApprovalRequest("command", "ls"))
+    assert c.mode == "approval"
+    assert feed(c, "y") == [Answer("allow")]          # the key answers; it is not query text
+    c.end_answer()
+    assert c.text == "" and c.mode == "prompt"       # the answer mode's usual clean slate
+
+
+def test_ctrl_c_while_searching_aborts_the_search_and_emits_nothing():
+    """Ctrl-C is the reflex for leaving a reverse search: it must restore the
+    draft and not reach the window as a CtrlC (which denies, interrupts,
+    and counts toward quitting)."""
+    c = searching()
+    feed(c, "my draft"); feed(c, b"\x12"); feed(c, "dep")
+    assert feed(c, b"\x03") == []
+    assert c.mode == "prompt" and c.text == "my draft"
+    assert feed(c, b"\x03") == [CtrlC()]           # the next one is an ordinary Ctrl-C
+
+
+def test_esc_from_search_restores_the_cursor_position_too():
+    c = searching()
+    feed(c, "abc"); feed(c, b"\x1b[D")               # cursor between b and c
+    feed(c, b"\x12"); feed(c, "dep"); feed(c, b"\x1b")
+    assert c.text == "abc" and c.cur == 2
+
+
+def test_the_search_cursor_column_is_counted_in_cells():
+    c = Composer(history=["修复 the bug"])
+    feed(c, b"\x12"); feed(c, "修复")
+    rows, _, col = c.rows(60, 8)
+    assert rows == ["(search) '修复': 修复 the bug"]
+    assert col == len("(search) '") + 4              # two wide glyphs take four cells
