@@ -811,6 +811,17 @@ def test_policy_after_review_restores_the_pre_review_policy(tmp_path, monkeypatc
     assert codex_mod.policy_after_review(p) == {"approvalPolicy": "untrusted", "sandbox": "workspace-write"}
 
 
+def test_policy_after_review_skips_a_policy_the_protocol_does_not_know(tmp_path, monkeypatch):
+    """A rollout may hold a deprecated `on-failure` or a sandbox type the
+    pinned models reject: sending it would fail thread/resume on every turn."""
+    monkeypatch.setattr(tandem_paths, "codex_home", lambda: tmp_path / "nohome")
+    review = ("never", "read-only")
+    p = _rollout(tmp_path / "a.jsonl", [("on-failure", "read-only"), review])
+    assert codex_mod.policy_after_review(p) == codex_mod.codex_default_policy()
+    p = _rollout(tmp_path / "b.jsonl", [("on-request", "workspace-write"), ("on-failure", "weird"), review])
+    assert codex_mod.policy_after_review(p) == {"approvalPolicy": "on-request", "sandbox": "workspace-write"}
+
+
 def test_codex_default_policy_reads_config_toml_and_falls_back(tmp_path, monkeypatch):
     monkeypatch.setattr(tandem_paths, "codex_home", lambda: tmp_path)
     assert codex_mod.codex_default_policy() == {"approvalPolicy": "on-request", "sandbox": "read-only"}

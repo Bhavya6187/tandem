@@ -69,6 +69,8 @@ CODEX_MODES = {"edits": ("on-request", "workspace-write"),
 
 # what a review turn pins on the thread (and codex keeps for the turns after it)
 _REVIEW_POLICY = ("never", "read-only")
+# the values the pinned protocol models accept: anything else (a deprecated
+# `on-failure`, a sandbox type from another release) would fail validation
 _APPROVAL_POLICIES = ("untrusted", "on-request", "never")
 _SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 
@@ -124,13 +126,17 @@ def policy_after_review(path: Path | None) -> dict | None:
     review an ask-mode turn, which sends no overrides of its own, would
     inherit `never` / `read-only`. `None` unless the last recorded policy is
     the review's; otherwise the most recent earlier one that differs, or
-    codex's default when the review was the thread's first turn."""
+    codex's default when the review was the thread's first turn. A recorded
+    policy the protocol does not know is treated as absent: sending it would
+    fail thread/resume, and with no new turn_context, every turn after it."""
     if path is None:
         return None
     policies = _turn_policies(path)
     if not policies or policies[-1] != _REVIEW_POLICY:
         return None
     for approval, sandbox in reversed(policies):
+        if approval not in _APPROVAL_POLICIES or sandbox not in _SANDBOX_MODES:
+            continue
         if (approval, sandbox) != _REVIEW_POLICY:
             return {"approvalPolicy": approval, "sandbox": sandbox}
     return codex_default_policy()
