@@ -1365,3 +1365,117 @@ def test_the_mirror_round_reviews_on_claude_and_follows_up_on_codex(env_factory)
         assert env.store.get_session(env.session.tandem_id).active == "codex"
     finally:
         d.close()
+
+
+def settle_quietly(events, d, count):
+    """Wait for `count` Idles, give a stray extra one time to show, and
+    return how many arrived."""
+    wait_idle(events, count)
+    time.sleep(0.1)
+    return sum(isinstance(e, Idle) for e in events)
+
+
+def test_a_review_whose_prompt_cannot_be_built_still_settles_and_idles(env_factory, monkeypatch):
+    env = env_factory()
+    nav = RoundNavigator()
+
+    def explode(*a, **kw):
+        raise RuntimeError("git exploded")
+
+    monkeypatch.setattr(dispatch, "compute_diff", explode)
+    rts = {"claude": FakeRuntime("claude", env, review_reply=SPEAK), "codex": FakeRuntime("codex", env, review_reply=SPEAK)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it")
+        assert settle_quietly(events, d, 2) == 2
+        assert len(nav.settled) == 1 and nav.settled[0].verdict == "error"
+        assert "git exploded" in nav.settled[0].error
+        assert nav.rides == [] and rts["codex"].calls == []
+        assert not d.busy
+    finally:
+        d.close()
+
+
+class RaisingSettle(RoundNavigator):
+    def settle_round(self, facts, verdict):
+        self.settled.append(verdict)
+        raise RuntimeError("nav bug")
+
+
+def test_a_navigator_that_raises_in_settle_round_is_settled_once_and_paints_no_failure(env_factory):
+    env = env_factory()
+    nav = RaisingSettle()
+    rts = {"claude": FakeRuntime("claude", env, review_reply=SPEAK), "codex": FakeRuntime("codex", env, review_reply=SPEAK)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it")
+        assert settle_quietly(events, d, 2) == 2
+        assert len(nav.settled) == 1
+        assert not any(isinstance(e, Failure) for e in events)
+        assert nav.rides == []
+    finally:
+        d.close()
+
+
+def test_a_ridden_log_that_raises_does_not_end_the_round_in_error(env_factory):
+    env = env_factory()
+    nav = RoundNavigator()
+    nav.log = SimpleNamespace(ridden=lambda ref, to: (_ for _ in ()).throw(OSError("disk")))
+    rts = {"claude": FakeRuntime("claude", env, review_reply=SPEAK), "codex": FakeRuntime("codex", env, review_reply=SPEAK)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it")
+        assert settle_quietly(events, d, 3) == 3
+        assert starts(events)[2][1] == "followup"
+        assert [v.verdict for v in nav.settled] == ["speak"]
+        assert not any(isinstance(e, Failure) for e in events)
+    finally:
+        d.close()
+
+
+class CorruptsCodex(FakeRuntime):
+    """A claude turn that, once its own turn is written, leaves the codex
+    shadow unreadable — so the review that follows fails validation."""
+
+    def run_turn(self, session, native_id, prompt, model, emit, answers, command="", review=None):
+        outcome = super().run_turn(session, native_id, prompt, model, emit, answers, command=command, review=review)
+        self.env.codex_shadow.write_text("{not json\n")
+        return outcome
+
+
+def test_a_review_that_fails_validation_is_settled_as_an_error(env_factory):
+    env = env_factory()
+    nav = RoundNavigator()
+    rts = {"claude": CorruptsCodex("claude", env, review_reply=SPEAK), "codex": FakeRuntime("codex", env, review_reply=SPEAK)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it")
+        assert settle_quietly(events, d, 2) == 2
+        assert len(nav.settled) == 1 and nav.settled[0].verdict == "error"
+        assert nav.settled[0].error.startswith("codex transcript:")
+        assert nav.rides == [] and rts["codex"].calls == []
+    finally:
+        d.close()
+
+
+class RaisesOnReview(FakeRuntime):
+    def run_turn(self, session, native_id, prompt, model, emit, answers, command="", review=None):
+        if review is not None:
+            raise RuntimeError("boom")
+        return super().run_turn(session, native_id, prompt, model, emit, answers, command=command)
+
+
+def test_a_runtime_that_raises_on_the_review_is_settled_as_an_error(env_factory):
+    env = env_factory()
+    nav = RoundNavigator()
+    rts = {"claude": FakeRuntime("claude", env, review_reply=SPEAK), "codex": RaisesOnReview("codex", env, review_reply=SPEAK)}
+    d, events = round_setup(env, nav, rts)
+    try:
+        d.submit("fix it")
+        assert settle_quietly(events, d, 2) == 2
+        assert len(nav.settled) == 1 and nav.settled[0].verdict == "error"
+        assert "boom" in nav.settled[0].error
+        assert len(rts["claude"].calls) == 1
+        assert not d.busy
+    finally:
+        d.close()

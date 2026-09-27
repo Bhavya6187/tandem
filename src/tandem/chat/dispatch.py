@@ -325,12 +325,11 @@ class Dispatcher:
         # round's own turns carry none: the follow-up IS the note.
         note = nav.take(harness) if nav is not None and not item.command and not item.kind else None
         prompt = item.prompt + note.trailer() if note is not None else item.prompt
-        if review:
-            # the diff is read here, on the worker, after the reviewed turn synced
-            prompt = build_prompt(item.facts, compute_diff(self.session.cwd, item.facts.paths,
-                                                           item.facts.commands))
         carried = note.summary if note is not None else item.carried
-        self.emit(TurnStarted(harness, item.model, prompt if review else item.prompt,
+        # a review's prompt is built inside the try below, so a diff that
+        # cannot be read still settles the round and idles; its painter
+        # never echoes the prompt
+        self.emit(TurnStarted(harness, item.model, "" if review else item.prompt,
                               carried=carried, kind=item.kind, peer=item.peer))
         facts = None
         emit = self.emit
@@ -347,6 +346,10 @@ class Dispatcher:
             # read after the seeding: a turn that gets this far has its
             # shadows, so its review is not skipped as a first turn
             first = self._first_turn is not None
+            if review:
+                # the diff is read here, on the worker, after the reviewed turn synced
+                prompt = build_prompt(item.facts, compute_diff(self.session.cwd, item.facts.paths,
+                                                               item.facts.commands))
             if nav is not None and not item.command and not review:
                 facts = FactsCollector(harness, item.prompt, note is not None or item.kind == "followup",
                                        first, self.emit)
@@ -410,8 +413,9 @@ class Dispatcher:
             if meter is not None:
                 meter.poll()
             if review:
-                self._settle_review(item, outcome, "".join(text), started)
+                # claimed before the call: a raise inside it must not settle the round twice
                 settled = True
+                self._settle_review(item, outcome, "".join(text), started)
         except SyncSetupError as exc:
             err = f"sync: {exc}"
             self.emit(Failure(err))
@@ -466,17 +470,20 @@ class Dispatcher:
                               **base)
         else:
             verdict = parse_verdict(outcome.structured, text, **base)
-        note = nav.settle_round(item.facts, verdict)
-        if note is None:
-            return
-        executor = item.facts.harness
-        followup = Pending(executor, self.pin(executor), note.followup_prompt(),
-                           kind="followup", peer=nav.harness, carried=note.summary)
-        with self._lock:
-            if self._closed:
+        try:
+            note = nav.settle_round(item.facts, verdict)
+            if note is None:
                 return
-            self.queue.appendleft(followup)
-        nav.log.ridden(note.ref, executor)
+            executor = item.facts.harness
+            followup = Pending(executor, self.pin(executor), note.followup_prompt(),
+                               kind="followup", peer=nav.harness, carried=note.summary)
+            with self._lock:
+                if self._closed:
+                    return
+                self.queue.appendleft(followup)
+            nav.log.ridden(note.ref, executor)
+        except Exception:
+            pass                                       # the navigator must never take the window down
 
     def _fail_review(self, item: Pending, error: str, started: float) -> None:
         """A review turn that never reached the parser: the round ends on an
