@@ -12,38 +12,9 @@ import threading
 from .. import ops, paths
 from ..harness import get_adapter
 from ..sync import SyncSetupError
-from .events import ApprovalRequest, Failure, LiveEvent, QuestionRequest, TextDelta
-from .navigator import ReviewError, ReviewResult
+from .navigator import Collector, DenyAll, ReviewError, ReviewResult
 from .runtime.claude import REVIEW_ARGS, ClaudeRuntime
 from .runtime.codex import CodexRuntime
-
-
-class DenyAll:
-    """The review's Answers: nobody is at the keyboard for a fork."""
-
-    def approve(self, req: ApprovalRequest) -> str:
-        return "deny"
-
-    def answer(self, req: QuestionRequest) -> str:
-        return ""
-
-
-class Collector:
-    """The review's emit sink: the final text and any failures, nothing painted."""
-
-    def __init__(self) -> None:
-        self._parts: list[str] = []
-        self.failures: list[str] = []
-
-    def __call__(self, ev: LiveEvent) -> None:
-        if isinstance(ev, TextDelta):
-            self._parts.append(ev.text)
-        elif isinstance(ev, Failure):
-            self.failures.append(ev.message)
-
-    @property
-    def text(self) -> str:
-        return "".join(self._parts)
 
 
 class CodexReviewer:
