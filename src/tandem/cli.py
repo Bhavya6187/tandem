@@ -1130,6 +1130,8 @@ def _nav_row(rec: dict, marks: dict[str, str], *, session_id: str | None = None)
             body += f" {rec['severity']}"
         if rec.get("note"):
             body += f"  {rec['note'][:70]}"
+        if rec.get("verdict") in ("error", "off") and rec.get("error"):
+            body += f"  {str(rec['error'])[:70]}"      # why: interrupted, failed, unparsable
     parts = [when, f"{who} → {rec.get('navigator', '?')}" if rec.get("gate") == "review" else who, body]
     if session_id:
         parts.insert(1, session_id)

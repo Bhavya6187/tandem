@@ -1274,6 +1274,16 @@ def test_navigator_log_prints_the_current_sessions_records_and_a_footer(homes, o
     assert lines[-1] == "reviewed 2 · spoken 1 · skipped 1 · helpful 1/1 (100%)"
 
 
+def test_navigator_log_shows_why_a_review_ended_in_error(homes, ok_versions):
+    with StateStore() as store:
+        session = cli._pair_session(store, str(homes), "claude", ["claude", "codex"], seed=False)
+    _nav_log(homes, session.tandem_id, [dict(NAV_RECORDS[0], verdict="error", severity="", note="",
+                                             error="interrupted")])
+    r = click.testing.CliRunner().invoke(cli.main, ["navigator", "log"])
+    assert r.exit_code == 0, r.output
+    assert "error  interrupted" in r.output.splitlines()[0]
+
+
 def test_navigator_log_limit_and_all(homes, ok_versions):
     with StateStore() as store:
         s1 = cli._pair_session(store, str(homes), "claude", ["claude", "codex"], seed=False)
