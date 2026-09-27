@@ -23,11 +23,15 @@ import re
 import subprocess
 import threading
 import time
+import tomllib
 from collections import deque
+from pathlib import Path
 from typing import Callable
 
 from pydantic import ValidationError
 
+from ... import paths
+from ...harness import get_adapter
 from ...ratelimit import Window, format_windows, window_label
 from ..events import (Answers, ApprovalRequest, Failure, FileDiff, LimitsUpdate, LiveEvent,
                       QuestionRequest, TextDelta, ThinkingDelta, ToolFinished, ToolOutput,
@@ -62,6 +66,75 @@ _DECLINE = _Declining()
 CODEX_MODES = {"edits": ("on-request", "workspace-write"),
                "plan": ("on-request", "read-only"),
                "skip": ("never", "danger-full-access")}
+
+# what a review turn pins on the thread (and codex keeps for the turns after it)
+_REVIEW_POLICY = ("never", "read-only")
+_APPROVAL_POLICIES = ("untrusted", "on-request", "never")
+_SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
+
+
+def _turn_policies(path: Path) -> list[tuple[str, str]]:
+    """`(approval_policy, sandbox type)` of every turn_context record in a
+    rollout, in file order. Unparsable lines are skipped; an unreadable file
+    has none."""
+    found: list[tuple[str, str]] = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"turn_context"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict) or rec.get("type") != "turn_context":
+                    continue
+                payload = rec.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                sandbox = payload.get("sandbox_policy")
+                sandbox = sandbox.get("type") if isinstance(sandbox, dict) else sandbox
+                approval = payload.get("approval_policy")
+                if isinstance(approval, str) and isinstance(sandbox, str):
+                    found.append((approval, sandbox))
+    except OSError:
+        return []
+    return found
+
+
+def codex_default_policy() -> dict:
+    """The policy codex runs a turn under when nobody overrides it:
+    `approval_policy` / `sandbox_mode` from ~/.codex/config.toml when they
+    are values the protocol knows, else codex's built-in on-request /
+    read-only."""
+    try:
+        with open(paths.codex_home() / "config.toml", "rb") as f:
+            conf = tomllib.load(f)
+    except (OSError, ValueError):
+        conf = {}
+    approval, sandbox = conf.get("approval_policy"), conf.get("sandbox_mode")
+    return {"approvalPolicy": approval if approval in _APPROVAL_POLICIES else "on-request",
+            "sandbox": sandbox if sandbox in _SANDBOX_MODES else "read-only"}
+
+
+def policy_after_review(path: Path | None) -> dict | None:
+    """The policy to put back when the thread's last turn was a review.
+
+    codex resumes a thread with its last turn_context's policy, so after a
+    review an ask-mode turn, which sends no overrides of its own, would
+    inherit `never` / `read-only`. `None` unless the last recorded policy is
+    the review's; otherwise the most recent earlier one that differs, or
+    codex's default when the review was the thread's first turn."""
+    if path is None:
+        return None
+    policies = _turn_policies(path)
+    if not policies or policies[-1] != _REVIEW_POLICY:
+        return None
+    for approval, sandbox in reversed(policies):
+        if (approval, sandbox) != _REVIEW_POLICY:
+            return {"approvalPolicy": approval, "sandbox": sandbox}
+    return codex_default_policy()
+
 
 _REQUEST_MODELS = {
     "item/commandExecution/requestApproval": cp.CommandExecutionRequestApprovalParams,
@@ -561,7 +634,14 @@ class CodexRuntime:
                 overrides["sandbox"] = cfg.codex_sandbox
             if review is not None:
                 # a review never inherits the window's mode or its codex_* keys
-                overrides = {"approvalPolicy": "never", "sandbox": "read-only"}
+                overrides = {"approvalPolicy": _REVIEW_POLICY[0], "sandbox": _REVIEW_POLICY[1]}
+            if review is None and native_id:
+                # the only place ask mode sends a policy, and only to undo a
+                # review's: codex keeps the review's never/read-only on the
+                # thread. setdefault, so a mode preset or codex_* key still wins
+                restore = policy_after_review(get_adapter("codex").transcript_path(session.cwd, native_id))
+                for k, v in (restore or {}).items():
+                    overrides.setdefault(k, v)
             if native_id:
                 params = cp.ThreadResumeParams(threadId=native_id, cwd=session.cwd, **overrides)
                 r = self._call(proc, q, "thread/resume", params.model_dump(by_alias=True, exclude_none=True), emit, answers)
