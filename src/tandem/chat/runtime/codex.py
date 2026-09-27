@@ -36,6 +36,7 @@ from ...ratelimit import Window, format_windows, window_label
 from ..events import (Answers, ApprovalRequest, Failure, FileDiff, LimitsUpdate, LiveEvent,
                       QuestionRequest, TextDelta, ThinkingDelta, ToolFinished, ToolOutput,
                       ToolStarted, TurnFinished, TurnOutcome)
+from ..navigator import REVIEW_PROMPT_PREFIX
 from . import child_env, first_line, terminate
 from . import codex_protocol as cp
 
@@ -67,7 +68,7 @@ CODEX_MODES = {"edits": ("on-request", "workspace-write"),
                "plan": ("on-request", "read-only"),
                "skip": ("never", "danger-full-access")}
 
-# what a review turn pins on the thread (and codex keeps for the turns after it)
+# the policy a review turn pins for itself
 _REVIEW_POLICY = ("never", "read-only")
 # the values the pinned protocol models accept: anything else (a deprecated
 # `on-failure`, a sandbox type from another release) would fail validation
@@ -75,30 +76,64 @@ _APPROVAL_POLICIES = ("untrusted", "on-request", "never")
 _SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 
 
-def _turn_policies(path: Path) -> list[tuple[str, str]]:
-    """`(approval_policy, sandbox type)` of every turn_context record in a
-    rollout, in file order. Unparsable lines are skipped; an unreadable file
-    has none."""
-    found: list[tuple[str, str]] = []
+def _user_text(rec: dict) -> str | None:
+    """The text of a user prompt record: legacy `event_msg`/`user_message`
+    or paginated `response_item`/`message` with `input_text` blocks."""
+    payload = rec.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    if rec.get("type") == "event_msg" and payload.get("type") == "user_message":
+        text = payload.get("message")
+        return text if isinstance(text, str) else None
+    if rec.get("type") == "response_item" and payload.get("type") == "message" \
+            and payload.get("role") == "user":
+        content = payload.get("content")
+        if not isinstance(content, list):
+            return None
+        return "".join(b.get("text", "") for b in content
+                       if isinstance(b, dict) and b.get("type") == "input_text"
+                       and isinstance(b.get("text"), str))
+    return None
+
+
+def _turns(path: Path) -> list[tuple[str, str, bool]]:
+    """`(approval_policy, sandbox type, is_review)` of every turn_context
+    record in a rollout, in file order. Only codex writes turn_context, one
+    per turn it ran; a turn is a review when a user record after it (before
+    the next turn_context) starts, untagged, with the review prompt. Synced
+    records are tagged (`[via …]`, `[tandem]`) and never match; a user record
+    before any turn_context attaches to nothing. Unparsable lines are
+    skipped; an unreadable file has none."""
+    found: list[tuple[str, str, bool]] = []
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
-                if '"turn_context"' not in line:
+                if '"turn_context"' not in line and '"user_message"' not in line \
+                        and '"role": "user"' not in line and '"role":"user"' not in line:
                     continue
                 try:
                     rec = json.loads(line)
                 except ValueError:
                     continue
-                if not isinstance(rec, dict) or rec.get("type") != "turn_context":
+                if not isinstance(rec, dict):
                     continue
-                payload = rec.get("payload")
-                if not isinstance(payload, dict):
+                if rec.get("type") == "turn_context":
+                    payload = rec.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+                    sandbox = payload.get("sandbox_policy")
+                    sandbox = sandbox.get("type") if isinstance(sandbox, dict) else sandbox
+                    approval = payload.get("approval_policy")
+                    if isinstance(approval, str) and isinstance(sandbox, str):
+                        found.append((approval, sandbox, False))
                     continue
-                sandbox = payload.get("sandbox_policy")
-                sandbox = sandbox.get("type") if isinstance(sandbox, dict) else sandbox
-                approval = payload.get("approval_policy")
-                if isinstance(approval, str) and isinstance(sandbox, str):
-                    found.append((approval, sandbox))
+                if not found:
+                    continue
+                text = _user_text(rec)
+                # sticky: the other harness's follow-up syncs in after a
+                # review with no turn_context and must not unmark it
+                if text is not None and text.startswith(REVIEW_PROMPT_PREFIX) and not found[-1][2]:
+                    found[-1] = (found[-1][0], found[-1][1], True)
     except OSError:
         return []
     return found
@@ -120,25 +155,28 @@ def codex_default_policy() -> dict:
 
 
 def policy_after_review(path: Path | None) -> dict | None:
-    """The policy to put back when the thread's last turn was a review.
+    """The policy to put back when the thread's last codex-run turn was a
+    review.
 
     codex resumes a thread with its last turn_context's policy, so after a
     review an ask-mode turn, which sends no overrides of its own, would
-    inherit `never` / `read-only`. `None` unless the last recorded policy is
-    the review's; otherwise the most recent earlier one that differs, or
-    codex's default when the review was the thread's first turn. A recorded
-    policy the protocol does not know is treated as absent: sending it would
-    fail thread/resume, and with no new turn_context, every turn after it."""
+    inherit the review's `never` / `read-only`. `None` unless that last turn
+    actually was a review (by its prompt, not its policy); otherwise the
+    policy of the last non-review turn — exactly what codex would have
+    persisted had the review not run, so a user's own `never` / `read-only`
+    is put back as itself — or codex's default when no earlier turn has one.
+    A recorded policy the protocol does not know is treated as absent:
+    sending it would fail thread/resume, and with no new turn_context, every
+    turn after it."""
     if path is None:
         return None
-    policies = _turn_policies(path)
-    if not policies or policies[-1] != _REVIEW_POLICY:
+    turns = _turns(path)
+    if not turns or not turns[-1][2]:
         return None
-    for approval, sandbox in reversed(policies):
-        if approval not in _APPROVAL_POLICIES or sandbox not in _SANDBOX_MODES:
+    for approval, sandbox, is_review in reversed(turns):
+        if is_review or approval not in _APPROVAL_POLICIES or sandbox not in _SANDBOX_MODES:
             continue
-        if (approval, sandbox) != _REVIEW_POLICY:
-            return {"approvalPolicy": approval, "sandbox": sandbox}
+        return {"approvalPolicy": approval, "sandbox": sandbox}
     return codex_default_policy()
 
 

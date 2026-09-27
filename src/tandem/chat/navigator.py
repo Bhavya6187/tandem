@@ -122,7 +122,10 @@ SCHEMA: dict = {
     },
 }
 
-_PROMPT = """[tandem navigator] You are reviewing the assistant turn immediately above this message, which ran on {harness}. It touched: {paths}.
+# how every review prompt begins, untagged, in the reviewer's own rollout:
+# the codex runtime keys its post-review policy restore on it
+REVIEW_PROMPT_PREFIX = "[tandem navigator] You are reviewing"
+_PROMPT = REVIEW_PROMPT_PREFIX + """ the assistant turn immediately above this message, which ran on {harness}. It touched: {paths}.
 Its diff (may include earlier uncommitted changes in this tree):
 {diff}
 Speak only if you would block a pull request over something in that turn: a bug it introduced, a claim it made that its own output contradicts, a failing command it ignored. Do not restate the turn. Do not raise style.

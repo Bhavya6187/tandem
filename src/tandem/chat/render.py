@@ -31,6 +31,7 @@ from .events import (ApprovalRequest, Failure, FileDiff, QuestionRequest, Review
                      offered_labels)
 from .activity import elapsed_text
 from .markdown import open_fence, ready_blocks, render_markdown
+from .navigator import REVIEW_PROMPT_PREFIX
 from .runtime import first_line, summarize_args
 
 # how the review prompt a turn-mode round syncs into a transcript begins:
@@ -38,7 +39,7 @@ from .runtime import first_line, summarize_args
 # in every other (the tag names the reviewer)
 _VIA_HARNESS = {tag: h for h, tag in ATTRIBUTION.items() if tag.startswith("[via ")}
 _REVIEW_PROMPT = re.compile(
-    r"(?:(" + "|".join(re.escape(t) for t in _VIA_HARNESS) + r") )?\[tandem navigator\] You are reviewing")
+    r"(?:(" + "|".join(re.escape(t) for t in _VIA_HARNESS) + r") )?" + re.escape(REVIEW_PROMPT_PREFIX))
 
 _CSI = "\x1b["
 _CSI_RE = re.compile(r"\x1b\[[0-9:;<=>?]*[ -/]*[@-~]")
