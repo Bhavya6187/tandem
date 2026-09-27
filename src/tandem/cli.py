@@ -492,9 +492,10 @@ def _first_prompt(session: PairedSession) -> str | None:
     """The first thing a human typed into this session, or None if nobody
     has yet. The active harness's transcript is asked first: a turn that
     was mirrored into a shadow carries a `[via …]` tag, which is stripped
-    when it is all there is. Tandem's own seed and close notes are not
-    prompts. A harness whose transcript is missing (a zero-turn shadow)
-    defers to the next participant."""
+    when it is all there is. Tandem's own seed and close notes, and a
+    review round's `[tandem navigator]` prompts, are not prompts. A harness
+    whose transcript is missing (a zero-turn shadow) defers to the next
+    participant."""
     order = [session.active] + [h for h in session.participants if h != session.active]
     for harness in order:
         sid = session.native_id(harness)
@@ -521,6 +522,8 @@ def _first_prompt(session: PairedSession) -> str | None:
                     if text.startswith(tag):
                         text = text[len(tag):].strip()
                         break
+                if text.startswith("[tandem navigator]"):
+                    continue            # a review round's prompt, not a human's
                 if text:
                     return text
     return None

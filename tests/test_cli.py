@@ -426,6 +426,20 @@ def test_session_title_skips_tandem_notes_and_strips_attribution(homes, monkeypa
     assert "[via codex]" not in row and "[tandem]" not in row
 
 
+def test_session_title_skips_a_review_prompt(homes, monkeypatch):
+    # codex executed and claude reviewed: claude's first user message is
+    # the review prompt, not anything a human typed
+    monkeypatch.setenv("COLUMNS", "160")
+    s = _mk_session(homes, n=1)
+    _write_claude_transcript(homes, "c-1", [
+        "[tandem navigator] You are reviewing the assistant turn immediately above this message",
+        "fix it"])
+    r = click.testing.CliRunner().invoke(cli.main, ["sessions"])
+    row = _row_for(r.output, s.tandem_id)
+    assert "fix it" in row
+    assert "[tandem navigator]" not in row
+
+
 def test_session_title_falls_back_to_another_participant(homes, monkeypatch):
     # the active harness (claude) never ran: its transcript is missing;
     # codex holds the only prompt
