@@ -1,6 +1,6 @@
 """Codex CLI adapter.
 
-Session format observed on codex-cli 0.145.0, rechecked on 0.153.4
+Session format observed on codex-cli 0.145.0, rechecked on 0.153.4 and 0.166.0
 (docs/formats.md):
 - rollout: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuidv7>.jsonl
 - each line {timestamp, type, payload}; model-facing history is the
@@ -80,6 +80,10 @@ _CODEX_LINE_TYPES = {
     "session_meta", "response_item", "event_msg", "turn_context",
     "world_state", "compacted",
     "token_usage_record",  # 0.153.4 per-response accounting (not model history)
+    # 0.163: written beside the response_item/agent_message a thread sends
+    # or receives when it messages a subagent ({"trigger_turn": bool}); root
+    # threads carry it too, not only the children
+    "inter_agent_communication_metadata",
 }
 
 

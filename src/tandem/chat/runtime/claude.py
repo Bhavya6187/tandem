@@ -1,8 +1,8 @@
 """Claude Code headless: one `claude -p` process per turn over stream-json.
 
-Wire shapes (captured live 2026-09-13 on claude 2.1.265, see
-tests/golden/chat/claude_stream.jsonl; the open-source Agent SDK is the
-reference for anything not captured):
+Wire shapes (captured live 2026-09-13 on claude 2.1.265, unchanged on
+2.1.316 per the 2026-10-31 gate; see tests/golden/chat/claude_stream.jsonl;
+the open-source Agent SDK is the reference for anything not captured):
 
   client -> cli
     {"type":"user","message":{"role":"user","content":[{"type":"text","text":…}]},

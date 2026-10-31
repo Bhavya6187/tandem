@@ -397,8 +397,8 @@ class CodexRuntime:
     def _parse(self, model, params: dict, method: str, emit: Callable[[LiveEvent], None]):
         """Validate a notification against the pinned models, or report the
         drift and drop the line. Every ThreadItem discriminator is a closed
-        Literal over the 19 variants codex 0.153.4 knows, so a release that
-        adds a twentieth — or drops a required field — must cost the window
+        Literal over the 20 variants codex 0.166.0 knows, so a release that
+        adds a twenty-first — or drops a required field — must cost the window
         one line, never the whole turn."""
         try:
             return model.model_validate(params)
@@ -540,11 +540,14 @@ class CodexRuntime:
             n = self._parse(cp.ThreadTokenUsageUpdatedNotification, params, method, emit)
             if n is None:
                 return None
-            total = n.tokenUsage.total
+            # `total` is the thread's cumulative spend; the context window is
+            # filled by the last request alone, as the bar reads it from
+            # token_count's last_token_usage
+            total, last = n.tokenUsage.total, n.tokenUsage.last
             parts = []
             window = getattr(n.tokenUsage, "modelContextWindow", None)
             if window:
-                parts.append(f"{round(total.totalTokens * 100 / window)}% ctx")
+                parts.append(f"{round(last.totalTokens * 100 / window)}% ctx")
             parts.append(f"{total.inputTokens}↑ {total.outputTokens}↓")
             self._usage = " · ".join(parts)
         elif method == "account/rateLimits/updated":

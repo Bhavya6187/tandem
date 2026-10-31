@@ -14,6 +14,7 @@ def test_child_env_strips_only_claudes_own_nesting_markers():
     reach the child untouched."""
     env = child_env({"CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_SSE_PORT": "1",
                      "CLAUDE_CODE_SESSION_ID": "s", "CLAUDE_PID": "7",
+                     "CLAUDE_CODE_SESSION_ATTENDED": "1", "CLAUDE_EFFORT": "xhigh",
                      "CLAUDE_CONFIG_DIR": "/cfg", "CLAUDE_CODE_USE_BEDROCK": "1",
                      "PATH": "/bin", "HOME": "/h"})
     assert env == {"CLAUDE_CONFIG_DIR": "/cfg", "CLAUDE_CODE_USE_BEDROCK": "1",

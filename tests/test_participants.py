@@ -5,6 +5,7 @@ import pytest
 from conftest import Env3, FakeOpencodeAdapter
 from tandem import config
 from tandem.cli import _resolve_participants
+from tandem.compat import COMPAT
 from tandem.harness import ADAPTERS
 
 
@@ -128,7 +129,10 @@ def test_resolution_admits_above_ceiling_with_warning(tmp_path, monkeypatch, cap
     resolution keeps it — otherwise the next codex release would hard-brick
     tandem until a compat bump ships."""
     monkeypatch.setenv("TANDEM_HOME", str(tmp_path))
-    _fake_versions(monkeypatch, {"claude": "2.1.220", "codex": "0.160.0",
+    # the ceiling itself, read from the table so a compat bump keeps this
+    # test above it
+    ceiling = ".".join(str(x) for x in COMPAT["codex"].max_exclusive) + ".0"
+    _fake_versions(monkeypatch, {"claude": "2.1.220", "codex": ceiling,
                                  "opencode": None})
     usable, _ = _resolve_participants()
     assert usable == ["claude", "codex"]

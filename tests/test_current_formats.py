@@ -1,4 +1,5 @@
-"""Shapes observed with Claude 2.1.261 / Codex 0.153.4 (September 2026)."""
+"""Shapes observed with Claude 2.1.261 / Codex 0.153.4 (September 2026) and
+Claude 2.1.316 / Codex 0.163.0–0.166.0 (October 2026)."""
 
 import pytest
 
@@ -22,6 +23,20 @@ _CLAUDE_METADATA = [
      "totalLinesAdded": 0, "totalLinesRemoved": 0, "totalDuration": 150,
      "startTime": 1788624000000, "modelUsage": {}, "hasUnknownModelCost": False},
     {"type": "custom-title", "customTitle": "Renamed by the user"},
+    # 2.1.316: a log of each API request, written by interactive and -p runs
+    {"type": "api-request-shape", "shapeHash": "3851b3",
+     "timestamp": "2026-10-31T22:02:40.855Z", "version": "2.1.316",
+     "shape": {"system": [{"type": "text", "text": "You are Claude Code."}]}},
+    # a blob holds a message the request sent: content claude already keeps
+    # as a user entry, so translating it would duplicate the prompt
+    {"type": "api-request-blob", "hash": "cad465",
+     "message": {"role": "user", "content": [{"type": "text", "text": "the prompt again"}]}},
+    {"type": "api-request", "id": "ff5b5040-9908-4663-9577-041730c0e85d",
+     "timestamp": "2026-10-31T22:02:40.855Z", "version": "2.1.316",
+     "querySource": "repl_main_thread", "shapeHash": "3851b3",
+     "params": {"model": "claude-opus-5-5", "max_tokens": 128000},
+     "keep": [], "tail": ["cad465"], "cacheControl": {}, "requestDigest": "d1"},
+    {"type": "tools-used", "tools": ["Bash"]},
 ]
 
 
@@ -92,6 +107,24 @@ def test_parent_absent_from_the_whole_file_is_still_flagged(env_factory):
     assert problems == ["line 1: parentUuid 'never-written' not found in transcript"]
 
 
+def test_claude_request_log_does_not_block_the_next_turn(env_factory):
+    """claude 2.1.316 interleaves its request log with the conversation; the
+    chat window validates the transcript before every turn, so one unknown
+    record type failed every claude turn after a session's first (seen live
+    2026-10-31). A transcript shaped like a real one validates clean."""
+    env = env_factory()
+    sid = env.session.native_id("claude")
+    leaf = read_jsonl(env.claude_shadow)[-1]["uuid"]
+    write_line(env.claude_shadow, {**claude_user("first prompt", uuid="u-1"),
+                                   "parentUuid": leaf, "sessionId": sid})
+    for record in _CLAUDE_METADATA[-4:]:
+        write_line(env.claude_shadow, dict(record, sessionId=sid))
+    write_line(env.claude_shadow, {**claude_assistant([{"type": "text", "text": "OSPREY"}],
+                                                      uuid="a-1"),
+                                   "parentUuid": "u-1", "sessionId": sid})
+    assert validate_transcript("claude", env.claude_shadow, sid) == []
+
+
 def usage_record():
     usage = {"input_tokens": 100, "cached_input_tokens": 64,
              "cache_write_input_tokens": 0, "output_tokens": 10,
@@ -112,6 +145,36 @@ def test_codex_accounting_record_is_valid_and_not_conversation(env_factory):
     ctx = SessionContext(tandem_id="probe", cwd=env.cwd, direction="codex->claude")
     assert ReferenceConverter().translate_entry(record, ctx.direction, ctx) == []
     assert ctx.turn_index == 0
+
+
+def test_codex_subagent_messaging_marker_is_valid_and_not_conversation(env_factory):
+    """0.163 writes it in the root thread too, beside the agent_message a
+    thread sends to a subagent: seen in real threads that message their
+    workers, where it failed every later chat turn's validation."""
+    env = env_factory()
+    record = {"timestamp": "2026-10-18T21:50:11.280Z", "ordinal": 9,
+              "type": "inter_agent_communication_metadata",
+              "payload": {"trigger_turn": True}}
+    write_line(env.codex_shadow, record)
+    assert validate_transcript("codex", env.codex_shadow,
+                               env.session.native_id("codex")) == []
+    ctx = SessionContext(tandem_id="probe", cwd=env.cwd, direction="codex->claude")
+    assert ReferenceConverter().translate_entry(record, ctx.direction, ctx) == []
+    assert ctx.turn_index == 0
+
+
+def test_codex_subagent_message_is_not_an_assistant_reply():
+    """0.163 records a message between agents as response_item/agent_message;
+    the assistant's own replies stay response_item/message, so this one must
+    not reach the other side as the assistant speaking."""
+    ctx = SessionContext(tandem_id="probe", cwd="/tmp", direction="codex->claude")
+    events = ADAPTERS["codex"].parse_entry(
+        {"type": "response_item", "payload": {
+            "type": "agent_message", "id": "amsg_1", "author": "/root",
+            "recipient": "/root/worker",
+            "content": [{"type": "input_text", "text": "Message Type: NEW_TASK"}]}},
+        ctx)
+    assert [ev.kind for ev in events] == ["system"]
 
 
 def _blocks(text_parts):
@@ -210,8 +273,8 @@ def test_current_formats_survive_repeated_switches_without_echo(env_factory):
 
 def test_installed_versions_start_without_format_warning(monkeypatch, capsys):
     monkeypatch.setattr("tandem.config.load_harnesses", lambda: ["claude", "codex"])
-    for hid, version in [("claude", "2.1.261 (Claude Code)"),
-                         ("codex", "codex-cli 0.153.4")]:
+    for hid, version in [("claude", "2.1.316 (Claude Code)"),
+                         ("codex", "codex-cli 0.166.0")]:
         monkeypatch.setattr(type(ADAPTERS[hid]), "detect_version",
                             lambda self, _v=version: _v)
     assert _resolve_participants()[0] == ["claude", "codex"]

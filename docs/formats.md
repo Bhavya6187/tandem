@@ -6,15 +6,14 @@ database) the CLIs wrote. Versions observed:
 
 | CLI | version | session storage |
 | --- | --- | --- |
-| Claude Code (`claude`) | 2.1.261 | `~/.claude/projects/<munged-cwd>/<sessionId>.jsonl` |
-| Codex CLI (`codex`) | 0.153.4 | `~/.codex/sessions/YYYY/MM/DD/rollout-<YYYY-MM-DDThh-mm-ss>-<uuidv7>.jsonl` |
+| Claude Code (`claude`) | 2.1.316 | `~/.claude/projects/<munged-cwd>/<sessionId>.jsonl` |
+| Codex CLI (`codex`) | 0.166.0 | `~/.codex/sessions/YYYY/MM/DD/rollout-<YYYY-MM-DDThh-mm-ss>-<uuidv7>.jsonl` |
 | opencode (`opencode`) | 1.18.15 | one SQLite database, the path `opencode db path` prints (see below) |
 
 The versions above are the ones the formats were last re-observed on. The
-chat window (`tandem chat`) was built and gated against claude 2.1.265 and
-opencode 1.18.20 — the versions `compat.py` pins — without a format
-recheck; nothing in it depends on a format change, and the shapes below
-have not been re-read on those releases.
+chat window (`tandem chat`) was built against claude 2.1.265 and opencode
+1.18.20 and re-gated on claude 2.1.316 / codex 0.166.0 (the live gate log
+at the end); opencode's shapes have not been re-read since 1.18.15.
 
 Env overrides honored: `CLAUDE_CONFIG_DIR` (claude home), `CODEX_HOME` (codex
 home), `OPENCODE_DB` (opencode database), `TANDEM_HOME` (tandem state).
@@ -22,11 +21,19 @@ home), `OPENCODE_DB` (opencode database), `TANDEM_HOME` (tandem state).
 Rechecked 2026-09-05 on claude 2.1.261 / codex 0.153.4 (a live paired
 session plus a four-turn claude→codex→claude→codex→claude probe): the
 conversation-bearing shapes below are unchanged; the additions are marked
-"2.1.26x" / "0.153". Codex's accepted range runs through 0.159; 0.160+
-warns until rechecked. Unknown top-level record types still fail
+"2.1.26x" / "0.153". Unknown top-level record types still fail
 validation rather than being silently declared compatible.
 
-## Claude Code transcript (claude 2.1.220, rechecked 2.1.261)
+Rechecked 2026-10-31 on claude 2.1.316 / codex 0.163.0 and 0.166.0 (a
+native claude→codex→claude flip with each side naming the other's word,
+the chat live gate, a codex subagent turn, and `tandem sub` both cold and
+as a full fork): the conversation-bearing shapes are unchanged again; the
+additions are marked "2.1.316" / "0.163". The validator's allowlist is
+what broke — the chat window validates before every turn, so claude's
+request log failed every claude turn after a session's first. Codex's
+accepted range now runs through 0.169; 0.170+ warns until rechecked.
+
+## Claude Code transcript (claude 2.1.220, rechecked 2.1.261 and 2.1.316)
 
 - One JSONL file per session, named `<sessionId>.jsonl` (sessionId is a
   UUIDv4). Project directory name = cwd with every character outside
@@ -64,6 +71,16 @@ validation rather than being silently declared compatible.
   - 2.1.26x can put a `fallback` block (`{from: {model}, to: {model}}`) in
     an assistant message when the model is switched mid-session. No prose;
     tandem drops it like any other non-text assistant block.
+  - 2.1.316 logs every API request in the transcript, interactive and `-p`
+    runs alike, as uuid-less records: `api-request-shape` (`shapeHash`, the
+    request's `system` blocks), `api-request-blob` (`hash`, plus a
+    `message` the request sent — content claude already holds as a user or
+    assistant entry, so it is never translated) and `api-request` (`id`,
+    `querySource`, model `params`, `keep`/`tail` blob hashes,
+    `requestDigest`); and `tools-used` (`tools`, the tool names a turn
+    used). Same handling as the batches above. The blobs make the file
+    noticeably larger — the system prompt and injected context are stored
+    once per shape.
 - Resume: `claude --resume <sessionId>` (from the same cwd). A new session
   can be pinned to a chosen id with `claude --session-id <uuid>`.
   - 2.1.261 restores the session model on resume from the last assistant
@@ -80,7 +97,7 @@ validation rather than being silently declared compatible.
   `assistant` line with `stop_reason: "end_turn"` ends it. The `Stop` hook
   (injectable per-invocation via `--settings '<json>'`) fires at turn end.
 
-## Codex rollout (codex-cli 0.145.0, rechecked 0.153.4)
+## Codex rollout (codex-cli 0.145.0, rechecked 0.153.4 and 0.166.0)
 
 - One JSONL file per session under a date-sharded dir; the session id
   (UUIDv7) is embedded in the filename. `~/.codex/session_index.jsonl` maps
@@ -153,6 +170,14 @@ validation rather than being silently declared compatible.
     Not model history. `event_msg/token_count` still appears and remains
     the usage meter's source — never sum the two. `event_msg/
     thread_settings_applied` is likewise bookkeeping.
+  - `inter_agent_communication_metadata` (0.163) — `{"trigger_turn": bool}`,
+    written beside a `response_item/agent_message` whenever a thread sends
+    or receives a message to or from one of its subagents — in the root
+    thread as well as the child. The `agent_message` (`author`,
+    `recipient`, `input_text` plus encrypted content) is traffic between
+    agents, not the assistant's reply, which stays `response_item/message`;
+    both translate to nothing. A plain `spawn_agent` + `wait` does not
+    write either.
 - Resume: `codex resume <session-id>` (interactive) and
   `codex exec resume <session-id> "<prompt>"` (one-shot). Turn-complete
   notification hook: `-c 'notify=["/bin/sh","-c","..."]'` per invocation.
@@ -254,3 +279,28 @@ as `date · versions · PASS/FAIL · notes`.
   0.153.4; `tandem doctor` warns about the 0.154.0 install (its schema adds
   two optional fields and a description — 23 generated lines — which the
   0.153.4 models parse unchanged).
+- 2026-10-31 · claude 2.1.316 / codex 0.163.0, main `d5ff75e` · FAIL · the
+  stock script on a claude+codex pairing (no opencode configured): the
+  opencode step was refused (`opencode is not a participant`), and while it
+  waited the script kept answering the codex row that had already been
+  answered — it stays on screen with its result under it — so every `y`
+  landed in the composer. Aborted. Both are the script's own faults: the
+  opencode step now runs only when the bar names opencode, and a row counts
+  as live only while it is the last line above the separator.
+- 2026-10-31 · claude 2.1.316 / codex 0.163.0 → 0.166.0 (upgraded mid-run),
+  main `d5ff75e` · FAIL · a claude+codex variant
+  (claude → codex → claude → codex → codex subagent → codex → claude): every
+  codex step passed, including a `spawn_agent` + `wait` turn and the turn
+  after it; every claude turn after the first was refused before it ran —
+  `claude transcript: line 16: unknown entry type 'api-request-shape'; …` —
+  because 2.1.316 writes its request log into `-p` transcripts too.
+- 2026-10-31 · claude 2.1.316 / codex 0.166.0, main `d5ff75e` · FAIL (3) ·
+  the updated script, which now also checks that codex's turn reached claude
+  (claude repeats the word only codex said): the three checks of claude's
+  second turn fail on the same refusal; the other six pass.
+- 2026-10-31 · claude 2.1.316 / codex 0.166.0, branch
+  `harness-recheck-2026-10` · PASS (9/9) · opencode skipped (not a
+  participant), both approval rows answered, `OSPREY DONE` from claude,
+  0 failed turns each way, exit 0; `tandem doctor` passes every check,
+  protocol pin included. The claude+codex variant above also passed 14/14
+  with the allowlist fix alone.
