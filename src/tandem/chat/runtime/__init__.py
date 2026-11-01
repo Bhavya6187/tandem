@@ -43,6 +43,10 @@ _NESTING_MARKERS = frozenset({
     "CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SSE_PORT",
+    # seen on 2.1.316: claude drops ATTENDED itself when it starts a fresh session,
+    # and EFFORT is the parent turn's effort level, exported to its Bash and
+    # hooks (claude never reads it back)
+    "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_EFFORT",
 })
 
 

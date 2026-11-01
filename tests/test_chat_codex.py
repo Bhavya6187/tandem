@@ -359,6 +359,9 @@ def test_golden_lines_drive_the_handler():
     assert rec.events[0] == ToolStarted("call_vDe2mWf2XYJ1BjLDXSDWgLSo", "exec", "echo fixture —")
     assert rec.events[1] == ToolOutput("call_vDe2mWf2XYJ1BjLDXSDWgLSo", "fixture —\n")   # from aggregatedOutput, no delta streamed
     assert rec.events[3] == LimitsUpdate("codex", "5h 0% 7d 0%", (("5h", 0), ("7d", 0)))
+    # captured usage: total 53759 is the thread's cumulative spend, last 20708
+    # is what fills the 258400-token window — 8%, as the bar shows, not 21%
+    assert rec.events[-1].usage == "8% ctx · 53677↑ 82↓"
 
 
 def test_child_is_told_which_session_it_belongs_to(env, monkeypatch):

@@ -39,7 +39,7 @@ def test_version_parse_and_ranges():
     assert compat.version_supported("claude", "2.1.220 (Claude Code)")
     assert not compat.version_supported("claude", "3.0.0")
     assert compat.version_supported("codex", "codex-cli 0.145.0")
-    assert not compat.version_supported("codex", "codex-cli 0.160.0")
+    assert not compat.version_supported("codex", "codex-cli 0.170.0")
 
 
 def test_uuid7_is_valid_and_ordered():
@@ -60,8 +60,10 @@ def test_codex_verified_range_keeps_a_future_version_guard():
     assert compat.version_supported("claude", "2.1.220")
     assert compat.version_supported("codex", "0.150.0")
     assert compat.version_supported("codex", "0.153.4")
-    assert compat.version_supported("codex", "0.159.0")
-    assert not compat.version_supported("codex", "0.160.0")
+    assert compat.version_supported("codex", "0.163.0")
+    assert compat.version_supported("codex", "0.166.0")
+    assert compat.version_supported("codex", "0.169.9")
+    assert not compat.version_supported("codex", "0.170.0")
 
 
 def test_opencode_attribution_tag():

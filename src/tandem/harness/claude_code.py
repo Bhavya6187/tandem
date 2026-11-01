@@ -1,6 +1,6 @@
 """Claude Code adapter.
 
-Session format observed on claude 2.1.220, rechecked on 2.1.261
+Session format observed on claude 2.1.220, rechecked on 2.1.261 and 2.1.316
 (docs/formats.md):
 - transcript: ~/.claude/projects/<munged-cwd>/<sessionId>.jsonl
 - entries chained by uuid/parentUuid; types: user, assistant, attachment,
@@ -120,10 +120,15 @@ _CLAUDE_ENTRY_TYPES = {
     # uuid-less session metadata claude interleaves with the conversation;
     # none of it is portable content. 2.1.220 batch, then the 2.1.26x batch
     # (session latch, remote-bridge identity, accumulated cost/timing, a
-    # user-set title).
+    # user-set title), then the batch first seen on 2.1.316: a log of each API request
+    # (its shape, the content blobs it sent — a blob carries a `message`,
+    # but one claude already holds as a user/assistant entry — and its
+    # params) plus the tool names a turn used. Written by interactive and
+    # `-p` runs alike.
     "permission-mode", "ai-title", "file-history-delta", "pr-link",
     "relocated", "worktree-state",
     "atis-latch", "bridge-session", "cost-state", "custom-title",
+    "api-request", "api-request-blob", "api-request-shape", "tools-used",
 }
 
 
